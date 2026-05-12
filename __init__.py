@@ -10,6 +10,11 @@ Registered automatically when pcbnew scans the scripting/plugins
 directory.
 """
 
-from .chiplet_export_action import ChipletExportPlugin
-
-ChipletExportPlugin().register()
+try:
+    from .chiplet_export_action import ChipletExportPlugin
+except ImportError:
+    # pcbnew is not importable outside KiCad (unit tests, CI, headless
+    # tooling). Submodules that do not depend on pcbnew remain usable.
+    ChipletExportPlugin = None
+else:
+    ChipletExportPlugin().register()
