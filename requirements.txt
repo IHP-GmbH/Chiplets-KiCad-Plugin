@@ -1,0 +1,4 @@
+# Worker venv dependencies for hyp_to_gds.py.
+# Install into a venv outside of KiCad's bundled Python. See README.md.
+klayout>=0.28
+PyYAML>=6.0
