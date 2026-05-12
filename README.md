@@ -57,9 +57,65 @@ path before launching KiCad.
 
 The action appears as `Tools > External Plugins > Chiplet Export`.
 
+## How to use
+
+1. Open the chiplet design in pcbnew.
+2. `Tools > External Plugins > Chiplet Export`.
+3. In the dialog:
+   - **Output directory**: where the canonical artifacts land
+     (defaults to the directory holding the loaded `.kicad_pcb`).
+   - **Outputs**: tick what you want produced.
+     - *Canonical .chiplet* (default ON): GDS-bbox-corner-anchored
+       assembly file consumed by chiplet-studio.
+     - *Interposer GDS* (default ON): the interposer-only layout.
+     - *Complete assembly GDS* (default OFF): interposer plus all
+       chiplet instances flattened into a single GDS.
+     - *Keep intermediate .hyp* (default OFF): copy the metric
+       Hyperlynx file used to drive the pipeline.
+   - **Pipeline options**:
+     - *Top cell* (default `TOP`): the top-level cell name written
+       into the interposer GDS.
+     - *Connection stack* (optional): `cupillar_opt1/2/3` or
+       `sbump_sac305`. Empty means the writer keeps the dies'
+       existing connection field untouched.
+     - *LYP override* (optional): use a custom KLayout layer
+       properties file instead of the built-in `interposer_ihp.lyp`.
+     - *I/O pads JSON* (optional): sidecar JSON from
+       `kicad_pcb_to_iopads.py`; pads are rendered in the
+       interposer GDS and injected under the interposer component.
+   - **Worker Python override** (optional): bypass the discovery
+     chain by pointing at a specific interpreter.
+4. **Run**. Log lines stream into the dialog. **Cancel** terminates
+   the worker subprocess.
+
 ## Troubleshooting
 
-To be filled in once the end-to-end smoke test lands.
+**"Could not locate a Python interpreter with klayout + PyYAML"**
+
+The plugin tried every discovery step and none worked. Fix one of:
+
+- Create the recommended `.venv` (see [Install §2](#2-set-up-the-worker-venv)).
+- Set `KICAD_CHIPLET_PYTHON=/absolute/path/to/python` in the shell
+  that launches KiCad.
+- Set `KICAD_CHIPLET_PYTHON` as a project text variable in
+  *Board Setup > Text Variables*.
+
+**The Run button is disabled / never enables**
+
+A previous run is still in flight. Click **Cancel** to terminate it.
+
+**Output directory is empty / no chiplet appears**
+
+Re-check the dialog status line. Exit codes other than 0 indicate
+`hyp_to_gds.py` failed; the live log preserves stderr under
+`[stderr]` prefix.
+
+**Plugin not visible under External Plugins**
+
+KiCad scans `~/.config/kicad/9.0/scripting/plugins/` at startup.
+Verify the symlink, then in pcbnew use
+*Tools > External Plugins > Refresh Plugins*. If registration
+failed, KiCad's stdout logs the import error.
 
 ## Repository layout
 

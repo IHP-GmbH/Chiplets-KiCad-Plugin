@@ -4,7 +4,8 @@ The chiplet / Hyperlynx writer tests need `pcbnew` importable,
 which requires running pytest from the Python bundled with KiCad
 (the `kicad-builder` Docker image) rather than the host's system
 Python. Tests that only need stdlib (`test_discovery.py`,
-`test_runner.py`) run anywhere with stock pytest.
+`test_runner.py`, `test_orchestrator.py`) run anywhere with stock
+pytest.
 
 When pcbnew is unavailable, `pytest.importorskip("pcbnew")` skips
 the affected tests cleanly rather than failing.
@@ -17,6 +18,7 @@ the affected tests cleanly rather than failing.
 | `test_hyperlynx_writer.py` | Structural invariants on the .hyp emitted by `writers/hyperlynx_writer.py` (metric headers, BOARD / STACKUP / DEVICES blocks, GDS_FILE propagation, PADSTACK id consistency) | Gate 47.4 |
 | `test_discovery.py`        | Worker Python / hyp_to_gds.py discovery chain (env var, .venv, project text var, PATH probe with klayout+yaml import) | Gate 47.5 |
 | `test_runner.py`           | Async subprocess runner: line-by-line stdout/stderr callbacks, exit code propagation, cancel via `threading.Event`, env/cwd plumbing | Gate 47.5 |
+| `test_orchestrator.py`     | `build_cli_args` argv builder: default toggles, complete-assembly toggle, top-cell override, connection-stack passthrough, LYP / I/O pads paths, worker-python override exclusion | Gate 47.6 |
 | `test_io_pads.py`          | IO_CLASS field propagation (heritage from kicad_interposer_hyperlynx_to_gds) | imported with Gate 47.2 |
 | `check_complete_gds_alignment.py` | klayout regression script for canonical .chiplet output | imported with Gate 47.2 |
 

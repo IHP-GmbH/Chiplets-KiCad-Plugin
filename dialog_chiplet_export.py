@@ -2,52 +2,281 @@
 """
 Modal dialog driving the chiplet export pipeline.
 
-Iter 1 scope (lands in Gate 47.6):
-  - Output directory selection
-  - Output toggles (.hyp / interposer GDS / canonical .chiplet /
-    complete .gds / I/O pad sidecar JSON)
-  - Pipeline options (top cell, connection stack, LYP override)
-  - Live log streaming from the hyp_to_gds.py worker subprocess
-  - Worker venv discovery diagnostics
+Collects ExportOptions from the user, spawns the orchestrator on a
+worker thread so the wxFrame stays responsive, and streams log lines
+into a read-only text control via ``wx.CallAfter``.
 
-This file currently provides a stub dialog that lets the user verify
-the plugin loads and is wired into pcbnew.
+The pipeline body lives in ``pipeline/orchestrator.py``; this file
+contains only UI plumbing.
 """
+
+import threading
+from pathlib import Path
 
 import wx
 
+from .pipeline.orchestrator import ExportOptions, run_export
+
+
+_CONNECTION_TYPE_CHOICES = [
+    "",                # empty = no --connection-type flag
+    "cupillar_opt1",
+    "cupillar_opt2",
+    "cupillar_opt3",
+    "sbump_sac305",
+]
+
 
 class ChipletExportDialog(wx.Dialog):
-    """Placeholder dialog. Full UI lands in Gate 47.6."""
+    """Single-button chiplet export dialog."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, board=None, plugin_dir=None):
         super().__init__(
             parent,
             title="Chiplet Export",
-            size=(440, 220),
-            style=wx.DEFAULT_DIALOG_STYLE,
+            size=(820, 640),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
 
+        self._board = board
+        self._plugin_dir = (str(Path(plugin_dir).resolve())
+                            if plugin_dir
+                            else str(Path(__file__).resolve().parent))
+        self._cancel_event = threading.Event()
+        self._worker_thread = None
+
+        self._build_ui()
+        self.CentreOnParent()
+
+    # ------------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------------
+
+    def _build_ui(self):
         panel = wx.Panel(self)
-        sizer = wx.BoxSizer(wx.VERTICAL)
+        outer = wx.BoxSizer(wx.VERTICAL)
 
-        msg = wx.StaticText(
+        # Output directory
+        out_box = wx.StaticBoxSizer(wx.HORIZONTAL, panel, "Output directory")
+        self._out_dir_ctrl = wx.DirPickerCtrl(
+            panel, path=self._default_out_dir())
+        out_box.Add(self._out_dir_ctrl, 1, wx.EXPAND | wx.ALL, 4)
+        outer.Add(out_box, 0, wx.EXPAND | wx.ALL, 8)
+
+        # Output toggles
+        outs_box = wx.StaticBoxSizer(wx.VERTICAL, panel, "Outputs")
+        self._cb_chiplet = wx.CheckBox(panel, label="Canonical .chiplet")
+        self._cb_chiplet.SetValue(True)
+        self._cb_interposer = wx.CheckBox(panel, label="Interposer GDS")
+        self._cb_interposer.SetValue(True)
+        self._cb_complete = wx.CheckBox(
+            panel, label="Complete assembly GDS (with chiplet instances)")
+        self._cb_keep_hyp = wx.CheckBox(
+            panel, label="Keep intermediate .hyp in output directory")
+        for cb in (self._cb_chiplet, self._cb_interposer,
+                   self._cb_complete, self._cb_keep_hyp):
+            outs_box.Add(cb, 0, wx.ALL, 2)
+        outer.Add(outs_box, 0, wx.EXPAND | wx.ALL, 8)
+
+        # Pipeline options
+        opts_box = wx.StaticBoxSizer(wx.VERTICAL, panel, "Pipeline options")
+        grid = wx.FlexGridSizer(rows=4, cols=2, vgap=4, hgap=8)
+        grid.AddGrowableCol(1, 1)
+
+        grid.Add(wx.StaticText(panel, label="Top cell:"),
+                 0, wx.ALIGN_CENTER_VERTICAL)
+        self._top_cell_ctrl = wx.TextCtrl(panel, value="TOP")
+        grid.Add(self._top_cell_ctrl, 1, wx.EXPAND)
+
+        grid.Add(wx.StaticText(panel, label="Connection stack:"),
+                 0, wx.ALIGN_CENTER_VERTICAL)
+        self._conn_ctrl = wx.Choice(panel, choices=_CONNECTION_TYPE_CHOICES)
+        self._conn_ctrl.SetSelection(0)
+        grid.Add(self._conn_ctrl, 1, wx.EXPAND)
+
+        grid.Add(wx.StaticText(panel, label="LYP override (optional):"),
+                 0, wx.ALIGN_CENTER_VERTICAL)
+        self._lyp_ctrl = wx.FilePickerCtrl(
             panel,
-            label=(
-                "Chiplet Export plugin loaded.\n\n"
-                "Implementation in progress (TaskList #47, Gate 47.6).\n"
-                "Until then, use the legacy File > Export > Chiplet... "
-                "action and run hyp_to_gds.py manually."
-            ),
+            wildcard="Layer properties (*.lyp)|*.lyp|All files|*",
         )
-        sizer.Add(msg, 1, wx.ALL | wx.EXPAND, 16)
+        grid.Add(self._lyp_ctrl, 1, wx.EXPAND)
 
-        button_sizer = self.CreateButtonSizer(wx.CLOSE)
-        if button_sizer is not None:
-            sizer.Add(button_sizer, 0, wx.ALL | wx.EXPAND, 8)
+        grid.Add(wx.StaticText(panel, label="I/O pads JSON (optional):"),
+                 0, wx.ALIGN_CENTER_VERTICAL)
+        self._io_pads_ctrl = wx.FilePickerCtrl(
+            panel,
+            wildcard="JSON (*.json)|*.json|All files|*",
+        )
+        grid.Add(self._io_pads_ctrl, 1, wx.EXPAND)
 
-        panel.SetSizer(sizer)
-        self.Bind(wx.EVT_BUTTON, self._on_close, id=wx.ID_CLOSE)
+        opts_box.Add(grid, 0, wx.EXPAND | wx.ALL, 4)
+        outer.Add(opts_box, 0, wx.EXPAND | wx.ALL, 8)
+
+        # Worker python override
+        worker_box = wx.StaticBoxSizer(
+            wx.HORIZONTAL, panel,
+            "Worker Python override (optional; .venv/bin/python3 auto-detected)",
+        )
+        self._worker_ctrl = wx.FilePickerCtrl(
+            panel, wildcard="Python interpreter|*|All files|*")
+        worker_box.Add(self._worker_ctrl, 1, wx.EXPAND | wx.ALL, 4)
+        outer.Add(worker_box, 0, wx.EXPAND | wx.ALL, 8)
+
+        # Log
+        self._log_ctrl = wx.TextCtrl(
+            panel,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
+        )
+        mono = wx.Font(wx.FontInfo(10).Family(wx.FONTFAMILY_TELETYPE))
+        self._log_ctrl.SetFont(mono)
+        outer.Add(self._log_ctrl, 1, wx.EXPAND | wx.ALL, 8)
+
+        # Status + buttons
+        self._status = wx.StaticText(panel, label="Idle")
+        outer.Add(self._status, 0, wx.LEFT | wx.RIGHT, 8)
+
+        btns = wx.BoxSizer(wx.HORIZONTAL)
+        self._run_btn = wx.Button(panel, label="Run")
+        self._cancel_btn = wx.Button(panel, label="Cancel")
+        self._close_btn = wx.Button(panel, label="Close")
+        self._cancel_btn.Disable()
+        btns.AddStretchSpacer(1)
+        btns.Add(self._run_btn, 0, wx.ALL, 4)
+        btns.Add(self._cancel_btn, 0, wx.ALL, 4)
+        btns.Add(self._close_btn, 0, wx.ALL, 4)
+        outer.Add(btns, 0, wx.EXPAND | wx.ALL, 4)
+
+        self._run_btn.Bind(wx.EVT_BUTTON, self._on_run)
+        self._cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel)
+        self._close_btn.Bind(wx.EVT_BUTTON, self._on_close)
+        self.Bind(wx.EVT_CLOSE, self._on_close)
+
+        panel.SetSizer(outer)
+        outer.SetSizeHints(self)
+
+    def _default_out_dir(self):
+        if self._board is not None:
+            try:
+                board_file = self._board.GetFileName()
+                if board_file:
+                    return str(Path(board_file).parent)
+            except Exception:
+                pass
+        return str(Path.home())
+
+    # ------------------------------------------------------------------
+    # Options collection
+    # ------------------------------------------------------------------
+
+    def _collect_options(self):
+        idx = self._conn_ctrl.GetSelection()
+        if idx is None or idx < 0:
+            conn = ""
+        else:
+            conn = _CONNECTION_TYPE_CHOICES[idx]
+        return ExportOptions(
+            output_dir=self._out_dir_ctrl.GetPath(),
+            emit_chiplet=self._cb_chiplet.GetValue(),
+            emit_interposer_gds=self._cb_interposer.GetValue(),
+            emit_complete_gds=self._cb_complete.GetValue(),
+            keep_intermediate_hyp=self._cb_keep_hyp.GetValue(),
+            top_cell=self._top_cell_ctrl.GetValue() or "TOP",
+            connection_type=conn,
+            lyp_override=self._lyp_ctrl.GetPath() or "",
+            io_pads_json=self._io_pads_ctrl.GetPath() or "",
+            worker_python_override=self._worker_ctrl.GetPath() or "",
+        )
+
+    # ------------------------------------------------------------------
+    # Event handlers
+    # ------------------------------------------------------------------
+
+    def _on_run(self, _event):
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            return
+
+        options = self._collect_options()
+        if not options.output_dir:
+            wx.MessageBox(
+                "Please select an output directory.",
+                "Chiplet Export",
+                wx.OK | wx.ICON_WARNING,
+            )
+            return
+        if not (options.emit_chiplet or options.emit_interposer_gds
+                or options.emit_complete_gds):
+            wx.MessageBox(
+                "Enable at least one output (canonical .chiplet, "
+                "interposer GDS, or complete-assembly GDS).",
+                "Chiplet Export",
+                wx.OK | wx.ICON_WARNING,
+            )
+            return
+
+        self._log_ctrl.SetValue("")
+        self._cancel_event = threading.Event()
+        self._set_running(True)
+
+        def _worker():
+            result = run_export(
+                self._board, options, self._plugin_dir,
+                on_log=self._append_log_safe,
+                cancel_event=self._cancel_event,
+            )
+            wx.CallAfter(self._on_done, result)
+
+        self._worker_thread = threading.Thread(target=_worker, daemon=True)
+        self._worker_thread.start()
+
+    def _on_cancel(self, _event):
+        self._cancel_event.set()
+        self._set_status("Cancelling ...")
+        self._cancel_btn.Disable()
 
     def _on_close(self, _event):
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            self._cancel_event.set()
         self.EndModal(wx.ID_CLOSE)
+
+    def _on_done(self, result):
+        self._set_running(False)
+        if result.error:
+            self._append_log("ERROR: " + result.error)
+            self._set_status("Error: " + _short(result.error))
+        elif result.cancelled:
+            self._set_status("Cancelled")
+        elif result.exit_code == 0:
+            self._set_status("Done (exit 0)")
+            for label, path in (("chiplet", result.chiplet_path),
+                                ("interposer GDS", result.interposer_gds_path),
+                                ("complete GDS", result.complete_gds_path),
+                                ("intermediate hyp", result.hyp_path)):
+                if path:
+                    self._append_log("Wrote %s: %s" % (label, path))
+        else:
+            self._set_status("Failed (exit %d)" % result.exit_code)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _append_log_safe(self, line):
+        wx.CallAfter(self._append_log, line)
+
+    def _append_log(self, line):
+        self._log_ctrl.AppendText(line + "\n")
+
+    def _set_status(self, text):
+        self._status.SetLabel(text)
+
+    def _set_running(self, running):
+        self._run_btn.Enable(not running)
+        self._cancel_btn.Enable(running)
+        if running:
+            self._set_status("Running ...")
+
+
+def _short(msg, limit=80):
+    msg = msg.replace("\n", " ")
+    return msg if len(msg) <= limit else msg[:limit - 3] + "..."
