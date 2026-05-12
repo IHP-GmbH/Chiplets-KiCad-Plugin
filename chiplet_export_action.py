@@ -3,9 +3,11 @@
 ActionPlugin subclass for "Chiplet Export".
 
 Run() launches the modal dialog that drives the export pipeline.
-Dialog and writers are imported lazily so that an import error in a
-later-gate module does not break plugin registration.
+Dialog, wx and pcbnew.GetBoard are imported lazily so that an import
+error in a later-gate module does not break plugin registration.
 """
+
+from pathlib import Path
 
 import pcbnew
 
@@ -33,7 +35,15 @@ class ChipletExportPlugin(pcbnew.ActionPlugin):
         if top_levels:
             parent = top_levels[0]
 
-        dialog = ChipletExportDialog(parent)
+        try:
+            board = pcbnew.GetBoard()
+        except Exception:
+            board = None
+
+        plugin_dir = str(Path(__file__).resolve().parent)
+
+        dialog = ChipletExportDialog(
+            parent, board=board, plugin_dir=plugin_dir)
         try:
             dialog.ShowModal()
         finally:
