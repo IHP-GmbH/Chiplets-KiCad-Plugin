@@ -123,15 +123,20 @@ def find_worker_python(plugin_dir, board=None):
     plugin_dir = str(Path(plugin_dir).resolve())
     tried = []
 
+    # All returned paths use ``Path.absolute()`` (NOT ``resolve()``).
+    # Resolving a symlink hydrates it to the underlying interpreter
+    # which short-circuits a venv: invoking ``/usr/bin/python3.12``
+    # directly bypasses ``.venv/bin/python3``'s pyvenv.cfg lookup, so
+    # klayout/PyYAML disappear from sys.path. The exact path matters.
     env_value = os.environ.get(WORKER_ENV_VAR)
     if env_value:
         tried.append(("env %s" % WORKER_ENV_VAR, env_value))
         if _is_executable(Path(env_value)):
-            return str(Path(env_value).resolve())
+            return str(Path(env_value).absolute())
 
     venv = _venv_python(plugin_dir)
     if venv is not None:
-        return str(venv.resolve())
+        return str(venv.absolute())
     tried.append((
         "local .venv",
         str(Path(plugin_dir) / ".venv" / "bin" / "python3"),
@@ -141,13 +146,13 @@ def find_worker_python(plugin_dir, board=None):
     if proj_value:
         tried.append(("project text var %s" % WORKER_ENV_VAR, proj_value))
         if _is_executable(Path(proj_value)):
-            return str(Path(proj_value).resolve())
+            return str(Path(proj_value).absolute())
 
     which = shutil.which("python3")
     if which:
         tried.append(("PATH python3", which))
         if _probe_imports(which):
-            return str(Path(which).resolve())
+            return str(Path(which).absolute())
 
     raise WorkerPythonNotFoundError(
         "Could not locate a Python interpreter with klayout + PyYAML.\n"
