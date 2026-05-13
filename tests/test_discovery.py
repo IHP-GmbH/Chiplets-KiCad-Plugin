@@ -118,10 +118,10 @@ def test_path_probe_succeeds(tmp_path, monkeypatch):
     monkeypatch.setattr(discovery, "_venv_python", lambda d: None)
     monkeypatch.setattr(discovery.shutil, "which", lambda name: "/usr/bin/python3")
     monkeypatch.setattr(discovery, "_probe_imports", lambda py: True)
-    # ``find_worker_python`` returns the resolved path so the caller
-    # sees a stable interpreter even if /usr/bin/python3 is a symlink.
-    expected = str(Path("/usr/bin/python3").resolve())
-    assert discovery.find_worker_python(tmp_path) == expected
+    # find_worker_python returns the path as given (absolute, but not
+    # symlink-resolved). Resolving would short-circuit venvs found via
+    # PATH.
+    assert discovery.find_worker_python(tmp_path) == "/usr/bin/python3"
 
 
 def test_path_probe_fails(tmp_path, monkeypatch):

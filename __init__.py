@@ -12,9 +12,11 @@ directory.
 
 try:
     from .chiplet_export_action import ChipletExportPlugin
-except ImportError:
-    # pcbnew is not importable outside KiCad (unit tests, CI, headless
-    # tooling). Submodules that do not depend on pcbnew remain usable.
+except (ImportError, AttributeError):
+    # pcbnew is not importable, or the host has a stub pcbnew without
+    # ActionPlugin (the SWIG class is only exposed inside a running
+    # pcbnew process). Submodules that do not depend on pcbnew remain
+    # usable for tests and headless tooling.
     ChipletExportPlugin = None
 else:
     ChipletExportPlugin().register()
