@@ -137,3 +137,18 @@ def test_io_pads_nested_under_interposer(chiplet_data):
             assert "position" in pad
             assert "size" in pad
             assert pad.get("layer") == "TopMetal2"
+
+
+def test_writer_survives_board_without_text_vars(tmp_path):
+    """Regression: write_chiplet must not crash on a board whose PROJECT
+    SWIG wrapper lacks GetTextVars. Repro board is the KiCad demo
+    interf_u, which loads as a raw SwigPyObject project.
+    """
+    interfu = (PLUGIN_ROOT.parent / "kicad" / "demos"
+               / "interf_u" / "interf_u.kicad_pcb")
+    if not interfu.exists():
+        pytest.skip("interf_u demo not available")
+    board = pcbnew.LoadBoard(str(interfu))
+    out = tmp_path / "interf_u.chiplet"
+    assert write_chiplet(board, str(out)) is True
+    assert out.exists() and out.stat().st_size > 0
