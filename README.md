@@ -12,12 +12,26 @@ with a single dialog under `Tools > External Plugins > Chiplet Export`.
 
 ## Status
 
-Iteration 1 in progress (TaskList #47). The legacy C++ menu actions
-(`File > Export > Chiplet...` and `File > Export > Hyperlynx...`)
-remain functional and are the production path until the plugin
-clears its end-to-end smoke test.
+Iteration 1 closed (TaskList #47, gates 47.1 .. 47.8 green). The
+plugin is the recommended entry point for chiplet export. The legacy
+C++ menu actions (`File > Export > Chiplet...` and
+`File > Export > Hyperlynx...`) are still present in the kicad fork
+and produce identical output, but iteration 2 will revert them so
+the dialog is the sole entry point.
 
-See the project CHANGELOG for the current gate.
+Verification coverage:
+
+- Byte-exact writer parity against the C++ exporters
+  (`tests/test_byte_exact_writers.py`, gate 47.7b).
+- Round-trip regression vs the wire-bond demo .chiplet
+  (`tests/regenerate_wirebond_demo.py` + chiplet-studio
+  `CoordFrameContract*` gtests, gate 47.7e).
+- Live pcbnew smoke (interf_u demo, gate 47.7d) and chiplet-studio
+  visual smoke (gate 47.7f).
+
+See `chiplet-studio/docs/coord_frame_contract.md` for the canonical
+coordinate frame the writers must honour. See the project CHANGELOG
+for current iteration status.
 
 ## License
 
@@ -83,6 +97,10 @@ The action appears as `Tools > External Plugins > Chiplet Export`.
      - *I/O pads JSON* (optional): sidecar JSON from
        `kicad_pcb_to_iopads.py`; pads are rendered in the
        interposer GDS and injected under the interposer component.
+     - *Cu-pillar GDS* (optional): pre-generated cu-pillar layout
+       (typically produced by `bump_mirror.py`) merged into the
+       interposer GDS so the chiplet-studio Detailed render shows
+       the pillar caps under each flip-chip die.
    - **Worker Python override** (optional): bypass the discovery
      chain by pointing at a specific interpreter.
 4. **Run**. Log lines stream into the dialog. **Cancel** terminates
@@ -117,6 +135,28 @@ Verify the symlink, then in pcbnew use
 *Tools > External Plugins > Refresh Plugins*. If registration
 failed, KiCad's stdout logs the import error.
 
+**"Hyperlynx writer aborted (most commonly: the board has no closed
+Edge.Cuts outline)"**
+
+The Hyperlynx writer needs a closed board outline to derive units
+and bounding box. Add an Edge.Cuts polygon enclosing the design and
+retry.
+
+**Cu-pillars missing in the chiplet-studio Detailed render**
+
+The interposer GDS the plugin produces only contains routing layers
+unless you also supply the cu-pillar GDS. Generate it once with
+`bump_mirror.py` (or your project equivalent) and select it in the
+dialog's *Cu-pillar GDS* picker before clicking Run.
+
+**Run hangs with no log output / dialog freezes**
+
+Should no longer happen post gate 47.7d. If it recurs, open
+*Tools > External Plugins > Refresh Plugins*; the Python traceback
+of the failed worker prints to KiCad's stdout. The dialog also
+streams traceback lines into the log control on writer crashes
+(gate 47.7d fix).
+
 ## Repository layout
 
 ```
@@ -129,11 +169,52 @@ chiplet_kicad_plugin/
 │   └── hyperlynx_writer.py    Python port of export_hyperlynx.cpp
 ├── pipeline/
 │   ├── discovery.py           Locate worker Python + hyp_to_gds.py
+│   ├── orchestrator.py        ExportOptions, build_cli_args, run_export
 │   └── runner.py              Async subprocess wrapper
-├── hyp_to_gds.py              GDS pipeline worker (imported from
+├── hyp_to_gds.py              GDS pipeline worker (verbatim copy of
 │                              kicad_designs/kicad_interposer_hyperlynx_to_gds
-│                              once Gate 47.2 lands)
-├── tests/                     Golden-file + unit tests
+│                              imported with Gate 47.2)
+├── tests/                     pytest suite (see tests/README.md)
 ├── requirements.txt           Worker venv deps
 └── LICENSE
 ```
+
+## Headless usage
+
+The pipeline is available without the dialog through
+`pipeline.orchestrator.run_export(board, options, plugin_dir)`:
+
+```python
+import pcbnew
+from chiplet_kicad_plugin.pipeline.orchestrator import (
+    ExportOptions, run_export,
+)
+
+board = pcbnew.LoadBoard("/path/to/board.kicad_pcb")
+options = ExportOptions(
+    output_dir="/tmp/chiplet_out",
+    emit_chiplet=True,
+    emit_interposer_gds=True,
+    emit_complete_gds=True,
+    top_cell="TOP",
+    lyp_override="/path/to/interposer_ihp.lyp",
+    io_pads_json="",
+    cupillar_gds="/path/to/cu_pillars.gds",
+)
+result = run_export(
+    board, options,
+    plugin_dir="/path/to/chiplet_kicad_plugin",
+    on_log=print,
+)
+assert result.exit_code == 0 and not result.error
+```
+
+`tests/regenerate_wirebond_demo.py` is a full worked example.
+
+## References
+
+- `chiplet-studio/docs/coord_frame_contract.md` — canonical
+  coordinate frame the writers honour (GDS-bbox-corner, y-up, µm)
+  and the `_metadata.finalize_required` intermediate-frame marker.
+- `tests/README.md` — test layout, byte-exact parity, round-trip
+  regression.
