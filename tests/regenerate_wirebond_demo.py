@@ -47,7 +47,7 @@ from chiplet_kicad_plugin.writers.chiplet_writer import (  # noqa: E402
 
 
 def _run_with_existing_hyp(board_path, hyp_path, lyp_path,
-                            io_pads_path, output_dir):
+                            io_pads_path, cupillar_gds_path, output_dir):
     """Drive the pipeline without invoking the Hyperlynx writer.
 
     Path used when the source .kicad_pcb lacks a closed outline.
@@ -90,6 +90,8 @@ def _run_with_existing_hyp(board_path, hyp_path, lyp_path,
         cmd += ["--lyp", lyp_path]
     if io_pads_path:
         cmd += ["--io-pads", io_pads_path]
+    if cupillar_gds_path:
+        cmd += ["--cupillar-gds", cupillar_gds_path]
     print("  $ %s" % " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.stdout:
@@ -134,6 +136,12 @@ def main():
         default="",
         help="Sidecar io_pads.json (forwarded to hyp_to_gds.py).",
     )
+    parser.add_argument(
+        "--cupillar-gds",
+        default="",
+        help="Pre-generated cu-pillar GDS to merge into the interposer "
+             "(forwarded to hyp_to_gds.py).",
+    )
     args = parser.parse_args()
 
     output_dir = args.output_dir or tempfile.mkdtemp(prefix="wirebond_regen_")
@@ -150,7 +158,7 @@ def main():
     if args.use_existing_hyp:
         rc = _run_with_existing_hyp(
             args.board, args.use_existing_hyp, args.lyp,
-            args.io_pads, output_dir,
+            args.io_pads, args.cupillar_gds, output_dir,
         )
         sys.exit(rc)
 
@@ -164,6 +172,7 @@ def main():
         top_cell="TOP",
         lyp_override=args.lyp,
         io_pads_json=args.io_pads,
+        cupillar_gds=args.cupillar_gds,
     )
 
     def on_log(line):

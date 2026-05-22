@@ -80,7 +80,7 @@ class ChipletExportDialog(wx.Dialog):
 
         # Pipeline options
         opts_box = wx.StaticBoxSizer(wx.VERTICAL, panel, "Pipeline options")
-        grid = wx.FlexGridSizer(rows=4, cols=2, vgap=4, hgap=8)
+        grid = wx.FlexGridSizer(rows=5, cols=2, vgap=4, hgap=8)
         grid.AddGrowableCol(1, 1)
 
         grid.Add(wx.StaticText(panel, label="Top cell:"),
@@ -109,6 +109,14 @@ class ChipletExportDialog(wx.Dialog):
             wildcard="JSON (*.json)|*.json|All files|*",
         )
         grid.Add(self._io_pads_ctrl, 1, wx.EXPAND)
+
+        grid.Add(wx.StaticText(panel, label="Cu-pillar GDS (optional):"),
+                 0, wx.ALIGN_CENTER_VERTICAL)
+        self._cupillar_ctrl = wx.FilePickerCtrl(
+            panel,
+            wildcard="GDS (*.gds)|*.gds|All files|*",
+        )
+        grid.Add(self._cupillar_ctrl, 1, wx.EXPAND)
 
         opts_box.Add(grid, 0, wx.EXPAND | wx.ALL, 4)
         outer.Add(opts_box, 0, wx.EXPAND | wx.ALL, 8)
@@ -185,6 +193,7 @@ class ChipletExportDialog(wx.Dialog):
             connection_type=conn,
             lyp_override=self._lyp_ctrl.GetPath() or "",
             io_pads_json=self._io_pads_ctrl.GetPath() or "",
+            cupillar_gds=self._cupillar_ctrl.GetPath() or "",
             worker_python_override=self._worker_ctrl.GetPath() or "",
         )
 
