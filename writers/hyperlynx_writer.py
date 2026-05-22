@@ -511,11 +511,13 @@ class _HyperlynxExporter:
 
     def _write_nets(self):
         self.poly_id = 1
-        nets_by_code = self.board.GetNetsByNetcode()
-        # std::map<int, ...> iterates sorted by key; SWIG dict-like
-        # may not, so sort explicitly to keep output deterministic.
-        for netcode in sorted(nets_by_code.keys()):
-            net_info = nets_by_code[netcode]
+        # NETINFO_LIST::iterator walks m_netNames (a std::map keyed
+        # by wxString net name), so the byte-exact reference order
+        # is alphabetic by name — NOT numeric by netcode.
+        nets_by_name = self.board.GetNetInfo().NetsByName()
+        for net_name_key in nets_by_name:
+            net_info = nets_by_name[net_name_key]
+            netcode = net_info.GetNetCode()
             net_name = net_info.GetNetname()
             if netcode <= 0 or not net_name:
                 continue
