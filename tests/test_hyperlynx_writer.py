@@ -50,19 +50,38 @@ def _candidate_boards():
         str(project_root / "kicad_designs"
             / "kicad_interposer_hyperlynx_to_gds"
             / "chiplet_demo.kicad_pcb"),
+        # KiCad upstream demo with a closed Edge.Cuts outline. Used
+        # when no interposer fixture in the repo has a valid outline
+        # (current chiplet/interposer demos ship without Edge.Cuts).
+        str(project_root / "kicad" / "demos" / "interf_u"
+            / "interf_u.kicad_pcb"),
     ])
     return [c for c in candidates if c]
+
+
+def _has_closed_outline(board_path):
+    """Return True if the board loads and exposes a closed Edge.Cuts.
+
+    The hyperlynx writer (Python and C++) requires this; otherwise
+    GetBoardPolygonOutlines returns False and the exporter aborts.
+    """
+    pcbnew = pytest.importorskip("pcbnew")
+    try:
+        board = pcbnew.LoadBoard(board_path)
+    except Exception:
+        return False
+    return bool(board.GetBoardPolygonOutlines(pcbnew.SHAPE_POLY_SET()))
 
 
 @pytest.fixture(scope="module")
 def fixture_board_path():
     for candidate in _candidate_boards():
-        if Path(candidate).exists():
+        if Path(candidate).exists() and _has_closed_outline(candidate):
             return candidate
     pytest.skip(
-        "No fixture .kicad_pcb available. Set HYPERLYNX_WRITER_BOARD "
-        "(or CHIPLET_WRITER_BOARD) or place the wire-bond demo in "
-        "the expected location."
+        "No fixture .kicad_pcb with a closed Edge.Cuts outline "
+        "available. Set HYPERLYNX_WRITER_BOARD (or "
+        "CHIPLET_WRITER_BOARD) to a board with a valid outline."
     )
 
 
