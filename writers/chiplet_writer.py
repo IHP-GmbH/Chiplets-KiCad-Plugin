@@ -34,8 +34,14 @@ def _lookup_property(board, name):
 
     Both maps may be exposed by SWIG as dict-like or std::map-like objects;
     we try membership testing first and fall back to the std::map API.
+
+    Some boards (e.g. legacy KiCad demos without a modern .kicad_pro) yield a
+    PROJECT whose SWIG wrapper doesn't expose GetTextVars; we treat that as
+    "no text variables" instead of raising.
     """
     def _try(container):
+        if container is None:
+            return None
         try:
             if name in container:
                 return str(container[name])
@@ -53,8 +59,12 @@ def _lookup_property(board, name):
     if value is not None:
         return value
     project = board.GetProject()
-    if project is not None:
-        value = _try(project.GetTextVars())
+    if project is not None and hasattr(project, "GetTextVars"):
+        try:
+            text_vars = project.GetTextVars()
+        except Exception:
+            text_vars = None
+        value = _try(text_vars)
         if value is not None:
             return value
     return ""
