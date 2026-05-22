@@ -15,7 +15,7 @@ from pathlib import Path
 
 import wx
 
-from .pipeline.orchestrator import ExportOptions, run_export
+from .pipeline.orchestrator import ExportOptions, ExportResult, run_export
 
 
 _CONNECTION_TYPE_CHOICES = [
@@ -219,11 +219,22 @@ class ChipletExportDialog(wx.Dialog):
         self._set_running(True)
 
         def _worker():
-            result = run_export(
-                self._board, options, self._plugin_dir,
-                on_log=self._append_log_safe,
-                cancel_event=self._cancel_event,
-            )
+            try:
+                result = run_export(
+                    self._board, options, self._plugin_dir,
+                    on_log=self._append_log_safe,
+                    cancel_event=self._cancel_event,
+                )
+            except Exception as exc:
+                import traceback
+                tb = traceback.format_exc()
+                self._append_log_safe("FATAL: %s" % exc)
+                for line in tb.rstrip().splitlines():
+                    self._append_log_safe(line)
+                result = ExportResult(
+                    exit_code=-1,
+                    error="Worker thread crashed: %s" % exc,
+                )
             wx.CallAfter(self._on_done, result)
 
         self._worker_thread = threading.Thread(target=_worker, daemon=True)

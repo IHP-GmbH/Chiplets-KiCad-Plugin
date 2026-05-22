@@ -164,7 +164,15 @@ def run_export(board, options, plugin_dir,
         chiplet_intermediate = os.path.join(tmpdir, "%s.chiplet" % board_name)
 
         _log("Writing Hyperlynx ...")
-        if not write_hyperlynx(board, hyp_path):
+        try:
+            hyp_ok = write_hyperlynx(board, hyp_path)
+        except Exception as exc:
+            import traceback
+            return ExportResult(
+                error="Hyperlynx writer crashed: %s\n%s"
+                      % (exc, traceback.format_exc()),
+            )
+        if not hyp_ok:
             return ExportResult(
                 error=(
                     "Hyperlynx writer aborted (most commonly: the "
@@ -173,7 +181,15 @@ def run_export(board, options, plugin_dir,
                 ),
             )
         _log("Writing intermediate .chiplet ...")
-        if not write_chiplet(board, chiplet_intermediate):
+        try:
+            chiplet_ok = write_chiplet(board, chiplet_intermediate)
+        except Exception as exc:
+            import traceback
+            return ExportResult(
+                error="Chiplet writer crashed: %s\n%s"
+                      % (exc, traceback.format_exc()),
+            )
+        if not chiplet_ok:
             return ExportResult(
                 error="Chiplet writer aborted (could not open the "
                       "intermediate .chiplet for writing).",
