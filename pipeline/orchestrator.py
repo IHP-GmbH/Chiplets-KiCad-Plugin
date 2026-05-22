@@ -164,9 +164,20 @@ def run_export(board, options, plugin_dir,
         chiplet_intermediate = os.path.join(tmpdir, "%s.chiplet" % board_name)
 
         _log("Writing Hyperlynx ...")
-        write_hyperlynx(board, hyp_path)
+        if not write_hyperlynx(board, hyp_path):
+            return ExportResult(
+                error=(
+                    "Hyperlynx writer aborted (most commonly: the "
+                    "board has no closed Edge.Cuts outline). Add a "
+                    "board outline, then retry."
+                ),
+            )
         _log("Writing intermediate .chiplet ...")
-        write_chiplet(board, chiplet_intermediate)
+        if not write_chiplet(board, chiplet_intermediate):
+            return ExportResult(
+                error="Chiplet writer aborted (could not open the "
+                      "intermediate .chiplet for writing).",
+            )
 
         chiplet_final = os.path.join(options.output_dir,
                                      "%s.chiplet" % board_name)
