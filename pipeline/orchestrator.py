@@ -38,6 +38,7 @@ class ExportOptions:
     connection_type: str = ""          # empty = no --connection-type
     lyp_override: str = ""             # empty = hyp_to_gds default
     io_pads_json: str = ""             # empty = no --io-pads
+    cupillar_gds: str = ""             # empty = no --cupillar-gds
     worker_python_override: str = ""   # empty = use discovery chain
 
 
@@ -94,6 +95,9 @@ def build_cli_args(hyp_to_gds_path: str,
 
     if options.io_pads_json:
         args += ["--io-pads", options.io_pads_json]
+
+    if options.cupillar_gds:
+        args += ["--cupillar-gds", options.cupillar_gds]
 
     return args
 

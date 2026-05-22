@@ -48,7 +48,8 @@ def test_defaults_emit_canonical_chiplet_and_interposer(tmp_path):
     assert "--with-chiplets" not in args
     assert "--complete-output" not in args
     # Other optional flags omitted.
-    for flag in ("-c", "-l", "--connection-type", "--io-pads"):
+    for flag in ("-c", "-l", "--connection-type", "--io-pads",
+                 "--cupillar-gds"):
         assert flag not in args
 
 
@@ -101,6 +102,13 @@ def test_lyp_and_io_pads_paths(tmp_path):
     assert args[args.index("--io-pads") + 1] == "/etc/io_pads.json"
 
 
+def test_cupillar_gds_passthrough(tmp_path):
+    opts = _opts(tmp_path)
+    opts.cupillar_gds = "/etc/cupillars.gds"
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
+    assert args[args.index("--cupillar-gds") + 1] == "/etc/cupillars.gds"
+
+
 def test_argv_starts_with_script_and_input(tmp_path):
     args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, _opts(tmp_path))
     # hyp_to_gds.py expects ``hyp_file`` as positional first argument.
@@ -118,6 +126,7 @@ def test_all_options_at_once(tmp_path):
         connection_type="sbump_sac305",
         lyp_override="/etc/x.lyp",
         io_pads_json="/etc/io.json",
+        cupillar_gds="/etc/cup.gds",
         worker_python_override="",  # not part of CLI args
     )
     args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
@@ -125,6 +134,7 @@ def test_all_options_at_once(tmp_path):
         "-o", "--update-chiplet-file", "--with-chiplets", "--complete-output",
         "-c", "ASSEMBLY_TOP", "--connection-type", "sbump_sac305",
         "-l", "/etc/x.lyp", "--io-pads", "/etc/io.json",
+        "--cupillar-gds", "/etc/cup.gds",
     ):
         assert needle in args, "Missing flag/value: %s" % needle
 
