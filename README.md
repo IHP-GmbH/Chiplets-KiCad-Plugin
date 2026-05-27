@@ -12,12 +12,12 @@ with a single dialog under `Tools > External Plugins > Chiplet Export`.
 
 ## Status
 
-Iteration 1 closed (TaskList #47, gates 47.1 .. 47.8 green). The
-plugin is the recommended entry point for chiplet export. The legacy
-C++ menu actions (`File > Export > Chiplet...` and
-`File > Export > Hyperlynx...`) are still present in the kicad fork
-and produce identical output, but iteration 2 will revert them so
-the dialog is the sole entry point.
+Iteration 2 closed. The plugin is the sole entry point for chiplet
+export. The legacy C++ menu actions (`File > Export > Chiplet...` and
+`File > Export > Hyperlynx...`) have been removed from the kicad fork.
+The headless C++ functions (`ExportBoardToChipletFile`,
+`ExportBoardToHyperlynxFile`) remain available via SWIG for the
+plugin's byte-exact regression tests.
 
 Verification coverage:
 
