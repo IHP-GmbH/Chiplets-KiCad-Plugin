@@ -70,6 +70,107 @@ def _lookup_property(board, name):
     return ""
 
 
+def write_io_pads_json(board, output_path):
+    """Extract IO_CLASS footprints from `board` into an io_pads.json sidecar.
+
+    Output matches gds_to_kicad/io_pads/kicad_pcb_to_iopads.py: positions in
+    micrometers with Y negated (KiCad Y-down -> GDS Y-up), consumed by
+    hyp_to_gds.py --io-pads to render the TopMetal2 pad geometry and inject
+    the pads under the interposer component (so the GDS bbox includes them).
+
+    Returns the number of io_pads written (0 -> nothing written, no file).
+    """
+    import json
+
+    pads_out = []
+    for fp in list(board.Footprints()):
+        io_class = _field_text(fp, "IO_CLASS")
+        if not io_class:
+            continue
+        size_str = _field_text(fp, "IO_PAD_SIZE_UM")
+        size_x_um = 0.0
+        size_y_um = 0.0
+        if size_str:
+            parts = size_str.split("x")
+            if len(parts) == 2:
+                try:
+                    size_x_um = float(parts[0])
+                    size_y_um = float(parts[1])
+                except ValueError:
+                    pass
+        pads_list = list(fp.Pads())
+        if (size_x_um <= 0.0 or size_y_um <= 0.0) and pads_list:
+            size_x_um = _iu_to_um(pads_list[0].GetSizeX())
+            size_y_um = _iu_to_um(pads_list[0].GetSizeY())
+        net_name = pads_list[0].GetNetname() if pads_list else ""
+        pos = fp.GetPosition()
+        try:
+            layer_name = board.GetLayerName(fp.GetLayer())
+        except Exception:
+            layer_name = "F.Cu"
+        pads_out.append({
+            "ref": fp.GetReference(),
+            "io_class": io_class,
+            "x_um": _iu_to_um(pos.x),
+            "y_um": -_iu_to_um(pos.y),
+            "size_x_um": size_x_um,
+            "size_y_um": size_y_um,
+            "net": net_name,
+            "layer": layer_name,
+        })
+    if not pads_out:
+        return 0
+    with open(output_path, "w") as f:
+        json.dump({"io_pads": pads_out}, f, indent=2)
+    return len(pads_out)
+
+
+def write_die_pin_lists(board, out_dir):
+    """Extract die footprint pads into per-die pin_list JSON sidecars.
+
+    A die footprint carries a GDS_FILE field; its pads ARE the chiplet's
+    bump locations. Output matches the gds_to_kicad pin_list schema
+    (footprint-local coordinates in DBU = nm, Y negated for GDS Y-up),
+    consumed downstream by the Cu-pillar generator (bump_mirror) to place
+    DRC-validated pillars under each flip-chip die.
+
+    Returns a dict {device_ref: json_path}. Empty if no die footprints.
+    """
+    import json
+
+    result = {}
+    for fp in list(board.Footprints()):
+        if not _field_text(fp, "GDS_FILE"):
+            continue
+        ref = fp.GetReference()
+        pins = []
+        fp_pos = fp.GetPosition()
+        for idx, pad in enumerate(list(fp.Pads())):
+            try:
+                local = pad.GetFPRelativePosition()
+                lx, ly = local.x, local.y
+            except Exception:
+                pos = pad.GetPosition()
+                lx, ly = pos.x - fp_pos.x, pos.y - fp_pos.y
+            pins.append({
+                "name": pad.GetName() or ("pad%d" % idx),
+                "type": "passive",
+                "pad_index": idx,
+                "center_x_dbu": float(lx),
+                "center_y_dbu": float(-ly),
+                "width_dbu": float(pad.GetSizeX()),
+                "height_dbu": float(pad.GetSizeY()),
+            })
+        if not pins:
+            continue
+        path = os.path.join(out_dir, "%s_pins.json" % ref)
+        with open(path, "w") as f:
+            json.dump({"version": 1, "chiplet_name": ref,
+                       "dbu_um": 0.001, "pins": pins}, f, indent=2)
+        result[ref] = path
+    return result
+
+
 def write_chiplet(board, output_path):
     """Write `board` to `output_path` as an intermediate .chiplet file.
 
@@ -210,7 +311,7 @@ def write_chiplet(board, output_path):
 
         gds_name = "%s.gds" % board_name
         f.write('    layout: "%s"\n' % gds_name)
-        f.write('    top_cell: "TOP"\n')
+        f.write('    top_cell: "INTERPOSER"\n')
         f.write("    dimensions:\n")
         f.write("      width: %.6f\n" % width_um)
         f.write("      height: %.6f\n" % height_um)

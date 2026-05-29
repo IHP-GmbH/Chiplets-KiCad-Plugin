@@ -20,9 +20,9 @@ Public surface:
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 
 @dataclass
@@ -34,12 +34,15 @@ class ExportOptions:
     emit_interposer_gds: bool = True
     emit_complete_gds: bool = False
     keep_intermediate_hyp: bool = False
-    top_cell: str = "TOP"
+    top_cell: str = "INTERPOSER"
     connection_type: str = ""          # empty = no --connection-type
-    lyp_override: str = ""             # empty = hyp_to_gds default
-    io_pads_json: str = ""             # empty = no --io-pads
-    cupillar_gds: str = ""             # empty = no --cupillar-gds
+    lyp_override: str = ""             # empty = hyp_to_gds default (built-in IHP)
+    io_pads_json: str = ""             # empty = auto-extract from board
+    cupillar_gds: str = ""             # non-empty = pre-generated GDS override
     worker_python_override: str = ""   # empty = use discovery chain
+    # {ref: pin_list_json} auto-extracted die bumps; drives Cu-pillar
+    # generation when connection_type names a cupillar stack.
+    pad_locations: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -53,6 +56,7 @@ class ExportResult:
     chiplet_path: str = ""
     interposer_gds_path: str = ""
     complete_gds_path: str = ""
+    cupillar_drc_path: str = ""
 
 
 def build_cli_args(hyp_to_gds_path: str,
@@ -71,7 +75,7 @@ def build_cli_args(hyp_to_gds_path: str,
     if options.emit_interposer_gds:
         args += ["-o", os.path.join(out_dir, "%s_interposer.gds" % board_name)]
 
-    if options.top_cell and options.top_cell != "TOP":
+    if options.top_cell:
         args += ["-c", options.top_cell]
 
     if options.lyp_override:
@@ -99,6 +103,11 @@ def build_cli_args(hyp_to_gds_path: str,
     if options.cupillar_gds:
         args += ["--cupillar-gds", options.cupillar_gds]
 
+    if options.pad_locations:
+        spec = ",".join("%s=%s" % (ref, p)
+                        for ref, p in sorted(options.pad_locations.items()))
+        args += ["--pad-locations", spec]
+
     return args
 
 
@@ -125,8 +134,12 @@ def run_export(board, options, plugin_dir,
         find_worker_python, find_hyp_to_gds,
         WorkerPythonNotFoundError, HypToGdsNotFoundError,
     )
+    import dataclasses
+
     from .runner import run_async
-    from ..writers.chiplet_writer import write_chiplet
+    from ..writers.chiplet_writer import (
+        write_chiplet, write_io_pads_json, write_die_pin_lists,
+    )
     from ..writers.hyperlynx_writer import write_hyperlynx
 
     def _log(line):
@@ -204,7 +217,40 @@ def run_export(board, options, plugin_dir,
         if options.emit_chiplet:
             shutil.copy2(chiplet_intermediate, chiplet_final)
 
-        cli = build_cli_args(hyp_to_gds, hyp_path, board_name, options)
+        # Auto-extract io_pads from the board so hyp_to_gds renders the pad
+        # geometry (and the interposer GDS bbox includes them). A non-empty
+        # options.io_pads_json acts as an explicit override.
+        effective_io_pads = options.io_pads_json
+        if not effective_io_pads:
+            io_pads_auto = os.path.join(tmpdir, "%s_io_pads.json" % board_name)
+            try:
+                n_io = write_io_pads_json(board, io_pads_auto)
+            except Exception as exc:
+                n_io = 0
+                _log("Warning: io_pads auto-extraction failed: %s" % exc)
+            if n_io:
+                effective_io_pads = io_pads_auto
+                _log("Auto-extracted %d io_pad(s) from board" % n_io)
+
+        # Auto-extract die footprint pads so the Cu-pillar generator places
+        # DRC-validated pillars under each flip-chip die (acts only when
+        # connection_type names a cupillar stack). A user-supplied
+        # cupillar_gds is a pre-generated override and disables auto-extract.
+        effective_pad_locs = options.pad_locations
+        if not effective_pad_locs and not options.cupillar_gds:
+            try:
+                effective_pad_locs = write_die_pin_lists(board, tmpdir)
+            except Exception as exc:
+                effective_pad_locs = {}
+                _log("Warning: die pad extraction failed: %s" % exc)
+            if effective_pad_locs:
+                _log("Auto-extracted die bumps for cu-pillars: %s"
+                     % ", ".join(sorted(effective_pad_locs)))
+
+        effective_options = dataclasses.replace(
+            options, io_pads_json=effective_io_pads,
+            pad_locations=effective_pad_locs)
+        cli = build_cli_args(hyp_to_gds, hyp_path, board_name, effective_options)
         command = [worker_py] + cli
         _log("$ " + " ".join(command))
 
@@ -225,6 +271,14 @@ def run_export(board, options, plugin_dir,
                 _log("Warning: could not copy intermediate .hyp: %s" % exc)
                 hyp_kept = ""
 
+        # The worker writes <board>_cupillar_drc.json next to the interposer
+        # GDS when a cupillar stack drives pillar generation. Surface it only
+        # if it was actually produced this run.
+        drc_report = os.path.join(options.output_dir,
+                                  "%s_cupillar_drc.json" % board_name)
+        if not os.path.exists(drc_report):
+            drc_report = ""
+
         return ExportResult(
             exit_code=run.exit_code,
             cancelled=run.cancelled,
@@ -240,6 +294,7 @@ def run_export(board, options, plugin_dir,
                              "%s_complete.gds" % board_name)
                 if options.emit_complete_gds else ""
             ),
+            cupillar_drc_path=drc_report,
         )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

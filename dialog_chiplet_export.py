@@ -80,12 +80,12 @@ class ChipletExportDialog(wx.Dialog):
 
         # Pipeline options
         opts_box = wx.StaticBoxSizer(wx.VERTICAL, panel, "Pipeline options")
-        grid = wx.FlexGridSizer(rows=5, cols=2, vgap=4, hgap=8)
+        grid = wx.FlexGridSizer(rows=3, cols=2, vgap=4, hgap=8)
         grid.AddGrowableCol(1, 1)
 
         grid.Add(wx.StaticText(panel, label="Top cell:"),
                  0, wx.ALIGN_CENTER_VERTICAL)
-        self._top_cell_ctrl = wx.TextCtrl(panel, value="TOP")
+        self._top_cell_ctrl = wx.TextCtrl(panel, value="INTERPOSER")
         grid.Add(self._top_cell_ctrl, 1, wx.EXPAND)
 
         grid.Add(wx.StaticText(panel, label="Connection stack:"),
@@ -94,29 +94,18 @@ class ChipletExportDialog(wx.Dialog):
         self._conn_ctrl.SetSelection(0)
         grid.Add(self._conn_ctrl, 1, wx.EXPAND)
 
-        grid.Add(wx.StaticText(panel, label="LYP override (optional):"),
+        grid.Add(wx.StaticText(panel, label="Interposer technology LYP:"),
                  0, wx.ALIGN_CENTER_VERTICAL)
         self._lyp_ctrl = wx.FilePickerCtrl(
             panel,
             wildcard="Layer properties (*.lyp)|*.lyp|All files|*",
         )
+        self._lyp_ctrl.SetToolTip(
+            "Layer-properties (.lyp) of the interposer technology. Leave "
+            "blank to use the built-in IHP interposer LYP. Select one only "
+            "when the interposer uses a different technology / KiCad "
+            "project template.")
         grid.Add(self._lyp_ctrl, 1, wx.EXPAND)
-
-        grid.Add(wx.StaticText(panel, label="I/O pads JSON (optional):"),
-                 0, wx.ALIGN_CENTER_VERTICAL)
-        self._io_pads_ctrl = wx.FilePickerCtrl(
-            panel,
-            wildcard="JSON (*.json)|*.json|All files|*",
-        )
-        grid.Add(self._io_pads_ctrl, 1, wx.EXPAND)
-
-        grid.Add(wx.StaticText(panel, label="Cu-pillar GDS (optional):"),
-                 0, wx.ALIGN_CENTER_VERTICAL)
-        self._cupillar_ctrl = wx.FilePickerCtrl(
-            panel,
-            wildcard="GDS (*.gds)|*.gds|All files|*",
-        )
-        grid.Add(self._cupillar_ctrl, 1, wx.EXPAND)
 
         opts_box.Add(grid, 0, wx.EXPAND | wx.ALL, 4)
         outer.Add(opts_box, 0, wx.EXPAND | wx.ALL, 8)
@@ -189,11 +178,9 @@ class ChipletExportDialog(wx.Dialog):
             emit_interposer_gds=self._cb_interposer.GetValue(),
             emit_complete_gds=self._cb_complete.GetValue(),
             keep_intermediate_hyp=self._cb_keep_hyp.GetValue(),
-            top_cell=self._top_cell_ctrl.GetValue() or "TOP",
+            top_cell=self._top_cell_ctrl.GetValue() or "INTERPOSER",
             connection_type=conn,
             lyp_override=self._lyp_ctrl.GetPath() or "",
-            io_pads_json=self._io_pads_ctrl.GetPath() or "",
-            cupillar_gds=self._cupillar_ctrl.GetPath() or "",
             worker_python_override=self._worker_ctrl.GetPath() or "",
         )
 
@@ -271,6 +258,7 @@ class ChipletExportDialog(wx.Dialog):
             for label, path in (("chiplet", result.chiplet_path),
                                 ("interposer GDS", result.interposer_gds_path),
                                 ("complete GDS", result.complete_gds_path),
+                                ("cu-pillar DRC report", result.cupillar_drc_path),
                                 ("intermediate hyp", result.hyp_path)):
                 if path:
                     self._append_log("Wrote %s: %s" % (label, path))

@@ -81,7 +81,7 @@ def _run_with_existing_hyp(board_path, hyp_path, lyp_path,
     cmd = [
         worker_py, hyp_to_gds, work_hyp,
         "-o", interposer_gds,
-        "-c", "TOP",
+        "-c", "INTERPOSER",
         "--with-chiplets",
         "--complete-output", complete_gds,
         "--update-chiplet-file", chiplet_path,
@@ -142,6 +142,13 @@ def main():
         help="Pre-generated cu-pillar GDS to merge into the interposer "
              "(forwarded to hyp_to_gds.py).",
     )
+    parser.add_argument(
+        "--connection",
+        default="",
+        help="Connection stack (cupillar_opt1/2/3, sbump_sac305). When a "
+             "cupillar stack is set, pillars are auto-generated from the die "
+             "footprint pads with DRC validation.",
+    )
     args = parser.parse_args()
 
     output_dir = args.output_dir or tempfile.mkdtemp(prefix="wirebond_regen_")
@@ -169,7 +176,8 @@ def main():
         emit_interposer_gds=True,
         emit_complete_gds=True,
         keep_intermediate_hyp=True,
-        top_cell="TOP",
+        top_cell="INTERPOSER",
+        connection_type=args.connection,
         lyp_override=args.lyp,
         io_pads_json=args.io_pads,
         cupillar_gds=args.cupillar_gds,
