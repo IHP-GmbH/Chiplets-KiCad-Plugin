@@ -47,9 +47,12 @@ def test_defaults_emit_canonical_chiplet_and_interposer(tmp_path):
     # Complete-assembly flags MUST NOT appear by default.
     assert "--with-chiplets" not in args
     assert "--complete-output" not in args
-    # Other optional flags omitted.
-    for flag in ("-c", "-l", "--connection-type", "--io-pads",
-                 "--cupillar-gds"):
+    # Top cell is always passed (default INTERPOSER).
+    assert args[args.index("-c") + 1] == "INTERPOSER"
+    # Other optional flags omitted. io_pads / pad_locations are injected by
+    # run_export (board auto-extraction), not by the pure build_cli_args.
+    for flag in ("-l", "--connection-type", "--io-pads",
+                 "--cupillar-gds", "--pad-locations"):
         assert flag not in args
 
 
@@ -76,14 +79,14 @@ def test_disable_chiplet_drops_update_flag(tmp_path):
     assert "--update-chiplet-file" not in args
 
 
-def test_top_cell_only_passed_when_overridden(tmp_path):
+def test_top_cell_always_passed(tmp_path):
     opts = _opts(tmp_path)
     args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
-    assert "-c" not in args  # default "TOP" matches hyp_to_gds default
+    assert args[args.index("-c") + 1] == "INTERPOSER"  # default top cell
 
-    opts.top_cell = "INTERPOSER_TOP"
+    opts.top_cell = "ASSEMBLY_TOP"
     args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
-    assert args[args.index("-c") + 1] == "INTERPOSER_TOP"
+    assert args[args.index("-c") + 1] == "ASSEMBLY_TOP"
 
 
 def test_connection_type_passthrough(tmp_path):
@@ -107,6 +110,15 @@ def test_cupillar_gds_passthrough(tmp_path):
     opts.cupillar_gds = "/etc/cupillars.gds"
     args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
     assert args[args.index("--cupillar-gds") + 1] == "/etc/cupillars.gds"
+
+
+def test_pad_locations_passthrough(tmp_path):
+    opts = _opts(tmp_path)
+    opts.pad_locations = {"U1": "/tmp/U1_pins.json", "U2": "/tmp/U2_pins.json"}
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
+    spec = args[args.index("--pad-locations") + 1]
+    assert "U1=/tmp/U1_pins.json" in spec
+    assert "U2=/tmp/U2_pins.json" in spec
 
 
 def test_argv_starts_with_script_and_input(tmp_path):

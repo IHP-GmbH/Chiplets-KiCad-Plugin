@@ -436,7 +436,7 @@ class GDSGenerator:
                   f"using defaults", file=sys.stderr)
             return dict(GDSGenerator._DEFAULT_VIA_PARAMS)
 
-    def __init__(self, layer_map: LayerMap, cell_name: str = "TOP", units: str = "ENGLISH",
+    def __init__(self, layer_map: LayerMap, cell_name: str = "INTERPOSER", units: str = "ENGLISH",
                  stackup_order: List[str] = None, tech_json_path: Optional[str] = None):
         self.layer_map = layer_map
         self.units = units
@@ -1758,11 +1758,45 @@ def _read_gds_top_cell(gds_path: str) -> Optional[str]:
     return None
 
 
+# Connection-stack id -> Cu-pillar body diameter (IHP SG13G2 Table 6.1).
+# Non-cupillar stacks (e.g. sbump_sac305) map to None and skip pillar gen.
+_CONNECTION_BODY_DIAMETER = {
+    "cupillar_opt1": 44,
+    "cupillar_opt2": 49,
+    "cupillar_opt3": 54,
+}
+
+
+def _connection_to_body_diameter(connection_type):
+    """Cu-pillar body diameter (um) for a connection-stack id, or None."""
+    return _CONNECTION_BODY_DIAMETER.get(connection_type or "")
+
+
+def _import_bump_mirror():
+    """Import bump_mirror (Cu-pillar geometry + DRC + auto-resolve).
+
+    Located at <project_root>/interposer/scripts/bump_mirror.py relative to
+    this file. Returns the module, or None if it cannot be imported so the
+    caller degrades gracefully (warn + no pillars).
+    """
+    try:
+        scripts_dir = (Path(__file__).resolve().parent.parent
+                       / "interposer" / "scripts")
+        if scripts_dir.is_dir() and str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        import bump_mirror
+        return bump_mirror
+    except Exception as exc:
+        print("Warning: could not import bump_mirror: %s" % exc,
+              file=sys.stderr)
+        return None
+
+
 def convert_hyp_to_gds(
     hyp_path: str,
     output_path: str,
     lyp_path: str,
-    cell_name: str = "TOP",
+    cell_name: str = "INTERPOSER",
     with_chiplets: bool = False,
     complete_output_path: Optional[str] = None,
     chiplet_file_path: Optional[str] = None,
@@ -1879,27 +1913,105 @@ def convert_hyp_to_gds(
                 generator.top_cell.insert(
                     db.DCellInstArray(new_cell, db.DTrans()))
                 print(f"  Merged cu-pillar cell: {src_cell.name}")
-    elif pad_locations and parser.devices:
-        print("Warning: --pad-locations is deprecated. Use bump_mirror.py "
-              "to pre-generate cu-pillar GDS and pass via --cupillar-gds.",
-              file=sys.stderr)
-        print(f"\nGenerating cu-pillar pads at chiplet pad locations...")
-        device_map = {dev.ref: dev for dev in parser.devices}
-        total_pillars = 0
-        for dev_ref, pin_json in pad_locations.items():
-            dev = device_map.get(dev_ref)
-            if not dev:
-                print(f"  Warning: Device {dev_ref} not found in HYP, skipping")
-                continue
-            dev_x_um = generator._to_um(dev.x)
-            dev_y_um = generator._to_um(dev.y)
-            n = generator.add_cupillar_pads(
-                dev_ref, pin_json,
-                dev_x_um, dev_y_um,
-                device_rotation=dev.rotation,
-            )
-            total_pillars += n
-        print(f"Total cu-pillar pads placed: {total_pillars}")
+    elif (pad_locations and parser.devices
+          and _connection_to_body_diameter(connection_type) is not None):
+        body_diameter = _connection_to_body_diameter(connection_type)
+        bm = _import_bump_mirror()
+        if bm is None:
+            print("Warning: bump_mirror unavailable; skipping Cu-pillar "
+                  "generation (pillars absent from GDS).", file=sys.stderr)
+        else:
+            print(f"\nGenerating Cu-pillars (connection={connection_type}, "
+                  f"body diameter={body_diameter} um) with DRC validation...")
+            device_map = {dev.ref: dev for dev in parser.devices}
+            params = bm.DrcParams.from_body_diameter(body_diameter)
+            pillar_gen = bm.CuPillarGenerator(
+                enclosure_um=params.min_enclosure_um)
+            total_pillars = 0
+            device_reports = {}
+            for dev_ref, pin_json in pad_locations.items():
+                dev = device_map.get(dev_ref)
+                if not dev:
+                    print(f"  Warning: Device {dev_ref} not in HYP, skipping")
+                    continue
+                try:
+                    pin_lists = bm.load_pin_lists(["%s=%s" % (dev_ref, pin_json)])
+                except SystemExit:
+                    print(f"  Warning: could not load pin list for {dev_ref}")
+                    continue
+                positions = {dev_ref: {
+                    "x": generator._to_um(dev.x),
+                    "y": generator._to_um(dev.y),
+                    "rotation": dev.rotation,
+                }}
+                bumps = bm.compute_bump_locations(pin_lists, positions)
+                resolved, rep = bm.auto_resolve_collisions(
+                    bumps, params, params.diameter_um)
+                if rep.get("moved_count"):
+                    print(f"  {dev_ref}: auto-resolved {rep['moved_count']} "
+                          f"bump(s) (max shift {rep.get('max_delta_um', 0):.2f} "
+                          f"um)")
+                # max_detail=None -> complete, uncapped report (every
+                # violation listed both in the panel and the JSON sidecar).
+                report = bm.DrcValidator(params).validate(
+                    resolved, params.diameter_um, params.min_enclosure_um,
+                    max_detail=None)
+                for r in report.results:
+                    if r.severity in ("error", "warning"):
+                        print(f"  DRC {r.rule} [{r.severity}]: {r.message}")
+                s = report.summary
+                print(f"  {dev_ref}: {s['error']} error(s), "
+                      f"{s['warning']} warning(s) across {s['total']} checks")
+                if not report.passed:
+                    print(f"  Warning: {dev_ref} has residual Cu-pillar DRC "
+                          f"violations (continuing per policy).")
+                device_reports[dev_ref] = report.to_dict()
+                total_pillars += pillar_gen.add_device_bumps(
+                    dev_ref, resolved, body_diameter)
+            # Merge generated CUPILLARS_<ref> cells into the interposer top.
+            merged = 0
+            for ci in range(pillar_gen.layout.cells()):
+                src = pillar_gen.layout.cell(ci)
+                if src.name.startswith("CUPILLARS_"):
+                    new_cell = generator.layout.create_cell(src.name)
+                    new_cell.copy_tree(src)
+                    generator.top_cell.insert(
+                        db.DCellInstArray(new_cell, db.DTrans()))
+                    merged += 1
+            print(f"Total Cu-pillar pads placed: {total_pillars} "
+                  f"({merged} device group(s))")
+
+            # Persist a complete DRC report next to the interposer GDS so
+            # the warn-and-continue violations survive past the GUI panel.
+            if device_reports:
+                agg = {"error": 0, "warning": 0, "info": 0, "total": 0}
+                all_passed = True
+                for d in device_reports.values():
+                    for k in agg:
+                        agg[k] += d["summary"].get(k, 0)
+                    all_passed = all_passed and d.get("passed", True)
+                out_p = Path(output_path)
+                stem = out_p.stem
+                if stem.endswith("_interposer"):
+                    stem = stem[:-len("_interposer")]
+                drc_path = out_p.with_name(stem + "_cupillar_drc.json")
+                doc = {
+                    "version": 1,
+                    "tool": "hyp_to_gds cu-pillar DRC",
+                    "connection_type": connection_type,
+                    "body_diameter_um": body_diameter,
+                    "params": params.to_dict(),
+                    "summary": {**agg, "devices": len(device_reports),
+                                "passed": all_passed},
+                    "devices": device_reports,
+                }
+                try:
+                    with open(str(drc_path), "w") as f:
+                        json.dump(doc, f, indent=2)
+                    print(f"Cu-pillar DRC report: {drc_path}")
+                except OSError as e:
+                    print(f"Warning: could not write DRC report: {e}",
+                          file=sys.stderr)
 
     # Add external I/O pads (wire-bond, etc.) from sidecar JSON
     placed_io_pads: Optional[List[Dict]] = None
@@ -2006,8 +2118,8 @@ Examples:
     )
     parser.add_argument(
         "-c", "--cell",
-        default="TOP",
-        help="Top-level cell name (default: TOP)"
+        default="INTERPOSER",
+        help="Top-level cell name (default: INTERPOSER)"
     )
     parser.add_argument(
         "--tech-json",

@@ -128,10 +128,11 @@ def main() -> int:
 
     print(f"Layout dbu = {layout.dbu} um/dbu")
 
-    if not layout.has_cell("TOP"):
-        print(f"ERROR: TOP cell not found in {args.gds_path}", file=sys.stderr)
+    if not layout.has_cell("INTERPOSER"):
+        print(f"ERROR: INTERPOSER cell not found in {args.gds_path}",
+              file=sys.stderr)
         return 2
-    top = layout.cell("TOP")
+    top = layout.cell("INTERPOSER")
 
     flipped = find_die_flipped_cell(layout, args.die)
     if flipped is None:

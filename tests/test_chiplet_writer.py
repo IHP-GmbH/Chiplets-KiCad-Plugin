@@ -103,7 +103,7 @@ def test_interposer_component(chiplet_data):
     interposer = next(c for c in chiplet_data["components"] if c["id"] == "interposer")
     assert interposer["type"] == "interposer"
     assert interposer["anchor"] == "bbox_center"
-    assert interposer["top_cell"] == "TOP"
+    assert interposer["top_cell"] == "INTERPOSER"
     assert interposer["position"] == {"x": 0.0, "y": 0.0, "z": 0.0}
     assert "dimensions" in interposer
     assert interposer["dimensions"]["width"] > 0
