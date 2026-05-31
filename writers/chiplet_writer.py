@@ -250,6 +250,17 @@ def write_chiplet(board, output_path):
         f.write('  units: "um"\n')
         f.write("\n")
 
+        # Interposer adapter. Declares which ADK PDK adapter the assembly
+        # DRC should resolve when this design is checked. Override via
+        # Board Setup > Text Variables > INTERPOSER_ADAPTER.
+        interposer_adapter = (
+            _lookup_property(board, "INTERPOSER_ADAPTER")
+            or "ihp_sg13g2_interposer"
+        )
+        f.write("interposer:\n")
+        f.write('  adapter: "%s"\n' % interposer_adapter)
+        f.write("\n")
+
         # Technologies
         f.write("technologies:\n")
         for tech_id, lyp_path in tech_map.items():

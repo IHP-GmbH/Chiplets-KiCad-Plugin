@@ -49,6 +49,7 @@ class _FakeBoard:
 @pytest.fixture(autouse=True)
 def _clear_env(monkeypatch):
     monkeypatch.delenv(discovery.WORKER_ENV_VAR, raising=False)
+    monkeypatch.delenv(discovery.ADK_ROOT_ENV_VAR, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -174,3 +175,79 @@ def test_find_hyp_to_gds(tmp_path):
 def test_find_hyp_to_gds_missing(tmp_path):
     with pytest.raises(discovery.HypToGdsNotFoundError):
         discovery.find_hyp_to_gds(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# find_adk_drc_runner
+# ---------------------------------------------------------------------------
+
+def _make_adk_tree(root):
+    """Create a fake ``adk/klayout/drc/run_drc.py`` under ``root``."""
+    runner = Path(root) / "klayout" / "drc" / "run_drc.py"
+    runner.parent.mkdir(parents=True, exist_ok=True)
+    runner.write_text("# fake ADK runner\n")
+    return runner
+
+
+def test_find_adk_runner_env_var_wins(tmp_path, monkeypatch):
+    adk_root = tmp_path / "alt_adk"
+    runner = _make_adk_tree(adk_root)
+    monkeypatch.setenv(discovery.ADK_ROOT_ENV_VAR, str(adk_root))
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    assert discovery.find_adk_drc_runner(plugin_dir) == str(runner.absolute())
+
+
+def test_find_adk_runner_sibling_fallback(tmp_path):
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    runner = _make_adk_tree(tmp_path / "adk")
+    assert discovery.find_adk_drc_runner(plugin_dir) == str(runner.absolute())
+
+
+def test_find_adk_runner_project_text_var(tmp_path):
+    adk_root = tmp_path / "proj_adk"
+    runner = _make_adk_tree(adk_root)
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()  # sibling adk/ does NOT exist
+    board = _FakeBoard({discovery.ADK_ROOT_ENV_VAR: str(adk_root)})
+    assert discovery.find_adk_drc_runner(plugin_dir, board=board) \
+        == str(runner.absolute())
+
+
+def test_find_adk_runner_all_fail_raises_actionable(tmp_path):
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    with pytest.raises(discovery.AdkRunnerNotFoundError) as exc:
+        discovery.find_adk_drc_runner(plugin_dir)
+    msg = str(exc.value)
+    assert "ADK_ROOT" in msg
+    assert "sibling of plugin_dir" in msg
+
+
+def test_find_adk_runner_env_takes_precedence_over_sibling(tmp_path,
+                                                             monkeypatch):
+    # Both sibling and env var resolve; env var must win.
+    sibling = _make_adk_tree(tmp_path / "adk")
+    alt = _make_adk_tree(tmp_path / "alt_adk")
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    monkeypatch.setenv(discovery.ADK_ROOT_ENV_VAR, str(tmp_path / "alt_adk"))
+    chosen = discovery.find_adk_drc_runner(plugin_dir)
+    assert chosen == str(alt.absolute())
+    assert chosen != str(sibling.absolute())
+
+
+def test_find_adk_runner_board_none_skips_text_var(tmp_path, monkeypatch):
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    sentinel = {"called": False}
+
+    def _spy(board, name):
+        sentinel["called"] = bool(board)
+        return None
+
+    monkeypatch.setattr(discovery, "_lookup_text_var", _spy)
+    with pytest.raises(discovery.AdkRunnerNotFoundError):
+        discovery.find_adk_drc_runner(plugin_dir, board=None)
+    assert sentinel["called"] is False

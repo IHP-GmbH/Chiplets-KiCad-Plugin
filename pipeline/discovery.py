@@ -26,6 +26,7 @@ from pathlib import Path
 
 
 WORKER_ENV_VAR = "KICAD_CHIPLET_PYTHON"
+ADK_ROOT_ENV_VAR = "ADK_ROOT"
 PROBE_TIMEOUT_SECONDS = 10
 
 
@@ -39,6 +40,10 @@ class WorkerPythonNotFoundError(DiscoveryError):
 
 class HypToGdsNotFoundError(DiscoveryError):
     """Raised when the vendored hyp_to_gds.py file is missing."""
+
+
+class AdkRunnerNotFoundError(DiscoveryError):
+    """Raised when adk/klayout/drc/run_drc.py cannot be located."""
 
 
 def _is_executable(path):
@@ -177,3 +182,52 @@ def find_hyp_to_gds(plugin_dir):
             "installation appears incomplete." % candidate
         )
     return str(candidate)
+
+
+def find_adk_drc_runner(plugin_dir, board=None):
+    """Locate ``adk/klayout/drc/run_drc.py``.
+
+    Resolution chain (first hit wins):
+
+      1. Environment variable ``ADK_ROOT`` (must point at the ADK root)
+      2. KiCad project text variable ``ADK_ROOT`` when ``board`` is set
+      3. Sibling directory: ``<plugin_dir>/../adk`` (matches the default
+         used by ``hyp_to_gds.py::_load_adk_layer``)
+
+    Returns:
+        Absolute path (str) to ``run_drc.py``.
+
+    Raises:
+        AdkRunnerNotFoundError if no candidate resolves to an existing
+        file. The error lists every location that was probed.
+    """
+    plugin_dir = Path(plugin_dir).resolve()
+    tried = []
+    candidates = []
+
+    env_root = os.environ.get(ADK_ROOT_ENV_VAR)
+    if env_root:
+        candidates.append(("env %s" % ADK_ROOT_ENV_VAR, env_root))
+
+    proj_root = _lookup_text_var(board, ADK_ROOT_ENV_VAR)
+    if proj_root:
+        candidates.append(
+            ("project text var %s" % ADK_ROOT_ENV_VAR, proj_root),
+        )
+
+    sibling_root = plugin_dir.parent / "adk"
+    candidates.append(("sibling of plugin_dir", str(sibling_root)))
+
+    for label, root in candidates:
+        runner = Path(root) / "klayout" / "drc" / "run_drc.py"
+        tried.append((label, str(runner)))
+        if runner.is_file():
+            return str(runner.absolute())
+
+    raise AdkRunnerNotFoundError(
+        "Could not locate adk/klayout/drc/run_drc.py.\n"
+        "Tried:\n  - "
+        + "\n  - ".join("%s: %s" % c for c in tried)
+        + "\n\nSet ADK_ROOT to the ADK root directory (the parent of "
+          "klayout/drc/run_drc.py)."
+    )
