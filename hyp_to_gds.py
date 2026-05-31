@@ -9,6 +9,7 @@ Extracts trace segments from HYP and generates polygons on appropriate PDK layer
 import argparse
 import json
 import math
+import os
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -22,6 +23,52 @@ except ImportError:
     print("Error: KLayout Python module not found.", file=sys.stderr)
     print("Please install with: pip install klayout", file=sys.stderr)
     sys.exit(1)
+
+
+# Hard-coded fallback layer coordinates used when the ADK config cannot be
+# located. Kept in sync with adk/config/layers.json at the time of writing.
+_ADK_LAYER_FALLBACKS: Dict[str, Tuple[int, int]] = {
+    'exchange0': (190, 0),
+    'exchange1': (191, 0),
+}
+
+_ADK_LAYER_WARNED = False
+
+
+def _load_adk_layer(layer_name: str) -> Tuple[int, int]:
+    """Resolve an abstract ADK layer name to its (gds_layer, gds_datatype).
+
+    Reads ``adk/config/layers.json`` so the layer registry lives in a single
+    source of truth that both the ADK KLayout deck and this converter share.
+    The ADK root is resolved from the ``ADK_ROOT`` environment variable when
+    set; otherwise it defaults to ``../adk`` relative to this file. If the
+    config is unreachable, falls back to the values in
+    ``_ADK_LAYER_FALLBACKS`` and prints a one-time warning.
+    """
+    global _ADK_LAYER_WARNED
+
+    env_root = os.environ.get('ADK_ROOT')
+    adk_root = Path(env_root) if env_root else Path(__file__).resolve().parent.parent / 'adk'
+    config_path = adk_root / 'config' / 'layers.json'
+
+    try:
+        with config_path.open() as fh:
+            cfg = json.load(fh)
+        layer = cfg['layers'][layer_name]
+        return int(layer['gds_layer']), int(layer['gds_datatype'])
+    except (FileNotFoundError, KeyError, json.JSONDecodeError, OSError) as err:
+        if layer_name not in _ADK_LAYER_FALLBACKS:
+            raise KeyError(
+                f"ADK layer '{layer_name}' not found in {config_path} and no fallback registered"
+            ) from err
+        if not _ADK_LAYER_WARNED:
+            print(
+                f"Warning: could not read ADK layer registry at {config_path} ({err}); "
+                f"falling back to built-in defaults. Set ADK_ROOT to silence this warning.",
+                file=sys.stderr,
+            )
+            _ADK_LAYER_WARNED = True
+        return _ADK_LAYER_FALLBACKS[layer_name]
 
 
 @dataclass
@@ -1078,8 +1125,8 @@ class GDSGenerator:
             # Insert the device cell as an instance
             self.top_cell.insert(db.DCellInstArray(imported_cell, trans))
 
-            # Generate chiplet boundary on exchange0 (190/0) for assembly DRC
-            exchange0_layer = self.layout.layer(190, 0)
+            # Stamp chiplet boundary on the ADK 'exchange0' layer (assembly DRC input)
+            exchange0_layer = self.layout.layer(*_load_adk_layer('exchange0'))
             cell_bbox = imported_cell.dbbox()
             if not flip_chip and device.rotation != 0.0:
                 # Non-flip with rotation: transform bbox corners through DCplxTrans
