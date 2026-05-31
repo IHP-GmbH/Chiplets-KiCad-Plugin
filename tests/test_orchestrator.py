@@ -19,7 +19,9 @@ if str(PLUGIN_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT.parent))
 
 from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
-    ExportOptions, build_cli_args,
+    DEFAULT_INTERPOSER_ADAPTER,
+    ExportOptions, ExportResult,
+    build_adk_drc_argv, build_cli_args, load_interposer_adapter,
 )
 
 
@@ -158,3 +160,149 @@ def test_worker_python_override_not_in_cli(tmp_path):
     # The override governs which interpreter executes the script; it is
     # never injected into the script's own argv.
     assert "/usr/bin/python3.12" not in args
+
+
+# ---------------------------------------------------------------------------
+# ExportOptions / ExportResult defaults for ADK assembly DRC
+# ---------------------------------------------------------------------------
+
+def test_export_options_default_assembly_drc_enabled():
+    opts = ExportOptions()
+    assert opts.emit_assembly_drc is True
+    assert opts.interposer_adapter == ""
+
+
+def test_export_result_default_assembly_drc_fields():
+    res = ExportResult()
+    assert res.assembly_drc_exit_code == -1
+    assert res.assembly_drc_report_path == ""
+
+
+# ---------------------------------------------------------------------------
+# load_interposer_adapter
+# ---------------------------------------------------------------------------
+
+def _write_chiplet(tmp_path, body):
+    path = tmp_path / "demo.chiplet"
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+def test_load_interposer_adapter_field_present_double_quoted(tmp_path):
+    p = _write_chiplet(tmp_path,
+                       'interposer:\n  adapter: "custom_adapter"\n')
+    assert load_interposer_adapter(p) == "custom_adapter"
+
+
+def test_load_interposer_adapter_field_present_single_quoted(tmp_path):
+    p = _write_chiplet(tmp_path,
+                       "interposer:\n  adapter: 'another_one'\n")
+    assert load_interposer_adapter(p) == "another_one"
+
+
+def test_load_interposer_adapter_field_present_unquoted(tmp_path):
+    p = _write_chiplet(tmp_path,
+                       "interposer:\n  adapter: bare_value\n")
+    assert load_interposer_adapter(p) == "bare_value"
+
+
+def test_load_interposer_adapter_missing_file_returns_default(tmp_path):
+    assert (load_interposer_adapter(str(tmp_path / "nope.chiplet"))
+            == DEFAULT_INTERPOSER_ADAPTER)
+
+
+def test_load_interposer_adapter_missing_block_returns_default(tmp_path):
+    p = _write_chiplet(tmp_path, "assembly:\n  name: x\n")
+    assert load_interposer_adapter(p) == DEFAULT_INTERPOSER_ADAPTER
+
+
+def test_load_interposer_adapter_block_without_adapter_returns_default(
+        tmp_path):
+    p = _write_chiplet(tmp_path, "interposer:\n  other_key: foo\n")
+    assert load_interposer_adapter(p) == DEFAULT_INTERPOSER_ADAPTER
+
+
+def test_load_interposer_adapter_inline_comment_stripped(tmp_path):
+    p = _write_chiplet(tmp_path,
+                       'interposer:\n  adapter: "x"  # trailing\n')
+    assert load_interposer_adapter(p) == "x"
+
+
+def test_load_interposer_adapter_ignores_indented_lookalike(tmp_path):
+    # `interposer:` only counts at column 0; a key with the same name
+    # nested under another block must not enter the parser state.
+    body = (
+        "components:\n"
+        "  - id: foo\n"
+        "    interposer: not-a-block\n"
+        "    adapter: trap_value\n"
+    )
+    p = _write_chiplet(tmp_path, body)
+    assert load_interposer_adapter(p) == DEFAULT_INTERPOSER_ADAPTER
+
+
+def test_load_interposer_adapter_block_followed_by_other_top_level(tmp_path):
+    body = (
+        'interposer:\n'
+        '  adapter: "winner"\n'
+        'components:\n'
+        '  - id: a\n'
+    )
+    p = _write_chiplet(tmp_path, body)
+    assert load_interposer_adapter(p) == "winner"
+
+
+def test_load_interposer_adapter_empty_value_returns_default(tmp_path):
+    p = _write_chiplet(tmp_path, 'interposer:\n  adapter: ""\n')
+    assert load_interposer_adapter(p) == DEFAULT_INTERPOSER_ADAPTER
+
+
+# ---------------------------------------------------------------------------
+# build_adk_drc_argv
+# ---------------------------------------------------------------------------
+
+ADK_RUNNER = "/adk/klayout/drc/run_drc.py"
+GDS = "/tmp/complete.gds"
+ADAPTER = "ihp_sg13g2_interposer"
+
+
+def test_build_adk_drc_argv_required_only():
+    args = build_adk_drc_argv(ADK_RUNNER, GDS, ADAPTER)
+    assert args == [
+        ADK_RUNNER,
+        "--path", GDS,
+        "--interposer-adapter", ADAPTER,
+    ]
+
+
+def test_build_adk_drc_argv_with_report_and_rundir(tmp_path):
+    args = build_adk_drc_argv(
+        ADK_RUNNER, GDS, ADAPTER,
+        report_path=str(tmp_path / "out.lyrdb"),
+        run_dir=str(tmp_path / "drc_dir"),
+    )
+    assert "--report" in args
+    assert args[args.index("--report") + 1] == str(tmp_path / "out.lyrdb")
+    assert "--run_dir" in args
+    assert args[args.index("--run_dir") + 1] == str(tmp_path / "drc_dir")
+
+
+def test_build_adk_drc_argv_with_all_optionals(tmp_path):
+    args = build_adk_drc_argv(
+        ADK_RUNNER, GDS, ADAPTER,
+        report_path=str(tmp_path / "r.lyrdb"),
+        run_dir=str(tmp_path / "d"),
+        topcell="INTERPOSER",
+        threads=8,
+        run_mode="deep",
+    )
+    assert args[args.index("--topcell") + 1] == "INTERPOSER"
+    assert args[args.index("--threads") + 1] == "8"
+    assert args[args.index("--run_mode") + 1] == "deep"
+
+
+def test_build_adk_drc_argv_threads_zero_passes_through():
+    # 0 is a legitimate caller-specified value (forces single-thread);
+    # the builder must not treat it as "unset".
+    args = build_adk_drc_argv(ADK_RUNNER, GDS, ADAPTER, threads=0)
+    assert args[args.index("--threads") + 1] == "0"

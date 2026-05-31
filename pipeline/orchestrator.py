@@ -22,7 +22,13 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+
+# Default ADK interposer adapter used when neither the dialog nor the
+# .chiplet file declare one. Matches the only adapter shipped today
+# (adk/pdk_adapters/interposer/ihp_sg13g2_interposer.drc).
+DEFAULT_INTERPOSER_ADAPTER = "ihp_sg13g2_interposer"
 
 
 @dataclass
@@ -40,6 +46,14 @@ class ExportOptions:
     io_pads_json: str = ""             # empty = auto-extract from board
     cupillar_gds: str = ""             # non-empty = pre-generated GDS override
     worker_python_override: str = ""   # empty = use discovery chain
+    # Assembly DRC against the ADK deck. Runs after hyp_to_gds when a
+    # complete.gds was emitted; can be disabled when the user only wants
+    # the GDS output.
+    emit_assembly_drc: bool = True
+    # Explicit adapter override. Empty = read from .chiplet file's
+    # `interposer.adapter` field, with DEFAULT_INTERPOSER_ADAPTER as the
+    # final fallback.
+    interposer_adapter: str = ""
     # {ref: pin_list_json} auto-extracted die bumps; drives Cu-pillar
     # generation when connection_type names a cupillar stack.
     pad_locations: Dict[str, str] = field(default_factory=dict)
@@ -57,6 +71,90 @@ class ExportResult:
     interposer_gds_path: str = ""
     complete_gds_path: str = ""
     cupillar_drc_path: str = ""
+    # ADK assembly DRC outcome. ``exit_code`` of -1 means the deck did
+    # not run (disabled, no complete.gds, or runner not found).
+    assembly_drc_exit_code: int = -1
+    assembly_drc_report_path: str = ""
+
+
+def load_interposer_adapter(chiplet_path: str) -> str:
+    """Return the interposer adapter declared in a ``.chiplet`` YAML file.
+
+    Reads the top-level ``interposer.adapter`` field and returns its
+    value. Falls back to :data:`DEFAULT_INTERPOSER_ADAPTER` when the file
+    is missing, unreadable, or does not declare the field.
+
+    A minimal hand-rolled parser is used so this helper is callable from
+    KiCad's bundled Python (which lacks PyYAML). It accepts the canonical
+    block shape emitted by the writer::
+
+        interposer:
+          adapter: "ihp_sg13g2_interposer"
+
+    Quoted (single or double) and unquoted values are both accepted.
+    Lines beginning with ``#`` and inline ``#`` comments are stripped.
+    """
+    try:
+        with open(chiplet_path, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return DEFAULT_INTERPOSER_ADAPTER
+
+    in_block = False
+    for raw in lines:
+        line = raw.rstrip("\n")
+        if "#" in line:
+            line = line[: line.index("#")].rstrip()
+        if not line.strip():
+            continue
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        if indent == 0:
+            in_block = (stripped == "interposer:")
+            continue
+        if not in_block:
+            continue
+        if stripped.startswith("adapter:"):
+            value = stripped[len("adapter:"):].strip()
+            if (len(value) >= 2
+                    and value[0] in ("'", '"')
+                    and value[-1] == value[0]):
+                value = value[1:-1]
+            return value or DEFAULT_INTERPOSER_ADAPTER
+    return DEFAULT_INTERPOSER_ADAPTER
+
+
+def build_adk_drc_argv(adk_runner_path: str,
+                       gds_path: str,
+                       interposer_adapter: str,
+                       report_path: Optional[str] = None,
+                       run_dir: Optional[str] = None,
+                       topcell: Optional[str] = None,
+                       threads: Optional[int] = None,
+                       run_mode: Optional[str] = None) -> List[str]:
+    """Construct argv for the ADK ``run_drc.py`` subprocess.
+
+    The returned list begins with ``adk_runner_path`` and the required
+    ``--path`` / ``--interposer-adapter`` flags; the remaining flags are
+    appended only when the caller provides a value. Output paths are
+    passed through unchanged (callers are expected to pre-resolve them).
+    """
+    args: List[str] = [
+        adk_runner_path,
+        "--path", gds_path,
+        "--interposer-adapter", interposer_adapter,
+    ]
+    if report_path:
+        args += ["--report", report_path]
+    if run_dir:
+        args += ["--run_dir", run_dir]
+    if topcell:
+        args += ["--topcell", topcell]
+    if threads is not None:
+        args += ["--threads", str(threads)]
+    if run_mode:
+        args += ["--run_mode", run_mode]
+    return args
 
 
 def build_cli_args(hyp_to_gds_path: str,
@@ -131,8 +229,9 @@ def run_export(board, options, plugin_dir,
         any subprocess ran and ``exit_code`` is -1.
     """
     from .discovery import (
-        find_worker_python, find_hyp_to_gds,
+        find_worker_python, find_hyp_to_gds, find_adk_drc_runner,
         WorkerPythonNotFoundError, HypToGdsNotFoundError,
+        AdkRunnerNotFoundError,
     )
     import dataclasses
 
@@ -279,6 +378,59 @@ def run_export(board, options, plugin_dir,
         if not os.path.exists(drc_report):
             drc_report = ""
 
+        # ADK assembly DRC over the complete.gds (chiplets stamped on the
+        # interposer). Runs only when there is a complete.gds to check
+        # and the user did not opt out via emit_assembly_drc=False.
+        assembly_drc_exit = -1
+        assembly_drc_report = ""
+        complete_gds_abs = os.path.join(
+            options.output_dir, "%s_complete.gds" % board_name,
+        )
+        should_run_drc = (
+            options.emit_complete_gds
+            and options.emit_assembly_drc
+            and run.exit_code == 0
+            and not run.cancelled
+            and os.path.exists(complete_gds_abs)
+        )
+        if should_run_drc:
+            try:
+                adk_runner = find_adk_drc_runner(plugin_dir, board=board)
+            except AdkRunnerNotFoundError as exc:
+                _log("Assembly DRC skipped: %s" % exc)
+                adk_runner = ""
+            if adk_runner:
+                effective_adapter = (
+                    options.interposer_adapter
+                    or load_interposer_adapter(chiplet_final)
+                )
+                drc_run_dir = os.path.join(
+                    options.output_dir, "assembly_drc",
+                )
+                assembly_drc_report_target = os.path.join(
+                    options.output_dir,
+                    "%s_assembly_drc.lyrdb" % board_name,
+                )
+                adk_cli = build_adk_drc_argv(
+                    adk_runner,
+                    gds_path=complete_gds_abs,
+                    interposer_adapter=effective_adapter,
+                    report_path=assembly_drc_report_target,
+                    run_dir=drc_run_dir,
+                    topcell=options.top_cell or None,
+                )
+                adk_command = [worker_py] + adk_cli
+                _log("$ " + " ".join(adk_command))
+                adk_run = run_async(
+                    adk_command,
+                    on_stdout=_log,
+                    on_stderr=lambda s: _log("[stderr] " + s),
+                    cancel_event=cancel_event,
+                )
+                assembly_drc_exit = adk_run.exit_code
+                if os.path.exists(assembly_drc_report_target):
+                    assembly_drc_report = assembly_drc_report_target
+
         return ExportResult(
             exit_code=run.exit_code,
             cancelled=run.cancelled,
@@ -290,11 +442,11 @@ def run_export(board, options, plugin_dir,
                 if options.emit_interposer_gds else ""
             ),
             complete_gds_path=(
-                os.path.join(options.output_dir,
-                             "%s_complete.gds" % board_name)
-                if options.emit_complete_gds else ""
+                complete_gds_abs if options.emit_complete_gds else ""
             ),
             cupillar_drc_path=drc_report,
+            assembly_drc_exit_code=assembly_drc_exit,
+            assembly_drc_report_path=assembly_drc_report,
         )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
