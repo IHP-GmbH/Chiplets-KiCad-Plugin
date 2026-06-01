@@ -7,6 +7,7 @@ Extracts trace segments from HYP and generates polygons on appropriate PDK layer
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -25,50 +26,12 @@ except ImportError:
     sys.exit(1)
 
 
-# Hard-coded fallback layer coordinates used when the ADK config cannot be
-# located. Kept in sync with adk/config/layers.json at the time of writing.
-_ADK_LAYER_FALLBACKS: Dict[str, Tuple[int, int]] = {
-    'exchange0': (190, 0),
-    'exchange1': (191, 0),
-}
-
-_ADK_LAYER_WARNED = False
-
-
-def _load_adk_layer(layer_name: str) -> Tuple[int, int]:
-    """Resolve an abstract ADK layer name to its (gds_layer, gds_datatype).
-
-    Reads ``adk/config/layers.json`` so the layer registry lives in a single
-    source of truth that both the ADK KLayout deck and this converter share.
-    The ADK root is resolved from the ``ADK_ROOT`` environment variable when
-    set; otherwise it defaults to ``../adk`` relative to this file. If the
-    config is unreachable, falls back to the values in
-    ``_ADK_LAYER_FALLBACKS`` and prints a one-time warning.
-    """
-    global _ADK_LAYER_WARNED
-
-    env_root = os.environ.get('ADK_ROOT')
-    adk_root = Path(env_root) if env_root else Path(__file__).resolve().parent.parent / 'adk'
-    config_path = adk_root / 'config' / 'layers.json'
-
-    try:
-        with config_path.open() as fh:
-            cfg = json.load(fh)
-        layer = cfg['layers'][layer_name]
-        return int(layer['gds_layer']), int(layer['gds_datatype'])
-    except (FileNotFoundError, KeyError, json.JSONDecodeError, OSError) as err:
-        if layer_name not in _ADK_LAYER_FALLBACKS:
-            raise KeyError(
-                f"ADK layer '{layer_name}' not found in {config_path} and no fallback registered"
-            ) from err
-        if not _ADK_LAYER_WARNED:
-            print(
-                f"Warning: could not read ADK layer registry at {config_path} ({err}); "
-                f"falling back to built-in defaults. Set ADK_ROOT to silence this warning.",
-                file=sys.stderr,
-            )
-            _ADK_LAYER_WARNED = True
-        return _ADK_LAYER_FALLBACKS[layer_name]
+# Chiplet mechanical boundaries are ADK assembly metadata, not fabrication
+# geometry. They are emitted to a <gds>.boundaries.json manifest (see
+# GDSGenerator._write_boundary_manifest) and live in NO PDK layer namespace,
+# so the assembly contract is independent of any process's layer numbers.
+# This replaces the historical practice of stamping the boundary on the
+# exchange0 layer (190/0), which is a real IHP SG13G2 fab layer.
 
 
 @dataclass
@@ -497,6 +460,7 @@ class GDSGenerator:
         self._gds_layers: Dict[str, int] = {}  # Cache for layer indices
         self._via_cells: Dict[str, db.Cell] = {}  # Cache for via PCell instances
         self._via_group_cells: Dict[str, db.Cell] = {}  # metal_pair -> group cell
+        self._boundary_records: List[dict] = []  # chiplet boundaries -> manifest
         self._pcells_available = self._check_pcells_available()
 
     def _check_pcells_available(self) -> bool:
@@ -1125,8 +1089,11 @@ class GDSGenerator:
             # Insert the device cell as an instance
             self.top_cell.insert(db.DCellInstArray(imported_cell, trans))
 
-            # Stamp chiplet boundary on the ADK 'exchange0' layer (assembly DRC input)
-            exchange0_layer = self.layout.layer(*_load_adk_layer('exchange0'))
+            # Record the chiplet mechanical boundary for the assembly DRC.
+            # This is ADK assembly metadata, not fabrication geometry: it is
+            # written to the <gds>.boundaries.json manifest (see write()) and
+            # lives in NO PDK layer namespace, so it cannot alias a process
+            # layer or the chiplet's own internal geometry.
             cell_bbox = imported_cell.dbbox()
             if not flip_chip and device.rotation != 0.0:
                 # Non-flip with rotation: transform bbox corners through DCplxTrans
@@ -1140,7 +1107,8 @@ class GDSGenerator:
             else:
                 # Flip-chip (translation-only) or no rotation: transformed bbox works
                 boundary_poly = db.DPolygon(cell_bbox.transformed(trans))
-            self.top_cell.shapes(exchange0_layer).insert(boundary_poly)
+            self._record_boundary(device.ref, expected_cell_name, boundary_poly,
+                                  x_um, y_um, device.rotation, flip_chip)
 
             mirror_str = " [mirror-X, flip-chip, per-layer]" if flip_chip else ""
             print(f"  Added device {device.ref}: {gds_path.name} ({imported_cell.name}) at anchor ({x_um:.2f}, {y_um:.2f}) um{mirror_str}")
@@ -1447,12 +1415,69 @@ class GDSGenerator:
             self.layout.prune_cell(idx, -1)
         return len(orphans)
 
+    def _record_boundary(self, instance: str, source_die: str,
+                         boundary_poly: "db.DPolygon",
+                         origin_x_um: float, origin_y_um: float,
+                         rotation_deg: float, flip_chip: bool) -> None:
+        """Accumulate one chiplet mechanical-boundary record for the assembly
+        boundary manifest emitted by write(). polygon_dbu is authoritative for
+        the DRC; polygon_um and transform are identity/provenance."""
+        dbu = self.layout.dbu
+        poly_um, poly_dbu = [], []
+        for p in boundary_poly.each_point_hull():
+            poly_um.append([round(p.x, 6), round(p.y, 6)])
+            poly_dbu.append([int(round(p.x / dbu)), int(round(p.y / dbu))])
+        self._boundary_records.append({
+            "instance": instance,
+            "source_die": source_die,
+            "class": "chiplet",
+            "transform": {
+                "origin_um": [round(origin_x_um, 6), round(origin_y_um, 6)],
+                "rotation_deg": rotation_deg,
+                "mirror_x": bool(flip_chip),
+                "magnification": 1.0,
+            },
+            "polygon_dbu": poly_dbu,
+            "polygon_um": poly_um,
+        })
+
+    def _write_boundary_manifest(self, output_path: str) -> Path:
+        """Write the <stem>.boundaries.json sidecar the ADK assembly DRC reads.
+
+        One polygon per placed chiplet, carried OUTSIDE any fabrication-layer
+        namespace so the assembly contract is PDK-agnostic. Always written (even
+        with zero boundaries) so a manifest is always present beside the GDS.
+        """
+        out = Path(output_path)
+        manifest_path = out.with_name(out.stem + ".boundaries.json")
+        manifest = {
+            "schema": "adk-boundary-manifest",
+            "version": "1.0.0",
+            "generator": "hyp_to_gds.py",
+            "assembly_gds": out.name,
+            "dbu_um": self.layout.dbu,
+            "top_cell": self.top_cell.name,
+            "boundaries": list(self._boundary_records),
+        }
+        try:
+            manifest["assembly_gds_sha256"] = hashlib.sha256(
+                out.read_bytes()).hexdigest()
+        except OSError:
+            pass
+        with manifest_path.open("w") as fh:
+            json.dump(manifest, fh, indent=2)
+        print(f"  Boundary manifest written to: {manifest_path} "
+              f"({len(self._boundary_records)} chiplet boundaries)")
+        return manifest_path
+
     def write(self, output_path: str) -> None:
         """Write layout preserving via cell hierarchy.
 
         PCell variants are resolved to static geometry within their own cells.
         Via instances are grouped by metal pair for a clean hierarchy.
         Context info is stripped so the GDS opens cleanly without PDK dependencies.
+        A <stem>.boundaries.json manifest with the chiplet boundaries is written
+        alongside the GDS for the ADK assembly DRC.
         """
         for via_cell in self._via_cells.values():
             via_cell.flatten(-1, True)
@@ -1460,6 +1485,7 @@ class GDSGenerator:
         save_opts = db.SaveLayoutOptions()
         save_opts.write_context_info = False
         self.layout.write(output_path, save_opts)
+        self._write_boundary_manifest(output_path)
 
 
 def get_default_connection_stacks() -> dict:

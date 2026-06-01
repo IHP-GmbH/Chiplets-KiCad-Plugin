@@ -378,9 +378,11 @@ def run_export(board, options, plugin_dir,
         if not os.path.exists(drc_report):
             drc_report = ""
 
-        # ADK assembly DRC over the complete.gds (chiplets stamped on the
-        # interposer). Runs only when there is a complete.gds to check
-        # and the user did not opt out via emit_assembly_drc=False.
+        # ADK assembly DRC over the complete.gds. The chiplet boundaries come
+        # from the <complete>.boundaries.json manifest that hyp_to_gds wrote
+        # next to the GDS (auto-discovered by run_drc.py); they are not a GDS
+        # layer. Runs only when there is a complete.gds to check and the user
+        # did not opt out via emit_assembly_drc=False.
         assembly_drc_exit = -1
         assembly_drc_report = ""
         complete_gds_abs = os.path.join(
