@@ -30,8 +30,7 @@ Verification coverage:
   visual smoke (gate 47.7f).
 
 See `chiplet-studio/docs/coord_frame_contract.md` for the canonical
-coordinate frame the writers must honour. See the project CHANGELOG
-for current iteration status.
+coordinate frame the writers must honour.
 
 ## License
 
