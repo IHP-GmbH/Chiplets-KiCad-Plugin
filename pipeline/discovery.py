@@ -191,8 +191,8 @@ def find_adk_drc_runner(plugin_dir, board=None):
 
       1. Environment variable ``ADK_ROOT`` (must point at the ADK root)
       2. KiCad project text variable ``ADK_ROOT`` when ``board`` is set
-      3. Sibling directory: ``<plugin_dir>/../adk`` (matches the default
-         used by ``hyp_to_gds.py::_load_adk_layer``)
+      3. Sibling directory: ``<plugin_dir>/../adk`` (the conventional ADK
+         root location relative to the plugin)
 
     Returns:
         Absolute path (str) to ``run_drc.py``.
