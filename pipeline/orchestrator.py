@@ -40,6 +40,10 @@ class ExportOptions:
     emit_interposer_gds: bool = True
     emit_complete_gds: bool = False
     keep_intermediate_hyp: bool = False
+    # Viewer-only: paint each chiplet boundary onto an annotation GDS layer
+    # (no DRC rule reads it). Drives hyp_to_gds --annotate-boundaries. Off by
+    # default so the production GDS carries no synthetic geometry.
+    annotate_boundaries: bool = False
     top_cell: str = "INTERPOSER"
     connection_type: str = ""          # empty = no --connection-type
     lyp_override: str = ""             # empty = hyp_to_gds default (built-in IHP)
@@ -185,6 +189,11 @@ def build_cli_args(hyp_to_gds_path: str,
             "--complete-output",
             os.path.join(out_dir, "%s_complete.gds" % board_name),
         ]
+
+    # Viewer-only boundary annotation (no DRC rule reads the layer). Harmless
+    # on the interposer GDS -- no chiplets means nothing is painted.
+    if options.annotate_boundaries:
+        args += ["--annotate-boundaries"]
 
     if options.emit_chiplet:
         args += [
