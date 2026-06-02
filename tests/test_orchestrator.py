@@ -54,7 +54,7 @@ def test_defaults_emit_canonical_chiplet_and_interposer(tmp_path):
     # Other optional flags omitted. io_pads / pad_locations are injected by
     # run_export (board auto-extraction), not by the pure build_cli_args.
     for flag in ("-l", "--connection-type", "--io-pads",
-                 "--cupillar-gds", "--pad-locations"):
+                 "--cupillar-gds", "--pad-locations", "--annotate-boundaries"):
         assert flag not in args
 
 
@@ -65,6 +65,18 @@ def test_complete_gds_toggle(tmp_path):
     assert "--with-chiplets" in args
     complete = os.path.join(str(tmp_path), "demo_complete.gds")
     assert args[args.index("--complete-output") + 1] == complete
+
+
+def test_annotate_boundaries_off_by_default(tmp_path):
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, _opts(tmp_path))
+    assert "--annotate-boundaries" not in args
+
+
+def test_annotate_boundaries_toggle(tmp_path):
+    opts = _opts(tmp_path)
+    opts.annotate_boundaries = True
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
+    assert "--annotate-boundaries" in args
 
 
 def test_disable_interposer_drops_output_flag(tmp_path):
