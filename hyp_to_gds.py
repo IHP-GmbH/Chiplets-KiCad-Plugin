@@ -32,6 +32,12 @@ except ImportError:
 # so the assembly contract is independent of any process's layer numbers.
 # This replaces the historical practice of stamping the boundary on the
 # exchange0 layer (190/0), which is a real IHP SG13G2 fab layer.
+#
+# For human inspection only, --annotate-boundaries paints the same polygons
+# (plus an instance label) onto an annotation GDS layer (default 1000/0). That
+# layer is read by NO DRC rule and carries no contract: it cannot produce a
+# false "0 violations" nor alias a fab layer. It is opt-in and off by default,
+# so the production GDS stays free of synthetic geometry.
 
 
 @dataclass
@@ -447,7 +453,9 @@ class GDSGenerator:
             return dict(GDSGenerator._DEFAULT_VIA_PARAMS)
 
     def __init__(self, layer_map: LayerMap, cell_name: str = "INTERPOSER", units: str = "ENGLISH",
-                 stackup_order: List[str] = None, tech_json_path: Optional[str] = None):
+                 stackup_order: List[str] = None, tech_json_path: Optional[str] = None,
+                 annotate_boundaries: bool = False,
+                 boundary_viz_layer: Tuple[int, int] = (1000, 0)):
         self.layer_map = layer_map
         self.units = units
         self.stackup_order = stackup_order or []  # Layer order from HYP STACKUP (top to bottom)
@@ -461,6 +469,10 @@ class GDSGenerator:
         self._via_cells: Dict[str, db.Cell] = {}  # Cache for via PCell instances
         self._via_group_cells: Dict[str, db.Cell] = {}  # metal_pair -> group cell
         self._boundary_records: List[dict] = []  # chiplet boundaries -> manifest
+        # Opt-in, viewer-only annotation of the boundaries. No DRC rule reads
+        # boundary_viz_layer; the contract lives in the manifest, not the GDS.
+        self._annotate_boundaries = bool(annotate_boundaries)
+        self._boundary_viz_layer = boundary_viz_layer
         self._pcells_available = self._check_pcells_available()
 
     def _check_pcells_available(self) -> bool:
@@ -1470,6 +1482,36 @@ class GDSGenerator:
               f"({len(self._boundary_records)} chiplet boundaries)")
         return manifest_path
 
+    def _paint_boundary_annotations(self) -> None:
+        """Paint each chiplet boundary (and its instance label) onto a
+        viewer-only annotation layer, for eyeball inspection of the assembly.
+
+        Opt-in via --annotate-boundaries. The layer (default 1000/0, well
+        outside IHP SG13G2's fab range) is read by NO DRC rule and is not part
+        of the assembly contract -- that lives in the boundary manifest. So it
+        can never alias a fabrication layer nor mask a missing check. Idempotent:
+        clears the layer in the top cell first, so repeated write() calls do not
+        duplicate shapes.
+        """
+        if not self._annotate_boundaries or not self._boundary_records:
+            return
+        viz_layer, viz_dt = self._boundary_viz_layer
+        idx = self.layout.layer(viz_layer, viz_dt)
+        self.top_cell.shapes(idx).clear()
+        for rec in self._boundary_records:
+            pts = [db.Point(x, y) for x, y in rec["polygon_dbu"]]
+            if len(pts) < 3:
+                continue
+            poly = db.Polygon(pts)
+            self.top_cell.shapes(idx).insert(poly)
+            label = rec.get("instance") or rec.get("source_die") or ""
+            if label:
+                c = poly.bbox().center()
+                self.top_cell.shapes(idx).insert(
+                    db.Text(label, db.Trans(db.Vector(c.x, c.y))))
+        print(f"  Boundary annotations painted on {viz_layer}/{viz_dt} "
+              f"({len(self._boundary_records)} chiplets, viewer-only, no rule reads it)")
+
     def write(self, output_path: str) -> None:
         """Write layout preserving via cell hierarchy.
 
@@ -1484,6 +1526,7 @@ class GDSGenerator:
 
         save_opts = db.SaveLayoutOptions()
         save_opts.write_context_info = False
+        self._paint_boundary_annotations()
         self.layout.write(output_path, save_opts)
         self._write_boundary_manifest(output_path)
 
@@ -1878,6 +1921,8 @@ def convert_hyp_to_gds(
     connection_type: str = "",
     cupillar_gds_path: Optional[str] = None,
     io_pads_json: Optional[str] = None,
+    annotate_boundaries: bool = False,
+    boundary_viz_layer: Tuple[int, int] = (1000, 0),
 ) -> bool:
     """
     Main conversion function.
@@ -1895,6 +1940,9 @@ def convert_hyp_to_gds(
                        (deprecated -- use cupillar_gds_path instead)
         connection_type: Connection stack ID for chiplet file update (e.g. "cupillar_opt1")
         cupillar_gds_path: Path to pre-generated cu-pillar GDS (from bump_mirror.py)
+        annotate_boundaries: If True, also paint each chiplet boundary onto a
+                             viewer-only annotation layer (no DRC rule reads it)
+        boundary_viz_layer: (layer, datatype) for the annotation (default 1000/0)
 
     Returns:
         True if conversion was successful
@@ -1947,7 +1995,9 @@ def convert_hyp_to_gds(
             print(f"  {layer}: {count}")
 
     # Generate GDS
-    generator = GDSGenerator(layer_map, cell_name, parser.units, parser.stackup_layers, tech_json_path)
+    generator = GDSGenerator(layer_map, cell_name, parser.units, parser.stackup_layers,
+                             tech_json_path, annotate_boundaries=annotate_boundaries,
+                             boundary_viz_layer=boundary_viz_layer)
 
     if generator._pcells_available:
         print("PDK PCells available - using via_stack PCell for vias")
@@ -2254,6 +2304,22 @@ Examples:
              "combined with --update-chiplet-file, the placed pads are also "
              "injected under the interposer component."
     )
+    parser.add_argument(
+        "--annotate-boundaries",
+        action="store_true",
+        help="Also paint each chiplet boundary (and instance label) onto a "
+             "viewer-only annotation layer for eyeball inspection of the GDS. "
+             "No DRC rule reads this layer; the assembly contract stays in the "
+             "<gds>.boundaries.json manifest. Off by default."
+    )
+    parser.add_argument(
+        "--boundary-viz-layer",
+        type=str,
+        default="1000/0",
+        metavar="LAYER/DATATYPE",
+        help="GDS layer for --annotate-boundaries (default: 1000/0, outside "
+             "IHP SG13G2's fab range). Ignored unless --annotate-boundaries."
+    )
     args = parser.parse_args()
 
     # Determine output path (interposer-only GDS)
@@ -2281,6 +2347,15 @@ Examples:
             ref, path = item.split('=', 1)
             pad_locations[ref.strip()] = path.strip()
 
+    # Parse the annotation layer "LAYER/DATATYPE" (only used if --annotate-boundaries)
+    try:
+        _vl, _vd = args.boundary_viz_layer.split('/', 1)
+        boundary_viz_layer = (int(_vl), int(_vd))
+    except (ValueError, AttributeError):
+        print(f"Error: Invalid --boundary-viz-layer '{args.boundary_viz_layer}'. "
+              "Use LAYER/DATATYPE, e.g. 1000/0.", file=sys.stderr)
+        return 1
+
     # Run conversion
     success = convert_hyp_to_gds(
         hyp_path=args.hyp_file,
@@ -2295,6 +2370,8 @@ Examples:
         connection_type=args.connection_type,
         cupillar_gds_path=args.cupillar_gds,
         io_pads_json=args.io_pads,
+        annotate_boundaries=args.annotate_boundaries,
+        boundary_viz_layer=boundary_viz_layer,
     )
 
     return 0 if success else 1
