@@ -40,6 +40,10 @@ class ExportOptions:
     emit_interposer_gds: bool = True
     emit_complete_gds: bool = False
     keep_intermediate_hyp: bool = False
+    # Viewer-only: paint each chiplet boundary onto an annotation GDS layer
+    # (no DRC rule reads it). Drives hyp_to_gds --annotate-boundaries. Off by
+    # default so the production GDS carries no synthetic geometry.
+    annotate_boundaries: bool = False
     top_cell: str = "INTERPOSER"
     connection_type: str = ""          # empty = no --connection-type
     lyp_override: str = ""             # empty = hyp_to_gds default (built-in IHP)
@@ -185,6 +189,11 @@ def build_cli_args(hyp_to_gds_path: str,
             "--complete-output",
             os.path.join(out_dir, "%s_complete.gds" % board_name),
         ]
+
+    # Viewer-only boundary annotation (no DRC rule reads the layer). Harmless
+    # on the interposer GDS -- no chiplets means nothing is painted.
+    if options.annotate_boundaries:
+        args += ["--annotate-boundaries"]
 
     if options.emit_chiplet:
         args += [
@@ -378,9 +387,11 @@ def run_export(board, options, plugin_dir,
         if not os.path.exists(drc_report):
             drc_report = ""
 
-        # ADK assembly DRC over the complete.gds (chiplets stamped on the
-        # interposer). Runs only when there is a complete.gds to check
-        # and the user did not opt out via emit_assembly_drc=False.
+        # ADK assembly DRC over the complete.gds. The chiplet boundaries come
+        # from the <complete>.boundaries.json manifest that hyp_to_gds wrote
+        # next to the GDS (auto-discovered by run_drc.py); they are not a GDS
+        # layer. Runs only when there is a complete.gds to check and the user
+        # did not opt out via emit_assembly_drc=False.
         assembly_drc_exit = -1
         assembly_drc_report = ""
         complete_gds_abs = os.path.join(
