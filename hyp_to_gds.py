@@ -1780,6 +1780,15 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                         else:
                             print(f"  Skipped {component.get('id')} (orientation={orient})")
 
+        # Auto-declare the interconnect.adapter matching the dies' connection
+        # method (manifest = single source of truth), whether the connection was
+        # chosen via --connection-type or carried in from the board. Drives the
+        # chiplet-studio 3D body render and the ADK interconnect DRC; an explicit
+        # adapter already on the .chiplet is never overwritten.
+        adapter = _maybe_set_interconnect_adapter(data)
+        if adapter:
+            print(f"  Set interconnect.adapter={adapter} (matches die connection)")
+
         # Compute die z-values from connection_stacks
         connection_stacks = data.get('connection_stacks', {})
         for component in data.get('components', []):
@@ -1940,6 +1949,49 @@ def _connection_to_body_diameter(connection_type):
     if any("Ball" in layer.get("name", "") for layer in layers):
         return None
     return method.get("body_diameter_um")
+
+
+def _connection_to_adapter(connection_type):
+    """Interconnect adapter id for a connection-stack id, or None.
+
+    The interconnect.adapter selects the ADK interconnect DRC (IXN pitch/spacing)
+    and the 3D body stackup fragment that chiplet-studio merges at render time.
+    Sourced from the manifest so the method and its adapter stay in lockstep.
+    """
+    if not connection_type:
+        return None
+    im = _import_interconnect_manifest()
+    if im is None:
+        return None
+    try:
+        method = im.get_method(connection_type)
+    except KeyError:
+        return None
+    return method.get("adapter")
+
+
+def _maybe_set_interconnect_adapter(data):
+    """Declare ``interconnect.adapter`` on a .chiplet dict, in place.
+
+    Scans die components for a connection whose manifest method carries an
+    adapter and declares it at the assembly root, so chiplet-studio merges the
+    method's 3D body fragment and the ADK applies the method's IXN pitch/spacing
+    DRC. Works whether the die connection was chosen via --connection-type or
+    carried in from the board. No-op (returns None) when an adapter is already
+    declared (an explicit choice wins) or no die has an adapter-bearing
+    connection. Returns the adapter that was set, otherwise None.
+    """
+    existing = data.get("interconnect")
+    if isinstance(existing, dict) and existing.get("adapter"):
+        return None
+    for comp in data.get("components", []):
+        if comp.get("type") != "die":
+            continue
+        adapter = _connection_to_adapter(comp.get("connection", ""))
+        if adapter:
+            data.setdefault("interconnect", {})["adapter"] = adapter
+            return adapter
+    return None
 
 
 def _import_bump_mirror():
