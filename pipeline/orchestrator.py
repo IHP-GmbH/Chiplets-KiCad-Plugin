@@ -28,8 +28,8 @@ from typing import Dict, List, Optional
 
 # Default ADK interposer adapter used when neither the dialog nor the
 # .chiplet file declare one. Matches the only adapter shipped today
-# (adk/pdk_adapters/interposer/ihp_sg13g2_interposer.drc).
-DEFAULT_INTERPOSER_ADAPTER = "ihp_sg13g2_interposer"
+# (adk/pdk_adapters/interposer/intm4tm2.drc).
+DEFAULT_INTERPOSER_ADAPTER = "intm4tm2"
 
 # Interconnect axis adapter. Empty = no interconnect axis (behaviour identical
 # to before this axis existed). Deliberately NOT defaulted to a cu-pillar
@@ -139,7 +139,7 @@ def load_interposer_adapter(chiplet_path: str) -> str:
     or does not declare the field::
 
         interposer:
-          adapter: "ihp_sg13g2_interposer"
+          adapter: "intm4tm2"
     """
     return _read_adapter_from_block(
         chiplet_path, "interposer", DEFAULT_INTERPOSER_ADAPTER)

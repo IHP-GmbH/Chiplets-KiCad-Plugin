@@ -2342,8 +2342,8 @@ Examples:
     )
     parser.add_argument(
         "-l", "--lyp",
-        default=str(Path(__file__).parent / "interposer_ihp.lyp"),
-        help="KLayout LYP layer properties file (default: interposer_ihp.lyp)"
+        default=str(Path(__file__).parent / "intm4tm2.lyp"),
+        help="KLayout LYP layer properties file (default: intm4tm2.lyp)"
     )
     parser.add_argument(
         "-c", "--cell",

@@ -278,7 +278,7 @@ def test_load_interposer_adapter_empty_value_returns_default(tmp_path):
 
 ADK_RUNNER = "/adk/klayout/drc/run_drc.py"
 GDS = "/tmp/complete.gds"
-ADAPTER = "ihp_sg13g2_interposer"
+ADAPTER = "intm4tm2"
 
 
 def test_build_adk_drc_argv_required_only():

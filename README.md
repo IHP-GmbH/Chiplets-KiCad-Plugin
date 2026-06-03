@@ -91,7 +91,7 @@ The action appears as `Tools > External Plugins > Chiplet Export`.
        `sbump_sac305`. Empty means the writer keeps the dies'
        existing connection field untouched.
      - *LYP override* (optional): use a custom KLayout layer
-       properties file instead of the built-in `interposer_ihp.lyp`.
+       properties file instead of the built-in `intm4tm2.lyp`.
      - *I/O pads JSON* (optional): sidecar JSON from
        `kicad_pcb_to_iopads.py`; pads are rendered in the
        interposer GDS and injected under the interposer component.
@@ -193,7 +193,7 @@ options = ExportOptions(
     emit_interposer_gds=True,
     emit_complete_gds=True,
     top_cell="TOP",
-    lyp_override="/path/to/interposer_ihp.lyp",
+    lyp_override="/path/to/intm4tm2.lyp",
     io_pads_json="",
     cupillar_gds="/path/to/cu_pillars.gds",
 )
