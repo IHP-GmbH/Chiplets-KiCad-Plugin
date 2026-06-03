@@ -1193,18 +1193,25 @@ class GDSGenerator:
             poly = db.DPolygon(points)
             cell.shapes(layer_idx).insert(poly)
 
-        # 3D auxiliary layers (Cu pillar body + SnAg cap, same XY footprint)
+        # 3D auxiliary layers (Cu pillar body + SnAg cap, same XY footprint).
+        # Owned by the interconnect PDK; delegate to its generator when present,
+        # otherwise fall back to the built-in IHP layers (0-regression).
         body_radius = self.CUPILLAR_BODY_DIAMETER / 2.0
-        for layer_name, (layer_num, datatype) in self.CUPILLAR_3D_LAYERS.items():
-            layer_idx = self.layout.layer(layer_num, datatype)
-            points = []
-            for i in range(num_points):
-                angle = 2 * math.pi * i / num_points
-                x = body_radius * math.cos(angle)
-                y = body_radius * math.sin(angle)
-                points.append(db.DPoint(x, y))
-            poly = db.DPolygon(points)
-            cell.shapes(layer_idx).insert(poly)
+        bump3d = _import_bump3d()
+        if bump3d is not None:
+            bump3d.add_3d_bodies(self.layout, cell, body_radius,
+                                 num_points=num_points)
+        else:
+            for layer_name, (layer_num, datatype) in self.CUPILLAR_3D_LAYERS.items():
+                layer_idx = self.layout.layer(layer_num, datatype)
+                points = []
+                for i in range(num_points):
+                    angle = 2 * math.pi * i / num_points
+                    x = body_radius * math.cos(angle)
+                    y = body_radius * math.sin(angle)
+                    points.append(db.DPoint(x, y))
+                poly = db.DPolygon(points)
+                cell.shapes(layer_idx).insert(poly)
 
         return cell
 
@@ -1534,38 +1541,37 @@ class GDSGenerator:
 def get_default_connection_stacks() -> dict:
     """Return default connection stack definitions for .chiplet files.
 
-    Based on PacTech Table 6.1 Cu-Pillar options and solder bump specs.
-    Heights and diameters in micrometers.
+    Sourced from the interconnect PDK manifest (single source of truth);
+    byte-identical to the prior hardcoded PacTech table for the IHP methods.
+    Raises if the interconnect PDK is not available (it is a required sibling
+    dependency of the plugin).
     """
+    im = _import_interconnect_manifest()
+    if im is None:
+        raise RuntimeError(
+            "interconnect_pdk not found. Set INTERCONNECT_PDK_ROOT, or install "
+            "interconnect_pdk as a sibling repo of the plugin."
+        )
+    lib = im.get_connection_library()
     return {
-        "cupillar_opt1": {
-            "description": "PacTech Cu Pillar, Table 6.1 Option 1 (35um opening)",
-            "layers": [
-                {"name": "CuPillar", "material": "Cu", "height": 28.0, "diameter": 44.0},
-                {"name": "SnAgCap", "material": "SnAg", "height": 16.0, "diameter": 44.0},
-            ],
-        },
-        "cupillar_opt2": {
-            "description": "PacTech Cu Pillar, Table 6.1 Option 2 (40um opening)",
-            "layers": [
-                {"name": "CuPillar", "material": "Cu", "height": 32.0, "diameter": 49.0},
-                {"name": "SnAgCap", "material": "SnAg", "height": 16.0, "diameter": 49.0},
-            ],
-        },
-        "cupillar_opt3": {
-            "description": "PacTech Cu Pillar, Table 6.1 Option 3 (45um opening)",
-            "layers": [
-                {"name": "CuPillar", "material": "Cu", "height": 42.0, "diameter": 54.0},
-                {"name": "SnAgCap", "material": "SnAg", "height": 19.0, "diameter": 54.0},
-            ],
-        },
-        "sbump_sac305": {
-            "description": "PacTech SAC305 solder bump (80um ball)",
-            "layers": [
-                {"name": "SolderBall", "material": "SAC305", "height": 80.0, "diameter": 80.0},
-            ],
-        },
+        mid: {
+            "description": stack["description"],
+            "layers": [dict(layer) for layer in stack["layers"]],
+        }
+        for mid, stack in lib.items()
     }
+
+
+def _connection_type_cli_choices():
+    """CLI choices for --connection-type from the manifest (all methods).
+
+    Returns None (argparse accepts any value) when the manifest is unavailable,
+    so --help still works without the interconnect PDK installed.
+    """
+    im = _import_interconnect_manifest()
+    if im is None:
+        return None
+    return im.list_methods()
 
 
 def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
@@ -1774,6 +1780,15 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                         else:
                             print(f"  Skipped {component.get('id')} (orientation={orient})")
 
+        # Auto-declare the interconnect.adapter matching the dies' connection
+        # method (manifest = single source of truth), whether the connection was
+        # chosen via --connection-type or carried in from the board. Drives the
+        # chiplet-studio 3D body render and the ADK interconnect DRC; an explicit
+        # adapter already on the .chiplet is never overwritten.
+        adapter = _maybe_set_interconnect_adapter(data)
+        if adapter:
+            print(f"  Set interconnect.adapter={adapter} (matches die connection)")
+
         # Compute die z-values from connection_stacks
         connection_stacks = data.get('connection_stacks', {})
         for component in data.get('components', []):
@@ -1874,18 +1889,109 @@ def _read_gds_top_cell(gds_path: str) -> Optional[str]:
     return None
 
 
-# Connection-stack id -> Cu-pillar body diameter (IHP SG13G2 Table 6.1).
-# Non-cupillar stacks (e.g. sbump_sac305) map to None and skip pillar gen.
-_CONNECTION_BODY_DIAMETER = {
-    "cupillar_opt1": 44,
-    "cupillar_opt2": 49,
-    "cupillar_opt3": 54,
-}
+def _import_interconnect_manifest():
+    """Import the interconnect PDK manifest reader (sibling repo), or None.
+
+    Located via $INTERCONNECT_PDK_ROOT or a sibling-repo search, mirroring
+    _import_bump_mirror. The interconnect PDK owns the bump-method registry.
+    """
+    try:
+        candidates = []
+        env = os.environ.get("INTERCONNECT_PDK_ROOT")
+        if env:
+            candidates.append(Path(env) / "python")
+        here = Path(__file__).resolve()
+        for base in here.parents:
+            candidates.append(base / "interconnect_pdk" / "python")
+        for cand in candidates:
+            if (cand / "interconnect_manifest.py").is_file():
+                if str(cand) not in sys.path:
+                    sys.path.insert(0, str(cand))
+                import interconnect_manifest
+                return interconnect_manifest
+    except Exception:
+        pass
+    return None
+
+
+def _import_bump3d():
+    """Import the interconnect PDK 3D body generator (sibling repo), or None."""
+    try:
+        here = Path(__file__).resolve()
+        for base in here.parents:
+            cand = base / "interconnect_pdk" / "scripts"
+            if (cand / "bump3d_generator.py").is_file():
+                if str(cand) not in sys.path:
+                    sys.path.insert(0, str(cand))
+                import bump3d_generator
+                return bump3d_generator
+    except Exception:
+        pass
+    return None
 
 
 def _connection_to_body_diameter(connection_type):
-    """Cu-pillar body diameter (um) for a connection-stack id, or None."""
-    return _CONNECTION_BODY_DIAMETER.get(connection_type or "")
+    """Cu-pillar body diameter (um) for a connection-stack id, or None.
+
+    Sourced from the interconnect PDK manifest (single source of truth). Solder
+    bumps (a 'Ball' body) and unknown/empty ids return None -> skip pillar gen.
+    """
+    if not connection_type:
+        return None
+    im = _import_interconnect_manifest()
+    if im is None:
+        return None
+    try:
+        method = im.get_method(connection_type)
+    except KeyError:
+        return None
+    layers = method.get("connection_stack", {}).get("layers", [])
+    if any("Ball" in layer.get("name", "") for layer in layers):
+        return None
+    return method.get("body_diameter_um")
+
+
+def _connection_to_adapter(connection_type):
+    """Interconnect adapter id for a connection-stack id, or None.
+
+    The interconnect.adapter selects the ADK interconnect DRC (IXN pitch/spacing)
+    and the 3D body stackup fragment that chiplet-studio merges at render time.
+    Sourced from the manifest so the method and its adapter stay in lockstep.
+    """
+    if not connection_type:
+        return None
+    im = _import_interconnect_manifest()
+    if im is None:
+        return None
+    try:
+        method = im.get_method(connection_type)
+    except KeyError:
+        return None
+    return method.get("adapter")
+
+
+def _maybe_set_interconnect_adapter(data):
+    """Declare ``interconnect.adapter`` on a .chiplet dict, in place.
+
+    Scans die components for a connection whose manifest method carries an
+    adapter and declares it at the assembly root, so chiplet-studio merges the
+    method's 3D body fragment and the ADK applies the method's IXN pitch/spacing
+    DRC. Works whether the die connection was chosen via --connection-type or
+    carried in from the board. No-op (returns None) when an adapter is already
+    declared (an explicit choice wins) or no die has an adapter-bearing
+    connection. Returns the adapter that was set, otherwise None.
+    """
+    existing = data.get("interconnect")
+    if isinstance(existing, dict) and existing.get("adapter"):
+        return None
+    for comp in data.get("components", []):
+        if comp.get("type") != "die":
+            continue
+        adapter = _connection_to_adapter(comp.get("connection", ""))
+        if adapter:
+            data.setdefault("interconnect", {})["adapter"] = adapter
+            return adapter
+    return None
 
 
 def _import_bump_mirror():
@@ -2286,7 +2392,7 @@ Examples:
     parser.add_argument(
         "--connection-type",
         type=str,
-        choices=list(get_default_connection_stacks().keys()),
+        choices=_connection_type_cli_choices(),
         default="",
         metavar="TYPE",
         help="Connection stack type for chiplet file (e.g., cupillar_opt1, sbump_sac305). "

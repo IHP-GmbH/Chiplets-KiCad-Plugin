@@ -15,16 +15,15 @@ from pathlib import Path
 
 import wx
 
-from .pipeline.orchestrator import ExportOptions, ExportResult, run_export
+from .pipeline.orchestrator import (
+    ExportOptions, ExportResult, run_export, available_connection_types,
+)
 
 
-_CONNECTION_TYPE_CHOICES = [
-    "",                # empty = no --connection-type flag
-    "cupillar_opt1",
-    "cupillar_opt2",
-    "cupillar_opt3",
-    "sbump_sac305",
-]
+# Sourced from the interconnect PDK manifest (falls back to the built-in IHP set
+# if the PDK is not importable). Includes any vendor demo method, so a non-IHP
+# bumping method is selectable from the dialog with no code change.
+_CONNECTION_TYPE_CHOICES = available_connection_types()
 
 
 class ChipletExportDialog(wx.Dialog):
