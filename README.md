@@ -12,8 +12,8 @@ with a single dialog under `Tools > External Plugins > Chiplet Export`.
 
 ## Status
 
-Iteration 2 closed. The plugin is the sole entry point for chiplet
-export. The legacy C++ menu actions (`File > Export > Chiplet...` and
+The plugin is the sole entry point for chiplet export. The legacy
+C++ menu actions (`File > Export > Chiplet...` and
 `File > Export > Hyperlynx...`) have been removed from the kicad fork.
 The headless C++ functions (`ExportBoardToChipletFile`,
 `ExportBoardToHyperlynxFile`) remain available via SWIG for the
@@ -22,12 +22,11 @@ plugin's byte-exact regression tests.
 Verification coverage:
 
 - Byte-exact writer parity against the C++ exporters
-  (`tests/test_byte_exact_writers.py`, gate 47.7b).
+  (`tests/test_byte_exact_writers.py`).
 - Round-trip regression vs the wire-bond demo .chiplet
   (`tests/regenerate_wirebond_demo.py` + chiplet-studio
-  `CoordFrameContract*` gtests, gate 47.7e).
-- Live pcbnew smoke (interf_u demo, gate 47.7d) and chiplet-studio
-  visual smoke (gate 47.7f).
+  `CoordFrameContract*` gtests).
+- Live pcbnew smoke (interf_u demo) and chiplet-studio visual smoke.
 
 See `chiplet-studio/docs/coord_frame_contract.md` for the canonical
 coordinate frame the writers must honour.
@@ -150,11 +149,9 @@ dialog's *Cu-pillar GDS* picker before clicking Run.
 
 **Run hangs with no log output / dialog freezes**
 
-Should no longer happen post gate 47.7d. If it recurs, open
-*Tools > External Plugins > Refresh Plugins*; the Python traceback
-of the failed worker prints to KiCad's stdout. The dialog also
-streams traceback lines into the log control on writer crashes
-(gate 47.7d fix).
+Open *Tools > External Plugins > Refresh Plugins*; the Python
+traceback of the failed worker prints to KiCad's stdout. The dialog
+also streams traceback lines into the log control on writer crashes.
 
 ## Repository layout
 
@@ -171,8 +168,8 @@ chiplet_kicad_plugin/
 │   ├── orchestrator.py        ExportOptions, build_cli_args, run_export
 │   └── runner.py              Async subprocess wrapper
 ├── hyp_to_gds.py              GDS pipeline worker (verbatim copy of
-│                              kicad_designs/kicad_interposer_hyperlynx_to_gds
-│                              imported with Gate 47.2)
+│                              the hyp_to_gds worker from
+│                              kicad_designs/kicad_interposer_hyperlynx_to_gds)
 ├── tests/                     pytest suite (see tests/README.md)
 ├── requirements.txt           Worker venv deps
 └── LICENSE
