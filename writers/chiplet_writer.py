@@ -16,6 +16,11 @@ import sys
 
 import pcbnew
 
+from .connection_stacks import (
+    emit_connection_stacks_block,
+    emit_interconnect_block,
+)
+
 
 def _iu_to_um(iu):
     """Internal units to micrometers. Mirrors iu2um() in the C++ exporter."""
@@ -261,6 +266,11 @@ def write_chiplet(board, output_path):
         f.write('  adapter: "%s"\n' % interposer_adapter)
         f.write("\n")
 
+        # Interconnect adapter (optional second axis). Read from text var
+        # INTERCONNECT_ADAPTER; emitted only when set, mirroring interposer.
+        interconnect_adapter = _lookup_property(board, "INTERCONNECT_ADAPTER")
+        f.write(emit_interconnect_block(interconnect_adapter))
+
         # Technologies
         f.write("technologies:\n")
         for tech_id, lyp_path in tech_map.items():
@@ -270,27 +280,11 @@ def write_chiplet(board, output_path):
             f.write("    dbu: 0.001\n")
             f.write("\n")
 
-        # Connection stacks (default bump library) -- verbatim from C++.
-        f.write("connection_stacks:\n")
-        f.write("  cupillar_opt1:\n")
-        f.write('    description: "PacTech Cu Pillar, Table 6.1 Option 1 (35um opening)"\n')
-        f.write("    layers:\n")
-        f.write("      - {name: CuPillar, material: Cu, height: 28.0, diameter: 44.0}\n")
-        f.write("      - {name: SnAgCap, material: SnAg, height: 16.0, diameter: 44.0}\n")
-        f.write("  cupillar_opt2:\n")
-        f.write('    description: "PacTech Cu Pillar, Table 6.1 Option 2 (40um opening)"\n')
-        f.write("    layers:\n")
-        f.write("      - {name: CuPillar, material: Cu, height: 32.0, diameter: 49.0}\n")
-        f.write("      - {name: SnAgCap, material: SnAg, height: 16.0, diameter: 49.0}\n")
-        f.write("  cupillar_opt3:\n")
-        f.write('    description: "PacTech Cu Pillar, Table 6.1 Option 3 (45um opening)"\n')
-        f.write("    layers:\n")
-        f.write("      - {name: CuPillar, material: Cu, height: 42.0, diameter: 54.0}\n")
-        f.write("      - {name: SnAgCap, material: SnAg, height: 19.0, diameter: 54.0}\n")
-        f.write("  sbump_sac305:\n")
-        f.write('    description: "PacTech SAC305 solder bump (80um ball)"\n')
-        f.write("    layers:\n")
-        f.write("      - {name: SolderBall, material: SAC305, height: 80.0, diameter: 80.0}\n")
+        # Connection stacks (default bump library). Sourced from the
+        # interconnect PDK manifest (single source of truth); byte-identical to
+        # the prior hardcoded literal so the C++ byte-exact parity gate (47.7b)
+        # stays green. export_chiplet.cpp still emits the same literal.
+        f.write(emit_connection_stacks_block())
         f.write("\n")
 
         # Components

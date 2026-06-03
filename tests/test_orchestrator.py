@@ -20,8 +20,11 @@ if str(PLUGIN_ROOT.parent) not in sys.path:
 
 from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
     DEFAULT_INTERPOSER_ADAPTER,
+    DEFAULT_INTERCONNECT_ADAPTER,
     ExportOptions, ExportResult,
-    build_adk_drc_argv, build_cli_args, load_interposer_adapter,
+    build_adk_drc_argv, build_cli_args,
+    load_interposer_adapter, load_interconnect_adapter,
+    available_connection_types,
 )
 
 
@@ -318,3 +321,44 @@ def test_build_adk_drc_argv_threads_zero_passes_through():
     # the builder must not treat it as "unset".
     args = build_adk_drc_argv(ADK_RUNNER, GDS, ADAPTER, threads=0)
     assert args[args.index("--threads") + 1] == "0"
+
+
+# ---------------------------------------------------------------------------
+# Interconnect axis (orthogonal to the interposer adapter; opt-in)
+# ---------------------------------------------------------------------------
+
+def test_export_options_default_interconnect_adapter_empty():
+    assert ExportOptions().interconnect_adapter == ""
+    assert DEFAULT_INTERCONNECT_ADAPTER == ""
+
+
+def test_load_interconnect_adapter_present(tmp_path):
+    p = _write_chiplet(tmp_path, 'interconnect:\n  adapter: "ihp_cupillar"\n')
+    assert load_interconnect_adapter(p) == "ihp_cupillar"
+
+
+def test_load_interconnect_adapter_missing_block_returns_empty(tmp_path):
+    p = _write_chiplet(tmp_path, "interposer:\n  adapter: x\n")
+    assert load_interconnect_adapter(p) == ""
+
+
+def test_load_interconnect_adapter_missing_file_returns_empty(tmp_path):
+    assert load_interconnect_adapter(str(tmp_path / "nope.chiplet")) == ""
+
+
+def test_build_adk_drc_argv_omits_interconnect_by_default():
+    args = build_adk_drc_argv(ADK_RUNNER, GDS, ADAPTER)
+    assert "--interconnect-adapter" not in args
+
+
+def test_build_adk_drc_argv_adds_interconnect_when_set():
+    args = build_adk_drc_argv(ADK_RUNNER, GDS, ADAPTER,
+                              interconnect_adapter="ihp_cupillar")
+    assert args[args.index("--interconnect-adapter") + 1] == "ihp_cupillar"
+
+
+def test_available_connection_types_from_manifest():
+    types = available_connection_types()
+    assert types[0] == ""  # always first: empty = no --connection-type flag
+    for method in ("cupillar_opt2", "sbump_sac305", "vendorx_microbump"):
+        assert method in types
