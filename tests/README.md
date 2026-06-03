@@ -12,19 +12,19 @@ the affected tests cleanly rather than failing.
 
 ## Layout
 
-| File | Coverage | Gate |
-|------|----------|------|
-| `test_chiplet_writer.py`   | Structural invariants on the YAML emitted by `writers/chiplet_writer.py`; includes the interf_u regression that exercises boards whose PROJECT wrapper lacks `GetTextVars`. | 47.3 + 47.7d fix #63 |
-| `test_hyperlynx_writer.py` | Structural invariants on the .hyp emitted by `writers/hyperlynx_writer.py` (metric headers, BOARD / STACKUP / DEVICES blocks, GDS_FILE propagation, PADSTACK id consistency). | 47.4 |
-| `test_discovery.py`        | Worker Python / hyp_to_gds.py discovery chain (env var, .venv, project text var, PATH probe with klayout+yaml import). | 47.5 |
-| `test_runner.py`           | Async subprocess runner: line-by-line stdout/stderr callbacks, exit code propagation, cancel via `threading.Event`, env/cwd plumbing. | 47.5 |
-| `test_orchestrator.py`     | `build_cli_args` argv builder: default toggles, complete-assembly toggle, top-cell override, connection-stack passthrough, LYP / I/O pads / cu-pillar GDS paths, worker-python override exclusion. | 47.6 + 47.7f cupillar |
-| `test_byte_exact_writers.py` | Byte-exact diff: Python writers' output vs the C++ `export_chiplet.cpp` / `export_hyperlynx.cpp` reference files. | 47.7b |
-| `test_io_pads.py`          | IO_CLASS field propagation (heritage from kicad_interposer_hyperlynx_to_gds). | imported 47.2 |
-| `regenerate_wirebond_demo.py` | Driver script (not a pytest module): regenerates the wire-bond demo .chiplet through the Python pipeline; output feeds the chiplet-studio `CoordFrameContract*` gtests. | 47.7e |
-| `check_complete_gds_alignment.py` | klayout regression script that asserts U1's flipped cell sits over the cu-pillar array in the complete-assembly GDS. | imported 47.2 |
+| File | Coverage |
+|------|----------|
+| `test_chiplet_writer.py`   | Structural invariants on the YAML emitted by `writers/chiplet_writer.py`; includes the interf_u regression that exercises boards whose PROJECT wrapper lacks `GetTextVars`. |
+| `test_hyperlynx_writer.py` | Structural invariants on the .hyp emitted by `writers/hyperlynx_writer.py` (metric headers, BOARD / STACKUP / DEVICES blocks, GDS_FILE propagation, PADSTACK id consistency). |
+| `test_discovery.py`        | Worker Python / hyp_to_gds.py discovery chain (env var, .venv, project text var, PATH probe with klayout+yaml import). |
+| `test_runner.py`           | Async subprocess runner: line-by-line stdout/stderr callbacks, exit code propagation, cancel via `threading.Event`, env/cwd plumbing. |
+| `test_orchestrator.py`     | `build_cli_args` argv builder: default toggles, complete-assembly toggle, top-cell override, connection-stack passthrough, LYP / I/O pads / cu-pillar GDS paths, worker-python override exclusion. |
+| `test_byte_exact_writers.py` | Byte-exact diff: Python writers' output vs the C++ `export_chiplet.cpp` / `export_hyperlynx.cpp` reference files. |
+| `test_io_pads.py`          | IO_CLASS field propagation (heritage from kicad_interposer_hyperlynx_to_gds). |
+| `regenerate_wirebond_demo.py` | Driver script (not a pytest module): regenerates the wire-bond demo .chiplet through the Python pipeline; output feeds the chiplet-studio `CoordFrameContract*` gtests. |
+| `check_complete_gds_alignment.py` | klayout regression script that asserts U1's flipped cell sits over the cu-pillar array in the complete-assembly GDS. |
 
-End-of-iter-1 totals: 47 stdlib + writer assertions, 2 byte-exact
+Totals: 47 stdlib + writer assertions, 2 byte-exact
 comparisons, 1 GetTextVars regression, 1 cupillar passthrough, plus
 the regenerate-script-driven gtest regression net. A handful of
 tests skip on hosts without the KiCad fixtures (interf_u demo,
@@ -71,8 +71,7 @@ docker run --rm \
   "
 ```
 
-Round-trip regression net (driver script + chiplet-studio gtests,
-gate 47.7e):
+Round-trip regression net (driver script + chiplet-studio gtests):
 
 ```bash
 # 1. Regenerate the wire-bond demo .chiplet via the Python pipeline.
