@@ -15,7 +15,7 @@ from hyp_to_gds import GDSGenerator, LayerMap, update_chiplet_file  # noqa: E402
 import os  # noqa: E402
 LYP_PATH = Path(os.environ.get(
     "INTERPOSER_LYP",
-    REPO.parents[1] / "interposer" / "interposer_klayout" / "tech" / "interposer_ihp.lyp",
+    REPO.parents[1] / "interposer" / "interposer_klayout" / "tech" / "intm4tm2.lyp",
 ))
 TM2_LAYER = (134, 0)
 
@@ -125,7 +125,7 @@ def test_update_chiplet_file_injects_io_pads(tmp_path):
         "components:\n"
         "- id: interposer\n"
         "  type: interposer\n"
-        "  technology: interposer_tech\n"
+        "  technology: intm4tm2\n"
         "  layout: ''\n"
         "  dimensions:\n"
         "    width: 1000.0\n"
