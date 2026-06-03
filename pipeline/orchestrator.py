@@ -19,6 +19,7 @@ Public surface:
 
 import os
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -157,6 +158,33 @@ def load_interconnect_adapter(chiplet_path: str) -> str:
     """
     return _read_adapter_from_block(
         chiplet_path, "interconnect", DEFAULT_INTERCONNECT_ADAPTER)
+
+
+def available_connection_types() -> List[str]:
+    """Connection-type choices for the export dialog dropdown.
+
+    Always starts with "" (no --connection-type). Sourced from the interconnect
+    PDK manifest (all methods, including any vendor demo); falls back to the
+    built-in IHP set when the interconnect PDK is not importable, so the dialog
+    still opens.
+    """
+    try:
+        candidates = []
+        env = os.environ.get("INTERCONNECT_PDK_ROOT")
+        if env:
+            candidates.append(Path(env) / "python")
+        here = Path(__file__).resolve()
+        for base in here.parents:
+            candidates.append(base / "interconnect_pdk" / "python")
+        for cand in candidates:
+            if (cand / "interconnect_manifest.py").is_file():
+                if str(cand) not in sys.path:
+                    sys.path.insert(0, str(cand))
+                import interconnect_manifest as im
+                return [""] + im.list_methods()
+    except Exception:
+        pass
+    return ["", "cupillar_opt1", "cupillar_opt2", "cupillar_opt3", "sbump_sac305"]
 
 
 def build_adk_drc_argv(adk_runner_path: str,

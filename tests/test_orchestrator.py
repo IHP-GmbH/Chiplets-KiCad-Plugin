@@ -24,6 +24,7 @@ from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
     ExportOptions, ExportResult,
     build_adk_drc_argv, build_cli_args,
     load_interposer_adapter, load_interconnect_adapter,
+    available_connection_types,
 )
 
 
@@ -354,3 +355,10 @@ def test_build_adk_drc_argv_adds_interconnect_when_set():
     args = build_adk_drc_argv(ADK_RUNNER, GDS, ADAPTER,
                               interconnect_adapter="ihp_cupillar")
     assert args[args.index("--interconnect-adapter") + 1] == "ihp_cupillar"
+
+
+def test_available_connection_types_from_manifest():
+    types = available_connection_types()
+    assert types[0] == ""  # always first: empty = no --connection-type flag
+    for method in ("cupillar_opt2", "sbump_sac305", "vendorx_microbump"):
+        assert method in types
