@@ -56,3 +56,43 @@ def test_cli_choices_include_all_methods():
     for method in ("cupillar_opt1", "cupillar_opt2", "cupillar_opt3",
                    "sbump_sac305", "vendorx_microbump"):
         assert method in choices
+
+
+def test_connection_to_adapter_from_manifest():
+    """Each method maps to its manifest interconnect adapter."""
+    assert h._connection_to_adapter("cupillar_opt1") == "ihp_cupillar"
+    assert h._connection_to_adapter("cupillar_opt2") == "ihp_cupillar"
+    assert h._connection_to_adapter("cupillar_opt3") == "ihp_cupillar"
+    assert h._connection_to_adapter("sbump_sac305") == "ihp_sbump"
+    assert h._connection_to_adapter("vendorx_microbump") == "vendorx_microbump"
+    assert h._connection_to_adapter("") is None
+    assert h._connection_to_adapter("bogus") is None
+
+
+def test_auto_emit_sets_adapter_from_die_connection():
+    """A die's connection method auto-declares its interconnect.adapter."""
+    data = {"components": [{"id": "die_a", "type": "die", "connection": "cupillar_opt2"}]}
+    got = h._maybe_set_interconnect_adapter(data)
+    assert got == "ihp_cupillar"
+    assert data["interconnect"]["adapter"] == "ihp_cupillar"
+    # Solder-bump die maps to the sbump adapter.
+    data2 = {"components": [{"id": "d", "type": "die", "connection": "sbump_sac305"}]}
+    assert h._maybe_set_interconnect_adapter(data2) == "ihp_sbump"
+
+
+def test_auto_emit_respects_explicit_adapter():
+    """An adapter already declared on the .chiplet is never overwritten."""
+    data = {"interconnect": {"adapter": "vendorx_microbump"},
+            "components": [{"id": "die_a", "type": "die", "connection": "cupillar_opt2"}]}
+    got = h._maybe_set_interconnect_adapter(data)
+    assert got is None
+    assert data["interconnect"]["adapter"] == "vendorx_microbump"
+
+
+def test_auto_emit_skips_when_no_adapter_bearing_connection():
+    """A die without an adapter-bearing connection declares nothing."""
+    data = {"components": [{"id": "u1", "type": "die"},
+                           {"id": "interp", "type": "interposer"}]}
+    got = h._maybe_set_interconnect_adapter(data)
+    assert got is None
+    assert "interconnect" not in data
