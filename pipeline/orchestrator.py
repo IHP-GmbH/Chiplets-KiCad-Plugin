@@ -30,6 +30,12 @@ from typing import Dict, List, Optional
 # (adk/pdk_adapters/interposer/ihp_sg13g2_interposer.drc).
 DEFAULT_INTERPOSER_ADAPTER = "ihp_sg13g2_interposer"
 
+# Interconnect axis adapter. Empty = no interconnect axis (behaviour identical
+# to before this axis existed). Deliberately NOT defaulted to a cu-pillar
+# adapter: a legacy .chiplet with no `interconnect:` block must never silently
+# gain IXN pitch/spacing checks.
+DEFAULT_INTERCONNECT_ADAPTER = ""
+
 
 @dataclass
 class ExportOptions:
@@ -58,6 +64,9 @@ class ExportOptions:
     # `interposer.adapter` field, with DEFAULT_INTERPOSER_ADAPTER as the
     # final fallback.
     interposer_adapter: str = ""
+    # Interconnect axis adapter override. Empty = read from the .chiplet file's
+    # `interconnect.adapter` field; absent there too = no interconnect axis.
+    interconnect_adapter: str = ""
     # {ref: pin_list_json} auto-extracted die bumps; drives Cu-pillar
     # generation when connection_type names a cupillar stack.
     pad_locations: Dict[str, str] = field(default_factory=dict)
@@ -81,28 +90,21 @@ class ExportResult:
     assembly_drc_report_path: str = ""
 
 
-def load_interposer_adapter(chiplet_path: str) -> str:
-    """Return the interposer adapter declared in a ``.chiplet`` YAML file.
+def _read_adapter_from_block(chiplet_path: str, block_name: str,
+                             default: str) -> str:
+    """Read ``<block_name>:\\n  adapter: <value>`` from a ``.chiplet`` YAML.
 
-    Reads the top-level ``interposer.adapter`` field and returns its
-    value. Falls back to :data:`DEFAULT_INTERPOSER_ADAPTER` when the file
-    is missing, unreadable, or does not declare the field.
-
-    A minimal hand-rolled parser is used so this helper is callable from
-    KiCad's bundled Python (which lacks PyYAML). It accepts the canonical
-    block shape emitted by the writer::
-
-        interposer:
-          adapter: "ihp_sg13g2_interposer"
-
-    Quoted (single or double) and unquoted values are both accepted.
-    Lines beginning with ``#`` and inline ``#`` comments are stripped.
+    A minimal hand-rolled parser (KiCad's bundled Python lacks PyYAML). The
+    block header counts only at column 0; quoted (single/double) and unquoted
+    values are accepted; ``#`` comments (line and inline) are stripped. Returns
+    ``default`` when the file is missing/unreadable or the block/field is absent
+    or empty.
     """
     try:
         with open(chiplet_path, "r", encoding="utf-8") as fh:
             lines = fh.readlines()
     except OSError:
-        return DEFAULT_INTERPOSER_ADAPTER
+        return default
 
     in_block = False
     for raw in lines:
@@ -114,7 +116,7 @@ def load_interposer_adapter(chiplet_path: str) -> str:
         stripped = line.lstrip()
         indent = len(line) - len(stripped)
         if indent == 0:
-            in_block = (stripped == "interposer:")
+            in_block = (stripped == "%s:" % block_name)
             continue
         if not in_block:
             continue
@@ -124,8 +126,37 @@ def load_interposer_adapter(chiplet_path: str) -> str:
                     and value[0] in ("'", '"')
                     and value[-1] == value[0]):
                 value = value[1:-1]
-            return value or DEFAULT_INTERPOSER_ADAPTER
-    return DEFAULT_INTERPOSER_ADAPTER
+            return value or default
+    return default
+
+
+def load_interposer_adapter(chiplet_path: str) -> str:
+    """Return the interposer adapter declared in a ``.chiplet`` YAML file.
+
+    Reads the top-level ``interposer.adapter`` field. Falls back to
+    :data:`DEFAULT_INTERPOSER_ADAPTER` when the file is missing, unreadable,
+    or does not declare the field::
+
+        interposer:
+          adapter: "ihp_sg13g2_interposer"
+    """
+    return _read_adapter_from_block(
+        chiplet_path, "interposer", DEFAULT_INTERPOSER_ADAPTER)
+
+
+def load_interconnect_adapter(chiplet_path: str) -> str:
+    """Return the interconnect adapter declared in a ``.chiplet`` YAML file.
+
+    Reads the top-level ``interconnect.adapter`` field. Returns
+    :data:`DEFAULT_INTERCONNECT_ADAPTER` (``""`` -- no interconnect axis) when
+    the file/block/field is absent, so a legacy design never silently gains the
+    IXN pitch/spacing checks::
+
+        interconnect:
+          adapter: "ihp_cupillar"
+    """
+    return _read_adapter_from_block(
+        chiplet_path, "interconnect", DEFAULT_INTERCONNECT_ADAPTER)
 
 
 def build_adk_drc_argv(adk_runner_path: str,
@@ -135,7 +166,8 @@ def build_adk_drc_argv(adk_runner_path: str,
                        run_dir: Optional[str] = None,
                        topcell: Optional[str] = None,
                        threads: Optional[int] = None,
-                       run_mode: Optional[str] = None) -> List[str]:
+                       run_mode: Optional[str] = None,
+                       interconnect_adapter: str = "") -> List[str]:
     """Construct argv for the ADK ``run_drc.py`` subprocess.
 
     The returned list begins with ``adk_runner_path`` and the required
@@ -158,6 +190,8 @@ def build_adk_drc_argv(adk_runner_path: str,
         args += ["--threads", str(threads)]
     if run_mode:
         args += ["--run_mode", run_mode]
+    if interconnect_adapter:
+        args += ["--interconnect-adapter", interconnect_adapter]
     return args
 
 
@@ -415,6 +449,10 @@ def run_export(board, options, plugin_dir,
                     options.interposer_adapter
                     or load_interposer_adapter(chiplet_final)
                 )
+                effective_interconnect = (
+                    options.interconnect_adapter
+                    or load_interconnect_adapter(chiplet_final)
+                )
                 drc_run_dir = os.path.join(
                     options.output_dir, "assembly_drc",
                 )
@@ -429,6 +467,7 @@ def run_export(board, options, plugin_dir,
                     report_path=assembly_drc_report_target,
                     run_dir=drc_run_dir,
                     topcell=options.top_cell or None,
+                    interconnect_adapter=effective_interconnect,
                 )
                 adk_command = [worker_py] + adk_cli
                 _log("$ " + " ".join(adk_command))
