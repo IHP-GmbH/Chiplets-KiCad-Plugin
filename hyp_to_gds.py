@@ -1971,6 +1971,23 @@ def _read_gds_top_cell(gds_path: str) -> Optional[str]:
     return None
 
 
+# Python module dir inside the interconnect PDK (IHP libs.tech layout).
+_INTERCONNECT_PY = ("libs.tech", "klayout", "python")
+
+
+def _interconnect_python_candidates():
+    """Candidate interconnect-PDK python dirs: env first, then sibling walk."""
+    candidates = []
+    env = os.environ.get("INTERCONNECT_PDK_ROOT")
+    if env:
+        candidates.append(Path(env).joinpath(*_INTERCONNECT_PY))
+    here = Path(__file__).resolve()
+    for base in here.parents:
+        candidates.append(
+            (base / "interconnect_pdk").joinpath(*_INTERCONNECT_PY))
+    return candidates
+
+
 def _import_interconnect_manifest():
     """Import the interconnect PDK manifest reader (sibling repo), or None.
 
@@ -1978,14 +1995,7 @@ def _import_interconnect_manifest():
     _import_bump_mirror. The interconnect PDK owns the bump-method registry.
     """
     try:
-        candidates = []
-        env = os.environ.get("INTERCONNECT_PDK_ROOT")
-        if env:
-            candidates.append(Path(env) / "python")
-        here = Path(__file__).resolve()
-        for base in here.parents:
-            candidates.append(base / "interconnect_pdk" / "python")
-        for cand in candidates:
+        for cand in _interconnect_python_candidates():
             if (cand / "interconnect_manifest.py").is_file():
                 if str(cand) not in sys.path:
                     sys.path.insert(0, str(cand))
@@ -1999,9 +2009,7 @@ def _import_interconnect_manifest():
 def _import_bump3d():
     """Import the interconnect PDK 3D body generator (sibling repo), or None."""
     try:
-        here = Path(__file__).resolve()
-        for base in here.parents:
-            cand = base / "interconnect_pdk" / "scripts"
+        for cand in _interconnect_python_candidates():
             if (cand / "bump3d_generator.py").is_file():
                 if str(cand) not in sys.path:
                     sys.path.insert(0, str(cand))

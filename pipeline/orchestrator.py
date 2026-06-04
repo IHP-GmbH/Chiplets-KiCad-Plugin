@@ -186,12 +186,13 @@ def available_connection_types() -> List[str]:
     """
     try:
         candidates = []
+        py_subdir = ("libs.tech", "klayout", "python")
         env = os.environ.get("INTERCONNECT_PDK_ROOT")
         if env:
-            candidates.append(Path(env) / "python")
+            candidates.append(Path(env).joinpath(*py_subdir))
         here = Path(__file__).resolve()
         for base in here.parents:
-            candidates.append(base / "interconnect_pdk" / "python")
+            candidates.append((base / "interconnect_pdk").joinpath(*py_subdir))
         for cand in candidates:
             if (cand / "interconnect_manifest.py").is_file():
                 if str(cand) not in sys.path:
