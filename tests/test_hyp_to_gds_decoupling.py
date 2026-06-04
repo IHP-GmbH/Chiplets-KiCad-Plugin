@@ -98,6 +98,39 @@ def test_auto_emit_skips_when_no_adapter_bearing_connection():
     assert "interconnect" not in data
 
 
+def test_auto_emit_declares_technology_block():
+    """The declared adapter carries its PDK-backed technology identity
+    (mirrors the technologies: entries; lyp stays in writer-verbatim ${VAR}
+    form for the readers to expand)."""
+    data = {"components": [
+        {"id": "die_a", "type": "die", "connection": "cupillar_opt1"}]}
+    h._maybe_set_interconnect_adapter(data)
+    tech = data["interconnect"]["technology"]
+    assert tech["layer_properties"] == (
+        "${INTERCONNECT_PDK_ROOT}/libs.tech/klayout/tech/interconnect.lyp")
+    assert tech["dbu"] == 0.001
+    assert "PacTech" in tech["description"]
+
+
+def test_explicit_adapter_gains_technology_block():
+    """An explicit adapter is never overwritten, but its derived technology
+    identity is (re)attached so files from older exports gain it."""
+    data = {"interconnect": {"adapter": "vendorx_microbump"},
+            "components": [
+                {"id": "d", "type": "die", "connection": "cupillar_opt2"}]}
+    assert h._maybe_set_interconnect_adapter(data) is None
+    assert data["interconnect"]["adapter"] == "vendorx_microbump"
+    assert "VendorX" in data["interconnect"]["technology"]["description"]
+
+
+def test_unknown_adapter_stays_adapter_only():
+    """A hand-set adapter unknown to the manifest gets no technology block."""
+    data = {"interconnect": {"adapter": "acme_custom"}, "components": []}
+    assert h._maybe_set_interconnect_adapter(data) is None
+    assert data["interconnect"]["adapter"] == "acme_custom"
+    assert "technology" not in data["interconnect"]
+
+
 # ---------------------------------------------------------------------------
 # Interposer PDK discovery (ecosystem convention: env var -> upward walk)
 # ---------------------------------------------------------------------------
@@ -133,8 +166,8 @@ def test_interposer_pdk_env_override_wins(tmp_path, monkeypatch):
 def test_interconnect_pdk_resolves_live_not_fallback(monkeypatch):
     """The interconnect PDK probes resolve the real sibling checkout under
     its IHP layout (libs.tech/klayout/python). Guards against a silent
-    fall-back to builtin tables if the layout moves again: both the manifest
-    reader and the 3D generator must import, via the walk alone."""
+    fall-back to builtin tables if the layout moves again: the manifest
+    reader must import via the walk alone."""
     monkeypatch.delenv("INTERCONNECT_PDK_ROOT", raising=False)
     cands = h._interconnect_python_candidates()
     hit = [c for c in cands if (c / "interconnect_manifest.py").is_file()]
@@ -142,7 +175,18 @@ def test_interconnect_pdk_resolves_live_not_fallback(monkeypatch):
     assert hit[0].parts[-4:] == (
         "interconnect_pdk", "libs.tech", "klayout", "python")
     assert h._import_interconnect_manifest() is not None
-    assert h._import_bump3d() is not None
+
+
+def test_method_bodies_resolved_from_manifest(monkeypatch):
+    """The 3D body layers handed to bump_mirror are method-resolved from the
+    manifest -- a vendor method selects its own layers, never an assumed IHP
+    cu-pillar pair."""
+    monkeypatch.delenv("INTERCONNECT_PDK_ROOT", raising=False)
+    im = h._import_interconnect_manifest()
+    assert im.layers_3d("cupillar_opt1") == [
+        ("CuPillar", 500, 35), ("SnAgCap", 501, 35)]
+    assert im.layers_3d("vendorx_microbump") == [
+        ("VendorXBumpCu", 510, 35), ("VendorXBumpCap", 511, 35)]
 
 
 # ---------------------------------------------------------------------------
