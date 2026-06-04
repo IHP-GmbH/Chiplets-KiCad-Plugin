@@ -192,7 +192,7 @@ def write_chiplet(board, output_path):
     # --- Data gathering ---
 
     interposer_lyp = _lookup_property(board, "INTERPOSER_LYP")
-    interposer_tech_id = "interposer_tech"
+    interposer_tech_id = "intm4tm2"
     tech_map = {}
     if interposer_lyp:
         tech_map[interposer_tech_id] = interposer_lyp
@@ -260,7 +260,7 @@ def write_chiplet(board, output_path):
         # Board Setup > Text Variables > INTERPOSER_ADAPTER.
         interposer_adapter = (
             _lookup_property(board, "INTERPOSER_ADAPTER")
-            or "ihp_sg13g2_interposer"
+            or "intm4tm2"
         )
         f.write("interposer:\n")
         f.write('  adapter: "%s"\n' % interposer_adapter)

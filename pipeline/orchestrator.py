@@ -28,8 +28,8 @@ from typing import Dict, List, Optional
 
 # Default ADK interposer adapter used when neither the dialog nor the
 # .chiplet file declare one. Matches the only adapter shipped today
-# (adk/pdk_adapters/interposer/ihp_sg13g2_interposer.drc).
-DEFAULT_INTERPOSER_ADAPTER = "ihp_sg13g2_interposer"
+# (adk/pdk_adapters/interposer/intm4tm2.drc).
+DEFAULT_INTERPOSER_ADAPTER = "intm4tm2"
 
 # Interconnect axis adapter. Empty = no interconnect axis (behaviour identical
 # to before this axis existed). Deliberately NOT defaulted to a cu-pillar
@@ -91,6 +91,22 @@ class ExportResult:
     assembly_drc_report_path: str = ""
 
 
+def describe_assembly_drc(result: ExportResult) -> str:
+    """One-line verdict for the assembly DRC step of an export.
+
+    ``ExportResult.exit_code`` deliberately does NOT fold in the DRC
+    verdict: the exported artifacts are valid regardless of design-rule
+    violations. Consumers must surface this string (or check
+    ``assembly_drc_exit_code`` themselves) so a FAILED deck is never
+    mistaken for a green run.
+    """
+    if result.assembly_drc_exit_code == -1:
+        return "assembly DRC: NOT RUN"
+    if result.assembly_drc_exit_code == 0:
+        return "assembly DRC: PASSED"
+    return "assembly DRC: FAILED (exit %d)" % result.assembly_drc_exit_code
+
+
 def _read_adapter_from_block(chiplet_path: str, block_name: str,
                              default: str) -> str:
     """Read ``<block_name>:\\n  adapter: <value>`` from a ``.chiplet`` YAML.
@@ -139,7 +155,7 @@ def load_interposer_adapter(chiplet_path: str) -> str:
     or does not declare the field::
 
         interposer:
-          adapter: "ihp_sg13g2_interposer"
+          adapter: "intm4tm2"
     """
     return _read_adapter_from_block(
         chiplet_path, "interposer", DEFAULT_INTERPOSER_ADAPTER)
