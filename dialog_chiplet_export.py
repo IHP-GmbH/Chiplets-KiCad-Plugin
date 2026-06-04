@@ -17,14 +17,8 @@ import wx
 
 from .pipeline.orchestrator import (
     ExportOptions, ExportResult, run_export, available_connection_types,
-    describe_assembly_drc,
+    describe_assembly_drc, discover_dependency_root,
 )
-
-
-# Sourced from the interconnect PDK manifest (falls back to the built-in IHP set
-# if the PDK is not importable). Includes any vendor demo method, so a non-IHP
-# bumping method is selectable from the dialog with no code change.
-_CONNECTION_TYPE_CHOICES = available_connection_types()
 
 
 class ChipletExportDialog(wx.Dialog):
@@ -85,6 +79,60 @@ class ChipletExportDialog(wx.Dialog):
             outs_box.Add(cb, 0, wx.ALL, 2)
         outer.Add(outs_box, 0, wx.EXPAND | wx.ALL, 8)
 
+        # PDK roots: pre-filled with the discovery chain's result (env var ->
+        # project text var -> sibling-checkout walk) so the provenance of
+        # every dependency is visible; editable to point the pipeline at any
+        # other checkout (vendor fork, release tag). An override travels to
+        # the worker as the matching environment variable.
+        pdk_box = wx.StaticBoxSizer(
+            wx.VERTICAL, panel,
+            "PDK roots (auto-discovered; edit to use another checkout)",
+        )
+        pdk_grid = wx.FlexGridSizer(rows=3, cols=2, vgap=4, hgap=8)
+        pdk_grid.AddGrowableCol(1, 1)
+
+        pdk_grid.Add(wx.StaticText(panel, label="Interposer PDK:"),
+                     0, wx.ALIGN_CENTER_VERTICAL)
+        self._interposer_root_ctrl = wx.DirPickerCtrl(
+            panel,
+            path=discover_dependency_root("INTERPOSER_PDK_ROOT", self._board))
+        self._interposer_root_ctrl.SetToolTip(
+            "Interposer PDK checkout. Supplies the fab pad openings and the "
+            "Cu-pillar placement tooling (bump_mirror). Resolved via "
+            "$INTERPOSER_PDK_ROOT, the project text variable, or a sibling "
+            "checkout; override to export against a different interposer PDK.")
+        pdk_grid.Add(self._interposer_root_ctrl, 1, wx.EXPAND)
+
+        pdk_grid.Add(wx.StaticText(panel, label="Interconnect PDK:"),
+                     0, wx.ALIGN_CENTER_VERTICAL)
+        self._interconnect_root_ctrl = wx.DirPickerCtrl(
+            panel,
+            path=discover_dependency_root("INTERCONNECT_PDK_ROOT", self._board))
+        self._interconnect_root_ctrl.SetToolTip(
+            "Interconnect PDK checkout. Its manifest defines the connection "
+            "stacks below (changing this re-reads the list) plus the 3D "
+            "bodies and pitch rules. Resolved via $INTERCONNECT_PDK_ROOT, "
+            "the project text variable, or a sibling checkout.")
+        pdk_grid.Add(self._interconnect_root_ctrl, 1, wx.EXPAND)
+
+        pdk_grid.Add(wx.StaticText(panel, label="ADK:"),
+                     0, wx.ALIGN_CENTER_VERTICAL)
+        self._adk_root_ctrl = wx.DirPickerCtrl(
+            panel,
+            path=discover_dependency_root("ADK_ROOT", self._board))
+        self._adk_root_ctrl.SetToolTip(
+            "Assembly Design Kit checkout. Runs the assembly DRC "
+            "(klayout/drc/run_drc.py) over the complete GDS with the "
+            "interposer + interconnect adapters. Resolved via $ADK_ROOT, "
+            "the project text variable, or a sibling checkout.")
+        pdk_grid.Add(self._adk_root_ctrl, 1, wx.EXPAND)
+
+        pdk_box.Add(pdk_grid, 0, wx.EXPAND | wx.ALL, 4)
+        outer.Add(pdk_box, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._interconnect_root_ctrl.Bind(
+            wx.EVT_DIRPICKER_CHANGED, self._refresh_connection_choices)
+
         # Pipeline options
         opts_box = wx.StaticBoxSizer(wx.VERTICAL, panel, "Pipeline options")
         grid = wx.FlexGridSizer(rows=3, cols=2, vgap=4, hgap=8)
@@ -97,7 +145,12 @@ class ChipletExportDialog(wx.Dialog):
 
         grid.Add(wx.StaticText(panel, label="Connection stack:"),
                  0, wx.ALIGN_CENTER_VERTICAL)
-        self._conn_ctrl = wx.Choice(panel, choices=_CONNECTION_TYPE_CHOICES)
+        # Sourced from the selected interconnect PDK's manifest (vendor
+        # methods included); built-in IHP fallback keeps the dialog usable
+        # when no PDK is on disk.
+        self._conn_choices = available_connection_types(
+            self._interconnect_root_ctrl.GetPath(), board=self._board)
+        self._conn_ctrl = wx.Choice(panel, choices=self._conn_choices)
         self._conn_ctrl.SetSelection(0)
         grid.Add(self._conn_ctrl, 1, wx.EXPAND)
 
@@ -173,12 +226,30 @@ class ChipletExportDialog(wx.Dialog):
     # Options collection
     # ------------------------------------------------------------------
 
+    def _refresh_connection_choices(self, _event=None):
+        """Re-read the connection stacks from the selected interconnect PDK.
+
+        Preserves the current selection when the new manifest still offers
+        it; otherwise resets to "" (no --connection-type).
+        """
+        current = ""
+        idx = self._conn_ctrl.GetSelection()
+        if idx is not None and 0 <= idx < len(self._conn_choices):
+            current = self._conn_choices[idx]
+        self._conn_choices = available_connection_types(
+            self._interconnect_root_ctrl.GetPath(), board=self._board)
+        self._conn_ctrl.Set(self._conn_choices)
+        try:
+            self._conn_ctrl.SetSelection(self._conn_choices.index(current))
+        except ValueError:
+            self._conn_ctrl.SetSelection(0)
+
     def _collect_options(self):
         idx = self._conn_ctrl.GetSelection()
         if idx is None or idx < 0:
             conn = ""
         else:
-            conn = _CONNECTION_TYPE_CHOICES[idx]
+            conn = self._conn_choices[idx]
         return ExportOptions(
             output_dir=self._out_dir_ctrl.GetPath(),
             emit_chiplet=self._cb_chiplet.GetValue(),
@@ -190,6 +261,9 @@ class ChipletExportDialog(wx.Dialog):
             connection_type=conn,
             lyp_override=self._lyp_ctrl.GetPath() or "",
             worker_python_override=self._worker_ctrl.GetPath() or "",
+            interposer_pdk_root=self._interposer_root_ctrl.GetPath() or "",
+            interconnect_pdk_root=self._interconnect_root_ctrl.GetPath() or "",
+            adk_root=self._adk_root_ctrl.GetPath() or "",
         )
 
     # ------------------------------------------------------------------

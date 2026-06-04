@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """
-Unit tests for pipeline/orchestrator.py::build_cli_args.
+Unit tests for pipeline/orchestrator.py's pure helpers.
 
-Stdlib + pytest only. The orchestrator's ``run_export`` is exercised
-end-to-end in Gate 47.7 (functional verification); here we only cover
-the pure CLI-builder helper since it is the part the dialog cannot
-test in isolation otherwise.
+Stdlib + pytest only. ``run_export`` is exercised by the end-to-end
+suites; here we cover the pure helpers (CLI builder, dependency-root
+discovery, connection-type listing, worker env) since they are the
+parts the dialog cannot test in isolation otherwise.
 """
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -21,10 +22,11 @@ if str(PLUGIN_ROOT.parent) not in sys.path:
 from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
     DEFAULT_INTERPOSER_ADAPTER,
     DEFAULT_INTERCONNECT_ADAPTER,
+    DEPENDENCY_ROOT_MARKERS,
     ExportOptions, ExportResult, describe_assembly_drc,
-    build_adk_drc_argv, build_cli_args,
+    build_adk_drc_argv, build_cli_args, build_worker_env,
     load_interposer_adapter, load_interconnect_adapter,
-    available_connection_types,
+    available_connection_types, discover_dependency_root,
 )
 
 
@@ -371,3 +373,78 @@ def test_available_connection_types_from_manifest():
     assert types[0] == ""  # always first: empty = no --connection-type flag
     for method in ("cupillar_opt2", "sbump_sac305", "vendorx_microbump"):
         assert method in types
+
+
+# ---------------------------------------------------------------------------
+# Explicit PDK roots (dialog pickers; the GUI face of the env-var leg)
+# ---------------------------------------------------------------------------
+
+def _fake_pdk_tree(base, var_name):
+    """Create <base>/<dirname>/<marker...> for a dependency root."""
+    dirname, marker = DEPENDENCY_ROOT_MARKERS[var_name]
+    root = base / dirname
+    root.joinpath(*marker).mkdir(parents=True)
+    return root
+
+
+def test_discover_dependency_root_walk_finds_real_siblings(monkeypatch):
+    """With no env vars set, the sibling walk resolves every root of this
+    workspace, and each resolved path ends in the conventional dir name."""
+    for var, (dirname, marker) in DEPENDENCY_ROOT_MARKERS.items():
+        monkeypatch.delenv(var, raising=False)
+        root = discover_dependency_root(var)
+        assert root, "walk did not resolve %s" % var
+        assert Path(root).name == dirname
+        assert Path(root).joinpath(*marker).exists()
+
+
+def test_discover_dependency_root_env_wins_and_bogus_falls_through(
+        tmp_path, monkeypatch):
+    fake = _fake_pdk_tree(tmp_path, "INTERCONNECT_PDK_ROOT")
+    monkeypatch.setenv("INTERCONNECT_PDK_ROOT", str(fake))
+    assert discover_dependency_root("INTERCONNECT_PDK_ROOT") == str(fake)
+
+    # Set-but-invalid (marker missing) falls through to the walk.
+    monkeypatch.setenv("INTERCONNECT_PDK_ROOT", str(tmp_path / "nonexistent"))
+    found = discover_dependency_root("INTERCONNECT_PDK_ROOT")
+    assert found and found != str(fake)
+    assert Path(found).name == "interconnect_pdk"
+
+
+def test_available_connection_types_explicit_root(tmp_path):
+    """An explicit root's manifest defines the dropdown, declaration order
+    preserved -- pointing the dialog at a vendor checkout swaps the list."""
+    root = tmp_path / "vendor_pdk"
+    (root / "manifest").mkdir(parents=True)
+    manifest = {"methods": {"vendor_a": {}, "vendor_b": {}}}
+    (root / "manifest" / "interconnect_methods.json").write_text(
+        json.dumps(manifest))
+    assert available_connection_types(str(root)) == ["", "vendor_a", "vendor_b"]
+
+
+def test_available_connection_types_bad_root_falls_back(tmp_path):
+    types = available_connection_types(str(tmp_path / "not_a_pdk"))
+    assert types == ["", "cupillar_opt1", "cupillar_opt2",
+                     "cupillar_opt3", "sbump_sac305"]
+
+
+def test_build_worker_env_none_when_no_overrides():
+    assert build_worker_env(ExportOptions()) is None
+
+
+def test_build_worker_env_sets_only_given_roots():
+    opts = ExportOptions(interconnect_pdk_root="/x/interconnect_pdk",
+                         adk_root="/y/adk")
+    env = build_worker_env(opts, base_env={"PATH": "/usr/bin"})
+    assert env["INTERCONNECT_PDK_ROOT"] == "/x/interconnect_pdk"
+    assert env["ADK_ROOT"] == "/y/adk"
+    assert "INTERPOSER_PDK_ROOT" not in env
+    assert env["PATH"] == "/usr/bin"  # base preserved
+
+
+def test_build_worker_env_does_not_mutate_os_environ():
+    opts = ExportOptions(interposer_pdk_root="/z/interposer")
+    before = dict(os.environ)
+    env = build_worker_env(opts)
+    assert env["INTERPOSER_PDK_ROOT"] == "/z/interposer"
+    assert dict(os.environ) == before

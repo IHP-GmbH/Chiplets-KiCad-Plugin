@@ -238,6 +238,19 @@ def test_find_adk_runner_env_takes_precedence_over_sibling(tmp_path,
     assert chosen != str(sibling.absolute())
 
 
+def test_find_adk_runner_dialog_override_beats_env(tmp_path, monkeypatch):
+    # The dialog's explicit root outranks every other leg of the chain.
+    env_adk = _make_adk_tree(tmp_path / "env_adk")
+    chosen_adk = _make_adk_tree(tmp_path / "dialog_adk")
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    monkeypatch.setenv(discovery.ADK_ROOT_ENV_VAR, str(tmp_path / "env_adk"))
+    chosen = discovery.find_adk_drc_runner(
+        plugin_dir, root_override=str(tmp_path / "dialog_adk"))
+    assert chosen == str(chosen_adk.absolute())
+    assert chosen != str(env_adk.absolute())
+
+
 def test_find_adk_runner_board_none_skips_text_var(tmp_path, monkeypatch):
     plugin_dir = tmp_path / "plugin"
     plugin_dir.mkdir()
