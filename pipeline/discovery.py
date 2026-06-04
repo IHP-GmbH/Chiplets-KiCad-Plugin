@@ -184,14 +184,16 @@ def find_hyp_to_gds(plugin_dir):
     return str(candidate)
 
 
-def find_adk_drc_runner(plugin_dir, board=None):
+def find_adk_drc_runner(plugin_dir, board=None, root_override=""):
     """Locate ``adk/klayout/drc/run_drc.py``.
 
     Resolution chain (first hit wins):
 
-      1. Environment variable ``ADK_ROOT`` (must point at the ADK root)
-      2. KiCad project text variable ``ADK_ROOT`` when ``board`` is set
-      3. Sibling directory: ``<plugin_dir>/../adk`` (the conventional ADK
+      1. ``root_override`` -- explicit ADK root chosen in the export
+         dialog (the GUI face of the env-var leg)
+      2. Environment variable ``ADK_ROOT`` (must point at the ADK root)
+      3. KiCad project text variable ``ADK_ROOT`` when ``board`` is set
+      4. Sibling directory: ``<plugin_dir>/../adk`` (the conventional ADK
          root location relative to the plugin)
 
     Returns:
@@ -204,6 +206,9 @@ def find_adk_drc_runner(plugin_dir, board=None):
     plugin_dir = Path(plugin_dir).resolve()
     tried = []
     candidates = []
+
+    if root_override:
+        candidates.append(("dialog override", root_override))
 
     env_root = os.environ.get(ADK_ROOT_ENV_VAR)
     if env_root:

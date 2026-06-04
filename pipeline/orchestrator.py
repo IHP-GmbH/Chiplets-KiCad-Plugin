@@ -19,7 +19,6 @@ Public surface:
 
 import os
 import shutil
-import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,6 +35,51 @@ DEFAULT_INTERPOSER_ADAPTER = "intm4tm2"
 # adapter: a legacy .chiplet with no `interconnect:` block must never silently
 # gain IXN pitch/spacing checks.
 DEFAULT_INTERCONNECT_ADAPTER = ""
+
+# Ecosystem dependency roots the export pipeline consumes. The marker subpath
+# validates a candidate root (same shape as hyp_to_gds._PATH_VAR_MARKERS). The
+# dialog surfaces each root as a pre-filled, overridable picker; an override is
+# handed to the worker subprocesses through the corresponding environment
+# variable -- explicit selection IS the convention's env leg, so swapping in
+# another PDK checkout (a vendor fork, a release tag) needs no code change.
+DEPENDENCY_ROOT_MARKERS = {
+    "INTERPOSER_PDK_ROOT": ("interposer", ("libs.tech", "klayout")),
+    "INTERCONNECT_PDK_ROOT": ("interconnect_pdk", ("manifest",)),
+    "ADK_ROOT": ("adk", ("klayout", "drc")),
+}
+
+
+def discover_dependency_root(var_name: str, board=None,
+                             start: Optional[str] = None) -> str:
+    """Resolve an ecosystem dependency root for display in the dialog.
+
+    Chain (first marker-validated hit wins): environment variable ->
+    KiCad project text variable -> sibling-checkout walk up from this
+    file. Returns "" when nothing resolves; the dialog then shows an
+    empty picker and the run fails loud at the consuming step.
+    """
+    from .discovery import _lookup_text_var
+
+    dirname, marker = DEPENDENCY_ROOT_MARKERS[var_name]
+
+    def _valid(root) -> bool:
+        try:
+            return bool(root) and Path(root).joinpath(*marker).exists()
+        except OSError:
+            return False
+
+    env = os.environ.get(var_name, "")
+    if _valid(env):
+        return str(Path(env).absolute())
+    text = _lookup_text_var(board, var_name) or ""
+    if _valid(text):
+        return str(Path(text).absolute())
+    here = Path(start or __file__).resolve()
+    for base in here.parents:
+        cand = base / dirname
+        if _valid(cand):
+            return str(cand)
+    return ""
 
 
 @dataclass
@@ -61,6 +105,13 @@ class ExportOptions:
     # complete.gds was emitted; can be disabled when the user only wants
     # the GDS output.
     emit_assembly_drc: bool = True
+    # Explicit ecosystem dependency roots (PDK selection). Empty = the
+    # consuming step resolves via the discovery chain (env -> project text
+    # var -> sibling walk). A non-empty value is exported to the worker
+    # subprocesses as the corresponding environment variable.
+    interposer_pdk_root: str = ""
+    interconnect_pdk_root: str = ""
+    adk_root: str = ""
     # Explicit adapter override. Empty = read from .chiplet file's
     # `interposer.adapter` field, with DEFAULT_INTERPOSER_ADAPTER as the
     # final fallback.
@@ -176,32 +227,57 @@ def load_interconnect_adapter(chiplet_path: str) -> str:
         chiplet_path, "interconnect", DEFAULT_INTERCONNECT_ADAPTER)
 
 
-def available_connection_types() -> List[str]:
+def available_connection_types(interconnect_root: str = "",
+                               board=None) -> List[str]:
     """Connection-type choices for the export dialog dropdown.
 
-    Always starts with "" (no --connection-type). Sourced from the interconnect
-    PDK manifest (all methods, including any vendor demo); falls back to the
-    built-in IHP set when the interconnect PDK is not importable, so the dialog
-    still opens.
+    Always starts with "" (no --connection-type). Sourced from the manifest of
+    the interconnect PDK at ``interconnect_root`` (or the discovered root when
+    empty): every method in declaration order, including any vendor method --
+    pointing the dialog at another PDK checkout repopulates the choices with
+    that vendor's catalogue. Falls back to the built-in IHP set when no
+    manifest is readable, so the dialog still opens.
+
+    Reads the manifest JSON directly (stdlib only): no import of the PDK's
+    reader module and no sys.path mutation inside KiCad's bundled Python.
     """
-    try:
-        candidates = []
-        py_subdir = ("libs.tech", "klayout", "python")
-        env = os.environ.get("INTERCONNECT_PDK_ROOT")
-        if env:
-            candidates.append(Path(env).joinpath(*py_subdir))
-        here = Path(__file__).resolve()
-        for base in here.parents:
-            candidates.append((base / "interconnect_pdk").joinpath(*py_subdir))
-        for cand in candidates:
-            if (cand / "interconnect_manifest.py").is_file():
-                if str(cand) not in sys.path:
-                    sys.path.insert(0, str(cand))
-                import interconnect_manifest as im
-                return [""] + im.list_methods()
-    except Exception:
-        pass
+    import json
+
+    root = interconnect_root or discover_dependency_root(
+        "INTERCONNECT_PDK_ROOT", board=board)
+    if root:
+        manifest = Path(root) / "manifest" / "interconnect_methods.json"
+        try:
+            with open(manifest, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            methods = list(data["methods"].keys())
+            if methods:
+                return [""] + methods
+        except Exception:
+            pass
     return ["", "cupillar_opt1", "cupillar_opt2", "cupillar_opt3", "sbump_sac305"]
+
+
+def build_worker_env(options: ExportOptions,
+                     base_env: Optional[Dict[str, str]] = None
+                     ) -> Optional[Dict[str, str]]:
+    """Subprocess environment with the dialog's PDK-root overrides applied.
+
+    Returns None (inherit the parent environment untouched) when no root
+    override is set, keeping the default behaviour identical to before the
+    explicit roots existed. Never mutates ``os.environ``.
+    """
+    overrides = {
+        "INTERPOSER_PDK_ROOT": options.interposer_pdk_root,
+        "INTERCONNECT_PDK_ROOT": options.interconnect_pdk_root,
+        "ADK_ROOT": options.adk_root,
+    }
+    set_vars = {name: value for name, value in overrides.items() if value}
+    if not set_vars:
+        return None
+    env = dict(base_env if base_env is not None else os.environ)
+    env.update(set_vars)
+    return env
 
 
 def build_adk_drc_argv(adk_runner_path: str,
@@ -439,6 +515,16 @@ def run_export(board, options, plugin_dir,
             pad_locations=effective_pad_locs)
         cli = build_cli_args(hyp_to_gds, hyp_path, board_name, effective_options)
         command = [worker_py] + cli
+
+        # PDK-root overrides travel as environment variables (the discovery
+        # convention's explicit-selection leg). Logged so the run records
+        # which checkouts produced the artifacts.
+        worker_env = build_worker_env(options)
+        for var, value in (("INTERPOSER_PDK_ROOT", options.interposer_pdk_root),
+                           ("INTERCONNECT_PDK_ROOT", options.interconnect_pdk_root),
+                           ("ADK_ROOT", options.adk_root)):
+            if value:
+                _log("Using %s=%s" % (var, value))
         _log("$ " + " ".join(command))
 
         run = run_async(
@@ -446,6 +532,7 @@ def run_export(board, options, plugin_dir,
             on_stdout=_log,
             on_stderr=lambda s: _log("[stderr] " + s),
             cancel_event=cancel_event,
+            env=worker_env,
         )
 
         hyp_kept = ""
@@ -485,7 +572,8 @@ def run_export(board, options, plugin_dir,
         )
         if should_run_drc:
             try:
-                adk_runner = find_adk_drc_runner(plugin_dir, board=board)
+                adk_runner = find_adk_drc_runner(
+                    plugin_dir, board=board, root_override=options.adk_root)
             except AdkRunnerNotFoundError as exc:
                 _log("Assembly DRC skipped: %s" % exc)
                 adk_runner = ""
@@ -521,6 +609,7 @@ def run_export(board, options, plugin_dir,
                     on_stdout=_log,
                     on_stderr=lambda s: _log("[stderr] " + s),
                     cancel_event=cancel_event,
+                    env=worker_env,
                 )
                 assembly_drc_exit = adk_run.exit_code
                 if os.path.exists(assembly_drc_report_target):

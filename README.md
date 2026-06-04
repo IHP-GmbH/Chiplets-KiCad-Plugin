@@ -84,12 +84,23 @@ The action appears as `Tools > External Plugins > Chiplet Export`.
        chiplet instances flattened into a single GDS.
      - *Keep intermediate .hyp* (default OFF): copy the metric
        Hyperlynx file used to drive the pipeline.
+   - **PDK roots**: the interposer PDK, interconnect PDK and ADK
+     checkouts the pipeline will use. Pre-filled by the discovery
+     chain (environment variable, project text variable, sibling
+     checkout) so the provenance of every dependency is visible;
+     edit a path to export against a different checkout -- e.g. a
+     vendor's interconnect PDK or a pinned release. Changing the
+     interconnect PDK re-reads the connection-stack list from that
+     PDK's manifest. Overrides reach the worker as the matching
+     environment variables (`INTERPOSER_PDK_ROOT`,
+     `INTERCONNECT_PDK_ROOT`, `ADK_ROOT`).
    - **Pipeline options**:
      - *Top cell* (default `TOP`): the top-level cell name written
        into the interposer GDS.
-     - *Connection stack* (optional): `cupillar_opt1/2/3` or
-       `sbump_sac305`. Empty means the writer keeps the dies'
-       existing connection field untouched.
+     - *Connection stack* (optional): the methods declared by the
+       selected interconnect PDK's manifest (e.g. `cupillar_opt1/2/3`,
+       `sbump_sac305`, vendor methods). Empty means the writer keeps
+       the dies' existing connection field untouched.
      - *LYP override* (optional): use a custom KLayout layer
        properties file instead of the built-in `intm4tm2.lyp`.
      - *I/O pads JSON* (optional): sidecar JSON from
