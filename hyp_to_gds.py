@@ -1994,18 +1994,43 @@ def _maybe_set_interconnect_adapter(data):
     return None
 
 
+def _find_interposer_pdk_python():
+    """Locate the interposer PDK's python tooling dir (bump_mirror.py).
+
+    Ecosystem discovery convention (same shape as ADK_ROOT /
+    INTERCONNECT_PDK_ROOT): explicit root via $INTERPOSER_PDK_ROOT first,
+    then an upward walk from this file for a sibling interposer/ checkout.
+    Returns the directory as a Path, or None.
+    """
+    env = os.environ.get("INTERPOSER_PDK_ROOT")
+    if env:
+        cand = Path(env) / "libs.tech" / "klayout" / "python"
+        if (cand / "bump_mirror.py").is_file():
+            return cand
+    here = Path(__file__).resolve()
+    for base in here.parents:
+        cand = base / "interposer" / "libs.tech" / "klayout" / "python"
+        if (cand / "bump_mirror.py").is_file():
+            return cand
+    return None
+
+
 def _import_bump_mirror():
     """Import bump_mirror (Cu-pillar geometry + DRC + auto-resolve).
 
-    Located at <project_root>/interposer/libs.tech/klayout/python/
-    bump_mirror.py relative to this file. Returns the module, or None if it
-    cannot be imported so the caller degrades gracefully (warn + no pillars).
+    Resolved via _find_interposer_pdk_python(). Returns the module, or
+    None when the interposer PDK is not reachable; callers that REQUIRE
+    pillars must treat None as a hard error, never as a soft skip.
     """
     try:
-        scripts_dir = (Path(__file__).resolve().parent.parent
-                       / "interposer" / "libs.tech" / "klayout" / "python")
-        if scripts_dir.is_dir() and str(scripts_dir) not in sys.path:
-            sys.path.insert(0, str(scripts_dir))
+        python_dir = _find_interposer_pdk_python()
+        if python_dir is None:
+            print("Warning: interposer PDK not found (set "
+                  "INTERPOSER_PDK_ROOT or keep the sibling checkout).",
+                  file=sys.stderr)
+            return None
+        if str(python_dir) not in sys.path:
+            sys.path.insert(0, str(python_dir))
         import bump_mirror
         return bump_mirror
     except Exception as exc:
@@ -2147,8 +2172,15 @@ def convert_hyp_to_gds(
         body_diameter = _connection_to_body_diameter(connection_type)
         bm = _import_bump_mirror()
         if bm is None:
-            print("Warning: bump_mirror unavailable; skipping Cu-pillar "
-                  "generation (pillars absent from GDS).", file=sys.stderr)
+            # A connection stack was requested: a GDS without its pillars
+            # would look fabricable while missing the attachment structures,
+            # and no downstream DRC can flag absent geometry. Fail loud.
+            sys.exit(
+                "ERROR: Cu-pillar generation requested (connection=%s) but "
+                "bump_mirror is unavailable. Set INTERPOSER_PDK_ROOT to the "
+                "interposer PDK checkout (libs.tech/klayout/python/"
+                "bump_mirror.py) and retry. Refusing to emit a complete GDS "
+                "without its pillars." % connection_type)
         else:
             print(f"\nGenerating Cu-pillars (connection={connection_type}, "
                   f"body diameter={body_diameter} um) with DRC validation...")
