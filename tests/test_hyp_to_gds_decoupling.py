@@ -241,3 +241,210 @@ def test_default_lyp_resolves_canonical(monkeypatch):
     got = h._find_default_lyp()
     assert got.endswith("interposer/libs.tech/klayout/tech/intm4tm2.lyp")
     assert Path(got).is_file()
+
+
+# ---------------------------------------------------------------------------
+# Per-die connection methods (--die-connections)
+# ---------------------------------------------------------------------------
+
+MIXED_CHIPLET = """\
+format_version: "1.0"
+name: mixed
+components:
+  - id: interposer
+    type: interposer
+    dimensions: {width: 1000.0, height: 1000.0, thickness: 100.0}
+    position: {x: 0.0, y: 0.0, z: 0.0}
+  - id: U1
+    type: die
+    orientation: flip_chip
+    dimensions: {width: 100.0, height: 100.0, thickness: 0.0}
+    position: {x: 10.0, y: 10.0, z: 0.0}
+  - id: U2
+    type: die
+    orientation: flip_chip
+    dimensions: {width: 100.0, height: 100.0, thickness: 0.0}
+    position: {x: 200.0, y: 10.0, z: 0.0}
+"""
+
+
+def _update_mixed(tmp_path, **kwargs):
+    import yaml
+    p = tmp_path / "mixed.chiplet"
+    p.write_text(MIXED_CHIPLET)
+    ok = h.update_chiplet_file(
+        str(p), "/nonexistent.gds", bbox=(0.0, 0.0, 1000.0, 1000.0), **kwargs)
+    assert ok is True
+    return yaml.safe_load(p.read_text())
+
+
+def _die(data, ref):
+    return next(c for c in data["components"] if c.get("id") == ref)
+
+
+def test_connection_stack_from_manifest_resolves_non_default_methods():
+    """Methods outside the default library (vendorx) resolve individually."""
+    stack = h._connection_stack_from_manifest("vendorx_microbump")
+    assert [l["name"] for l in stack["layers"]] == [
+        "VendorXBumpCu", "VendorXBumpCap"]
+    assert h._connection_stack_from_manifest("bogus") is None
+
+
+def test_update_chiplet_per_die_override_wins_over_global(tmp_path):
+    """U1 keeps the assembly default; U2's override selects its own method,
+    whose stack is injected beyond the default library, and each die's z
+    comes from its own stack."""
+    data = _update_mixed(
+        tmp_path, connection_type="cupillar_opt1",
+        die_connections={"U2": "vendorx_microbump"})
+    assert _die(data, "U1")["connection"] == "cupillar_opt1"
+    assert _die(data, "U2")["connection"] == "vendorx_microbump"
+    assert "vendorx_microbump" in data["connection_stacks"]
+    # opt1 stack 28+16=44 on 13.83; vendorx 18+6=24 on 13.83
+    assert _die(data, "U1")["position"]["z"] == 13.83 + 44.0
+    assert _die(data, "U2")["position"]["z"] == 13.83 + 24.0
+
+
+def test_update_chiplet_per_die_without_global(tmp_path):
+    """die_connections alone (no --connection-type) sets only listed dies."""
+    data = _update_mixed(
+        tmp_path, connection_type="",
+        die_connections={"U2": "cupillar_opt2"})
+    assert "connection" not in _die(data, "U1")
+    assert _die(data, "U2")["connection"] == "cupillar_opt2"
+    assert _die(data, "U2")["position"]["z"] == 13.83 + 48.0
+
+
+def test_update_chiplet_per_die_unknown_method_warned_and_skipped(
+        tmp_path, capsys):
+    """An unknown per-die method is warned and skipped; other dies and the
+    legacy global behaviour are unaffected."""
+    data = _update_mixed(
+        tmp_path, connection_type="cupillar_opt1",
+        die_connections={"U2": "bogus_method"})
+    err = capsys.readouterr().err
+    assert "bogus_method" in err
+    assert _die(data, "U1")["connection"] == "cupillar_opt1"
+    assert "connection" not in _die(data, "U2")
+    assert "bogus_method" not in data.get("connection_stacks", {})
+
+
+def test_update_chiplet_legacy_global_unchanged(tmp_path):
+    """No die_connections: byte-equal behaviour to the prior global path."""
+    data = _update_mixed(tmp_path, connection_type="cupillar_opt1")
+    assert _die(data, "U1")["connection"] == "cupillar_opt1"
+    assert _die(data, "U2")["connection"] == "cupillar_opt1"
+    assert sorted(data["connection_stacks"]) == [
+        "cupillar_opt1", "cupillar_opt2", "cupillar_opt3", "sbump_sac305"]
+
+
+# ---------------------------------------------------------------------------
+# Per-die 3D bodies in the generated GDS (mixed methods, one export)
+# ---------------------------------------------------------------------------
+
+MIXED_HYP = """\
+{VERSION=2.14}
+{UNITS=METRIC LENGTH}
+
+{BOARD "synthetic"
+  (PERIMETER_SEGMENT X1=0.000000 Y1=0.000000 X2=0.002000 Y2=0.000000)
+  (PERIMETER_SEGMENT X1=0.002000 Y1=0.000000 X2=0.002000 Y2=-0.001000)
+  (PERIMETER_SEGMENT X1=0.002000 Y1=-0.001000 X2=0.000000 Y2=-0.001000)
+  (PERIMETER_SEGMENT X1=0.000000 Y1=-0.001000 X2=0.000000 Y2=0.000000)
+}
+
+{STACKUP
+  (SIGNAL T=3.5e-05 P=0 C=1.724e-08 L="TopMetal2" M=COPPER)
+}
+
+{DEVICES
+  (? REF="U1" L="TopMetal2" X=0.000200 Y=-0.000500 R=0.00 GDS_FILE="u1.gds")
+  (? REF="U2" L="TopMetal2" X=0.001500 Y=-0.000500 R=0.00 GDS_FILE="u2.gds")
+}
+
+{NET="n1"
+  (SEG X1=0.000100 Y1=-0.000100 X2=0.001900 Y2=-0.000100 W=0.0000040000 L="TopMetal2")
+}
+"""
+
+
+def _write_pin_list(tmp_path, ref):
+    import json
+    pins = []
+    for i, (x_um, y_um) in enumerate([(-100.0, 0.0), (100.0, 0.0)]):
+        pins.append({
+            "name": "p%d" % i, "type": "passive", "pad_index": i,
+            "center_x_dbu": x_um * 1000.0, "center_y_dbu": y_um * 1000.0,
+            "width_dbu": 60000.0, "height_dbu": 60000.0,
+        })
+    p = tmp_path / ("%s_pins.json" % ref)
+    p.write_text(json.dumps(
+        {"version": 1, "chiplet_name": ref, "dbu_um": 0.001, "pins": pins}))
+    return str(p)
+
+
+def _cell_layers(gds_path, cell_name):
+    """{(layer, datatype)} with shapes under `cell_name` (flat)."""
+    from klayout import db
+    layout = db.Layout()
+    layout.read(gds_path)
+    cell = None
+    for ci in range(layout.cells()):
+        if layout.cell(ci).name == cell_name:
+            cell = layout.cell(ci)
+            break
+    assert cell is not None, "cell %s not in %s" % (cell_name, gds_path)
+    found = set()
+    for li in layout.layer_indexes():
+        info = layout.get_info(li)
+        if not cell.begin_shapes_rec(li).at_end():
+            found.add((info.layer, info.datatype))
+    return found
+
+
+def test_mixed_methods_draw_each_dies_own_bodies(tmp_path, monkeypatch):
+    """One export, two dies, two methods: U1 (default cupillar_opt1) gets
+    IHP bodies 500/501, U2 (vendorx override) gets 510/511 -- in the SAME
+    GDS, each under its own CUPILLARS_<ref> cell."""
+    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
+    monkeypatch.delenv("INTERCONNECT_PDK_ROOT", raising=False)
+    hyp = tmp_path / "mixed.hyp"
+    hyp.write_text(MIXED_HYP)
+    out = tmp_path / "mixed_interposer.gds"
+    ok = h.convert_hyp_to_gds(
+        hyp_path=str(hyp), output_path=str(out),
+        lyp_path=h._find_default_lyp(),
+        pad_locations={"U1": _write_pin_list(tmp_path, "U1"),
+                       "U2": _write_pin_list(tmp_path, "U2")},
+        connection_type="cupillar_opt1",
+        die_connections={"U2": "vendorx_microbump"},
+    )
+    assert ok is True
+    u1 = _cell_layers(str(out), "CUPILLARS_U1")
+    u2 = _cell_layers(str(out), "CUPILLARS_U2")
+    assert {(500, 35), (501, 35)} <= u1
+    assert not ({(510, 35), (511, 35)} & u1)
+    assert {(510, 35), (511, 35)} <= u2
+    assert not ({(500, 35), (501, 35)} & u2)
+
+
+def test_single_method_export_unchanged_by_die_connections_param(
+        tmp_path, monkeypatch):
+    """Without die_connections the global method drives every die (legacy)."""
+    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
+    monkeypatch.delenv("INTERCONNECT_PDK_ROOT", raising=False)
+    hyp = tmp_path / "single.hyp"
+    hyp.write_text(MIXED_HYP)
+    out = tmp_path / "single_interposer.gds"
+    ok = h.convert_hyp_to_gds(
+        hyp_path=str(hyp), output_path=str(out),
+        lyp_path=h._find_default_lyp(),
+        pad_locations={"U1": _write_pin_list(tmp_path, "U1"),
+                       "U2": _write_pin_list(tmp_path, "U2")},
+        connection_type="cupillar_opt1",
+    )
+    assert ok is True
+    for ref in ("U1", "U2"):
+        layers = _cell_layers(str(out), "CUPILLARS_%s" % ref)
+        assert {(500, 35), (501, 35)} <= layers
+        assert not ({(510, 35), (511, 35)} & layers)

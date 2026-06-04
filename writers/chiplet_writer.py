@@ -176,6 +176,59 @@ def write_die_pin_lists(board, out_dir):
     return result
 
 
+# Footprint field naming the die's interconnect method (a manifest method
+# id, e.g. "cupillar_opt2"). Lives on the footprint -- same family as
+# GDS_FILE / ORIENTATION -- so per-die method selection persists in the
+# board and survives re-export.
+CONNECTION_FIELD = "CONNECTION"
+
+
+def list_die_refs(board):
+    """Sorted refs of the board's die footprints (GDS_FILE field present)."""
+    return sorted(fp.GetReference() for fp in list(board.Footprints())
+                  if _field_text(fp, "GDS_FILE"))
+
+
+def read_die_connections(board):
+    """Per-die interconnect methods from the board's footprint fields.
+
+    Returns {ref: method id} for every die footprint (GDS_FILE present)
+    whose CONNECTION field is non-empty. Dies without the field fall back
+    to the export's assembly-global connection type downstream.
+    """
+    result = {}
+    for fp in list(board.Footprints()):
+        if not _field_text(fp, "GDS_FILE"):
+            continue
+        method = _field_text(fp, CONNECTION_FIELD).strip()
+        if method:
+            result[fp.GetReference()] = method
+    return result
+
+
+def write_die_connections(board, mapping):
+    """Persist per-die interconnect methods to footprint CONNECTION fields.
+
+    `mapping` is {ref: method id}; an empty value clears the override (the
+    die falls back to the assembly default). Only die footprints (GDS_FILE
+    present) are touched, and only when the field text actually changes.
+    Returns the refs that were modified; the caller owns saving the board.
+    """
+    changed = []
+    for fp in list(board.Footprints()):
+        if not _field_text(fp, "GDS_FILE"):
+            continue
+        ref = fp.GetReference()
+        if ref not in mapping:
+            continue
+        new = (mapping[ref] or "").strip()
+        if _field_text(fp, CONNECTION_FIELD).strip() == new:
+            continue
+        fp.SetField(CONNECTION_FIELD, new)
+        changed.append(ref)
+    return changed
+
+
 def write_chiplet(board, output_path):
     """Write `board` to `output_path` as an intermediate .chiplet file.
 
