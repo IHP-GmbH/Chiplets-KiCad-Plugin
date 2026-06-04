@@ -152,3 +152,45 @@ def test_writer_survives_board_without_text_vars(tmp_path):
     out = tmp_path / "interf_u.chiplet"
     assert write_chiplet(board, str(out)) is True
     assert out.exists() and out.stat().st_size > 0
+
+
+def test_die_connection_field_roundtrip(fixture_board_path):
+    """list/read/write_die_connections operate on the die footprints'
+    CONNECTION fields (in-memory board; nothing is saved here)."""
+    from chiplet_kicad_plugin.writers.chiplet_writer import (
+        list_die_refs, read_die_connections, write_die_connections)
+
+    board = pcbnew.LoadBoard(fixture_board_path)
+    refs = list_die_refs(board)
+    assert refs, "fixture board has no die footprints (GDS_FILE field)"
+
+    target = refs[0]
+    initial = read_die_connections(board)
+    new_value = ("cupillar_opt2" if initial.get(target) != "cupillar_opt2"
+                 else "cupillar_opt3")
+
+    changed = write_die_connections(board, {target: new_value})
+    assert changed == [target]
+    assert read_die_connections(board)[target] == new_value
+
+    # Same value again -> no-op.
+    assert write_die_connections(board, {target: new_value}) == []
+
+    # Clearing the override removes the die from the map.
+    assert write_die_connections(board, {target: ""}) == [target]
+    assert target not in read_die_connections(board)
+
+
+def test_write_die_connections_ignores_non_die_footprints(fixture_board_path):
+    """Refs without a GDS_FILE field are never touched."""
+    from chiplet_kicad_plugin.writers.chiplet_writer import (
+        list_die_refs, write_die_connections)
+
+    board = pcbnew.LoadBoard(fixture_board_path)
+    die_refs = set(list_die_refs(board))
+    other = [fp.GetReference() for fp in board.Footprints()
+             if fp.GetReference() not in die_refs]
+    if not other:
+        pytest.skip("fixture board has only die footprints")
+    changed = write_die_connections(board, {other[0]: "cupillar_opt1"})
+    assert changed == []

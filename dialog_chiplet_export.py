@@ -242,11 +242,12 @@ class ChipletExportDialog(wx.Dialog):
         self._top_cell_ctrl = wx.TextCtrl(panel, value="INTERPOSER")
         grid.Add(self._top_cell_ctrl, 1, wx.EXPAND)
 
-        grid.Add(wx.StaticText(panel, label="Connection stack:"),
+        grid.Add(wx.StaticText(panel, label="Connection stack (default):"),
                  0, wx.ALIGN_CENTER_VERTICAL)
         # Sourced from the selected interconnect PDK's manifest (vendor
         # methods included); built-in IHP fallback keeps the dialog usable
-        # when no PDK is on disk.
+        # when no PDK is on disk. Per-die overrides below win over this
+        # assembly-wide default.
         self._conn_choices = available_connection_types(
             self._interconnect_root_ctrl.GetPath(), board=self._board)
         self._conn_ctrl = wx.Choice(panel, choices=self._conn_choices)
@@ -268,6 +269,34 @@ class ChipletExportDialog(wx.Dialog):
 
         opts_box.Add(grid, 0, wx.EXPAND | wx.ALL, 4)
         outer.Add(opts_box, 0, wx.EXPAND | wx.ALL, 8)
+
+        # Per-die connection method: one row per die footprint (GDS_FILE
+        # field). Initialized from each footprint's CONNECTION field and
+        # written back on Run, so the board stays the source of truth for
+        # per-die method selection. A die on "(use default)" follows the
+        # assembly-wide stack above; mixed selections give each die its own
+        # method's 3D bodies, connection stack and DRC numbers.
+        self._die_conn_ctrls = {}
+        self._die_conn_items = {}
+        die_refs = self._die_refs()
+        if die_refs:
+            die_box = wx.StaticBoxSizer(
+                wx.VERTICAL, panel,
+                "Per-die connection (overrides the default; saved to the "
+                "footprint's CONNECTION field)")
+            die_grid = wx.FlexGridSizer(rows=len(die_refs), cols=2,
+                                        vgap=2, hgap=8)
+            die_grid.AddGrowableCol(1, 1)
+            board_conns = self._board_die_connections()
+            for ref in die_refs:
+                die_grid.Add(wx.StaticText(panel, label="%s:" % ref),
+                             0, wx.ALIGN_CENTER_VERTICAL)
+                ctrl = wx.Choice(panel)
+                self._die_conn_ctrls[ref] = ctrl
+                self._set_die_choice_items(ref, board_conns.get(ref, ""))
+                die_grid.Add(ctrl, 1, wx.EXPAND)
+            die_box.Add(die_grid, 0, wx.EXPAND | wx.ALL, 4)
+            outer.Add(die_box, 0, wx.EXPAND | wx.ALL, 8)
 
         # Worker python override
         worker_box = wx.StaticBoxSizer(
@@ -322,6 +351,57 @@ class ChipletExportDialog(wx.Dialog):
         return str(Path.home())
 
     # ------------------------------------------------------------------
+    # Per-die connection rows
+    # ------------------------------------------------------------------
+
+    def _die_refs(self):
+        """Sorted refs of the board's die footprints (GDS_FILE field)."""
+        if self._board is None:
+            return []
+        try:
+            from .writers.chiplet_writer import list_die_refs
+            return list_die_refs(self._board)
+        except Exception:
+            return []
+
+    def _board_die_connections(self):
+        """{ref: method} persisted in the footprints' CONNECTION fields."""
+        if self._board is None:
+            return {}
+        try:
+            from .writers.chiplet_writer import read_die_connections
+            return read_die_connections(self._board)
+        except Exception:
+            return {}
+
+    def _set_die_choice_items(self, ref, current):
+        """(Re)populate one die's method choice, selecting `current`.
+
+        Items are the manifest methods plus, when the board carries a value
+        this manifest does not know (e.g. a different PDK root), that value
+        itself -- an existing board selection is never dropped silently.
+        """
+        methods = [c for c in self._conn_choices if c]
+        if current and current not in methods:
+            methods.append(current)
+        self._die_conn_items[ref] = [""] + methods
+        ctrl = self._die_conn_ctrls[ref]
+        ctrl.Set(["(use default)"] + methods)
+        try:
+            ctrl.SetSelection(self._die_conn_items[ref].index(current))
+        except ValueError:
+            ctrl.SetSelection(0)
+
+    def _die_conn_value(self, ref):
+        """Currently selected method for `ref` ("" = use default)."""
+        ctrl = self._die_conn_ctrls[ref]
+        items = self._die_conn_items[ref]
+        idx = ctrl.GetSelection()
+        if idx is None or not (0 <= idx < len(items)):
+            return ""
+        return items[idx]
+
+    # ------------------------------------------------------------------
     # Options collection
     # ------------------------------------------------------------------
 
@@ -345,12 +425,20 @@ class ChipletExportDialog(wx.Dialog):
         except ValueError:
             self._conn_ctrl.SetSelection(0)
 
+        # The per-die rows offer the same manifest's methods; each keeps
+        # its current selection when the new manifest still has it.
+        for ref in getattr(self, "_die_conn_ctrls", {}):
+            self._set_die_choice_items(ref, self._die_conn_value(ref))
+
     def _collect_options(self):
         idx = self._conn_ctrl.GetSelection()
         if idx is None or idx < 0:
             conn = ""
         else:
             conn = self._conn_choices[idx]
+        die_conns = {ref: self._die_conn_value(ref)
+                     for ref in self._die_conn_ctrls}
+        die_conns = {ref: m for ref, m in die_conns.items() if m}
         return ExportOptions(
             output_dir=self._out_dir_ctrl.GetPath(),
             emit_chiplet=self._cb_chiplet.GetValue(),
@@ -360,6 +448,7 @@ class ChipletExportDialog(wx.Dialog):
             annotate_boundaries=self._cb_annotate.GetValue(),
             top_cell=self._top_cell_ctrl.GetValue() or "INTERPOSER",
             connection_type=conn,
+            die_connections=die_conns,
             lyp_override=self._lyp_ctrl.GetPath() or "",
             worker_python_override=self._worker_ctrl.GetPath() or "",
             interposer_pdk_root=self._interposer_root_ctrl.GetPath() or "",
@@ -396,6 +485,24 @@ class ChipletExportDialog(wx.Dialog):
         self._log_ctrl.SetValue("")
         self._cancel_event = threading.Event()
         self._set_running(True)
+
+        # Persist the per-die selections to the footprints' CONNECTION
+        # fields (including cleared overrides) so the board and this export
+        # agree; the user saves the board to keep them.
+        if self._die_conn_ctrls and self._board is not None:
+            try:
+                from .writers.chiplet_writer import write_die_connections
+                changed = write_die_connections(
+                    self._board,
+                    {ref: self._die_conn_value(ref)
+                     for ref in self._die_conn_ctrls})
+                if changed:
+                    self._append_log_safe(
+                        "Updated CONNECTION field on: %s (save the board "
+                        "to keep it)" % ", ".join(changed))
+            except Exception as exc:
+                self._append_log_safe(
+                    "Warning: could not write CONNECTION fields: %s" % exc)
 
         def _worker():
             try:

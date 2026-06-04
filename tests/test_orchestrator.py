@@ -142,6 +142,19 @@ def test_pad_locations_passthrough(tmp_path):
     assert "U2=/tmp/U2_pins.json" in spec
 
 
+def test_die_connections_passthrough_sorted(tmp_path):
+    opts = _opts(tmp_path)
+    opts.die_connections = {"U2": "vendorx_microbump", "U1": "cupillar_opt1"}
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
+    spec = args[args.index("--die-connections") + 1]
+    assert spec == "U1=cupillar_opt1,U2=vendorx_microbump"
+
+
+def test_die_connections_omitted_when_empty(tmp_path):
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, _opts(tmp_path))
+    assert "--die-connections" not in args
+
+
 def test_argv_starts_with_script_and_input(tmp_path):
     args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, _opts(tmp_path))
     # hyp_to_gds.py expects ``hyp_file`` as positional first argument.

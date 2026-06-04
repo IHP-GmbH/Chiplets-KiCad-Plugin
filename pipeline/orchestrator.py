@@ -122,6 +122,11 @@ class ExportOptions:
     # {ref: pin_list_json} auto-extracted die bumps; drives Cu-pillar
     # generation when connection_type names a cupillar stack.
     pad_locations: Dict[str, str] = field(default_factory=dict)
+    # {ref: method id} per-die connection overrides. A die not listed uses
+    # connection_type. Empty = auto-read from the board's per-footprint
+    # CONNECTION fields (run_export), so the board stays the source of
+    # truth for per-die method selection.
+    die_connections: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -510,6 +515,11 @@ def build_cli_args(hyp_to_gds_path: str,
     if options.connection_type:
         args += ["--connection-type", options.connection_type]
 
+    if options.die_connections:
+        spec = ",".join("%s=%s" % (ref, m)
+                        for ref, m in sorted(options.die_connections.items()))
+        args += ["--die-connections", spec]
+
     if options.io_pads_json:
         args += ["--io-pads", options.io_pads_json]
 
@@ -553,6 +563,7 @@ def run_export(board, options, plugin_dir,
     from .runner import run_async
     from ..writers.chiplet_writer import (
         write_chiplet, write_io_pads_json, write_die_pin_lists,
+        read_die_connections,
     )
     from ..writers.hyperlynx_writer import write_hyperlynx
 
@@ -661,9 +672,25 @@ def run_export(board, options, plugin_dir,
                 _log("Auto-extracted die bumps for cu-pillars: %s"
                      % ", ".join(sorted(effective_pad_locs)))
 
+        # Per-die connection methods: an explicit options map wins;
+        # otherwise the board's per-footprint CONNECTION fields are the
+        # source of truth. Dies without an entry use connection_type.
+        effective_die_conns = options.die_connections
+        if not effective_die_conns:
+            try:
+                effective_die_conns = read_die_connections(board)
+            except Exception as exc:
+                effective_die_conns = {}
+                _log("Warning: per-die connection read failed: %s" % exc)
+            if effective_die_conns:
+                _log("Per-die connections from board fields: %s"
+                     % ", ".join("%s=%s" % (r, m) for r, m
+                                 in sorted(effective_die_conns.items())))
+
         effective_options = dataclasses.replace(
             options, io_pads_json=effective_io_pads,
-            pad_locations=effective_pad_locs)
+            pad_locations=effective_pad_locs,
+            die_connections=effective_die_conns)
         cli = build_cli_args(hyp_to_gds, hyp_path, board_name, effective_options)
         command = [worker_py] + cli
 

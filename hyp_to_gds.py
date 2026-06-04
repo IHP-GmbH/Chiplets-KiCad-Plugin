@@ -1416,6 +1416,27 @@ def get_default_connection_stacks() -> dict:
     }
 
 
+def _connection_stack_from_manifest(method_id: str):
+    """{description, layers} for one manifest method, or None.
+
+    Covers methods deliberately outside the default connection library
+    (e.g. the vendorx demo): get_default_connection_stacks() keeps the
+    emitted block byte-stable, but an explicitly selected per-die method
+    only needs the manifest to define its connection stack.
+    """
+    im = _import_interconnect_manifest()
+    if im is None:
+        return None
+    try:
+        stack = im.get_connection_stack(method_id)
+    except KeyError:
+        return None
+    return {
+        "description": stack["description"],
+        "layers": [dict(layer) for layer in stack["layers"]],
+    }
+
+
 def _connection_type_cli_choices():
     """CLI choices for --connection-type from the manifest (all methods).
 
@@ -1433,7 +1454,8 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                         connection_type: str = "",
                         interposer_thickness: float = 13.83,
                         io_pads: Optional[List[Dict]] = None,
-                        devices: Optional[List['Device']] = None) -> bool:
+                        devices: Optional[List['Device']] = None,
+                        die_connections: Optional[Dict[str, str]] = None) -> bool:
     """
     Update .chiplet file with interposer GDS absolute path, dimensions, position,
     correct z-values for dies, and top_cell names from GDS files.
@@ -1459,6 +1481,10 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                  few hundred microns), so without this conversion the
                  dies appear offset from the interposer body in viewers
                  that anchor on the GDS bbox (e.g. Chiplet Studio).
+        die_connections: Per-die connection overrides {component id: method
+                 id}. A die not listed keeps connection_type. The stacks of
+                 every method in use are injected, and each die's z comes
+                 from its own stack.
 
     Returns:
         True if successful, False otherwise.
@@ -1608,29 +1634,51 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     print(f"  Removed {removed} top-level components "
                           f"superseded by interposer.io_pads")
 
-        # Inject connection_stacks and set connection on die components
-        if connection_type:
+        # Inject connection_stacks and set connection on die components.
+        # Per-die overrides (die_connections) win over the assembly-global
+        # connection_type; the stacks of every method in use are injected.
+        die_conns = die_connections or {}
+        if connection_type or die_conns:
             default_stacks = get_default_connection_stacks()
-            if connection_type not in default_stacks:
-                print(f"Warning: Unknown connection type '{connection_type}', "
+            wanted = set(v for v in die_conns.values() if v)
+            if connection_type:
+                wanted.add(connection_type)
+            # Resolve each wanted method: default library first, then any
+            # manifest method that defines a connection stack (methods like
+            # the vendorx demo sit outside the default library on purpose).
+            resolved_stacks = {}
+            for m in wanted:
+                stack = default_stacks.get(m) or _connection_stack_from_manifest(m)
+                if stack is not None:
+                    resolved_stacks[m] = stack
+            for m in sorted(wanted - set(resolved_stacks)):
+                print(f"Warning: Unknown connection type '{m}', "
                       f"available: {list(default_stacks.keys())}", file=sys.stderr)
-            else:
+            known = set(resolved_stacks)
+            if known:
                 # Add connection_stacks section if not already present
                 if 'connection_stacks' not in data:
                     data['connection_stacks'] = default_stacks
                     print(f"Injected connection_stacks ({len(default_stacks)} types)")
-                elif connection_type not in data.get('connection_stacks', {}):
-                    data['connection_stacks'][connection_type] = default_stacks[connection_type]
+                for m in sorted(known):
+                    if m not in data['connection_stacks']:
+                        data['connection_stacks'][m] = resolved_stacks[m]
+                        print(f"  Added connection stack '{m}'")
 
-                # Set connection on each die component
+                # Set connection on each die component (per-die override
+                # first, assembly default otherwise).
                 # Respect per-die orientation: only assign connection to flip_chip dies
                 for component in data.get('components', []):
                     comp_type = component.get('type', '')
                     if comp_type == 'die':
+                        target = die_conns.get(component.get('id', ''),
+                                               connection_type)
+                        if not target or target not in known:
+                            continue  # unknown methods warned above
                         orient = component.get('orientation', '')
                         if orient == 'flip_chip' or not orient:
-                            component['connection'] = connection_type
-                            print(f"  Set connection={connection_type} on {component.get('id')}")
+                            component['connection'] = target
+                            print(f"  Set connection={target} on {component.get('id')}")
                         else:
                             print(f"  Skipped {component.get('id')} (orientation={orient})")
 
@@ -1948,8 +1996,10 @@ def _maybe_set_interconnect_adapter(data):
     carried in from the board. An adapter already declared on the .chiplet is
     never overwritten (an explicit choice wins); the ``technology`` subblock is
     derived data and is refreshed for whatever adapter is effective, so files
-    from older exports gain it on re-export. Returns the adapter that was
-    newly set, otherwise None.
+    from older exports gain it on re-export. With mixed per-die methods the
+    first die's adapter wins -- harmless, since the adapter is only the legacy
+    fallback: per-method fragments and the per-method DRC sidecar carry the
+    real per-die data. Returns the adapter that was newly set, otherwise None.
     """
     existing = data.get("interconnect")
     adapter = existing.get("adapter") if isinstance(existing, dict) else None
@@ -2032,6 +2082,7 @@ def convert_hyp_to_gds(
     io_pads_json: Optional[str] = None,
     annotate_boundaries: bool = False,
     boundary_viz_layer: Tuple[int, int] = (1000, 0),
+    die_connections: Optional[Dict[str, str]] = None,
 ) -> bool:
     """
     Main conversion function.
@@ -2052,6 +2103,10 @@ def convert_hyp_to_gds(
         annotate_boundaries: If True, also paint each chiplet boundary onto a
                              viewer-only annotation layer (no DRC rule reads it)
         boundary_viz_layer: (layer, datatype) for the annotation (default 1000/0)
+        die_connections: Per-die connection overrides {ref: method id}. A die
+                         not listed uses connection_type. Drives both the 3D
+                         bodies drawn under that die (its method's layers and
+                         diameter) and its connection field in the .chiplet.
 
     Returns:
         True if conversion was successful
@@ -2145,11 +2200,25 @@ def convert_hyp_to_gds(
                 generator.top_cell.insert(
                     db.DCellInstArray(new_cell, db.DTrans()))
                 print(f"  Merged cu-pillar cell: {src_cell.name}")
-    elif (pad_locations and parser.devices
-          and _connection_to_body_diameter(connection_type) is not None):
-        body_diameter = _connection_to_body_diameter(connection_type)
-        bm = _import_bump_mirror()
-        if bm is None:
+    elif pad_locations and parser.devices:
+        # Resolve each device's connection method: per-die override first,
+        # then the assembly-global --connection-type. A method without body
+        # geometry in the interconnect manifest gets no pillars, loudly.
+        _die_conns = die_connections or {}
+        device_methods = {}
+        for dev_ref in pad_locations:
+            method = _die_conns.get(dev_ref, connection_type)
+            if not method:
+                continue
+            if _connection_to_body_diameter(method) is None:
+                print(f"  Warning: connection '{method}' on {dev_ref} has "
+                      f"no body geometry in the interconnect manifest; "
+                      f"skipping its pillars", file=sys.stderr)
+                continue
+            device_methods[dev_ref] = method
+        methods_in_use = sorted(set(device_methods.values()))
+        bm = _import_bump_mirror() if methods_in_use else None
+        if methods_in_use and bm is None:
             # A connection stack was requested: a GDS without its pillars
             # would look fabricable while missing the attachment structures,
             # and no downstream DRC can flag absent geometry. Fail loud.
@@ -2158,25 +2227,44 @@ def convert_hyp_to_gds(
                 "bump_mirror is unavailable. Set INTERPOSER_PDK_ROOT to the "
                 "interposer PDK checkout (libs.tech/klayout/python/"
                 "bump_mirror.py) and retry. Refusing to emit a complete GDS "
-                "without its pillars." % connection_type)
-        else:
-            print(f"\nGenerating Cu-pillars (connection={connection_type}, "
-                  f"body diameter={body_diameter} um) with DRC validation...")
-            device_map = {dev.ref: dev for dev in parser.devices}
-            params = bm.DrcParams.from_body_diameter(body_diameter)
-            # The method's 3D body layers come from the interconnect manifest
-            # (e.g. a vendor's 510/511), not an assumed IHP cu-pillar pair.
+                "without its pillars." % ", ".join(methods_in_use))
+        elif methods_in_use:
+            # One generator + parameter set per method: the 3D body layers
+            # (e.g. a vendor's 510/511 vs IHP's 500/501) and the fab
+            # parameters travel with the method, not with the assembly.
             # _connection_to_body_diameter above already proved the manifest
-            # resolves for this connection_type.
+            # resolves for every method in use.
             im = _import_interconnect_manifest()
-            bodies = im.layers_3d(connection_type)
-            print("  3D bodies: " + ", ".join(
-                f"{name} ({lnum}/{ldt})" for name, lnum, ldt in bodies))
-            pillar_gen = bm.CuPillarGenerator(
-                enclosure_um=params.min_enclosure_um, bodies=bodies)
+            per_method = {}
+            for m in methods_in_use:
+                m_diameter = _connection_to_body_diameter(m)
+                m_params = bm.DrcParams.from_body_diameter(m_diameter)
+                m_bodies = im.layers_3d(m)
+                # Fab pad geometry travels with the method too: diameters
+                # outside the IHP Table 6.1 (vendor methods) draw their
+                # manifest-declared passivation opening.
+                try:
+                    m_fab = im.fab_params(m)
+                except KeyError:
+                    m_fab = {}
+                print(f"\nGenerating Cu-pillars (connection={m}, "
+                      f"body diameter={m_diameter} um) with DRC validation...")
+                print("  3D bodies: " + ", ".join(
+                    f"{name} ({lnum}/{ldt})" for name, lnum, ldt in m_bodies))
+                per_method[m] = (
+                    bm.CuPillarGenerator(
+                        enclosure_um=m_params.min_enclosure_um,
+                        bodies=m_bodies,
+                        passiv_opening_um=m_fab.get("passiv_opening_um")),
+                    m_params, m_diameter)
+            device_map = {dev.ref: dev for dev in parser.devices}
             total_pillars = 0
             device_reports = {}
             for dev_ref, pin_json in pad_locations.items():
+                method = device_methods.get(dev_ref)
+                if not method:
+                    continue  # warned above (or no connection at all)
+                pillar_gen, params, body_diameter = per_method[method]
                 dev = device_map.get(dev_ref)
                 if not dev:
                     print(f"  Warning: Device {dev_ref} not in HYP, skipping")
@@ -2212,19 +2300,24 @@ def convert_hyp_to_gds(
                 if not report.passed:
                     print(f"  Warning: {dev_ref} has residual Cu-pillar DRC "
                           f"violations (continuing per policy).")
-                device_reports[dev_ref] = report.to_dict()
+                dev_report = report.to_dict()
+                dev_report["connection"] = method
+                device_reports[dev_ref] = dev_report
                 total_pillars += pillar_gen.add_device_bumps(
                     dev_ref, resolved, body_diameter)
             # Merge generated CUPILLARS_<ref> cells into the interposer top.
+            # Each device lives in exactly one method's generator.
             merged = 0
-            for ci in range(pillar_gen.layout.cells()):
-                src = pillar_gen.layout.cell(ci)
-                if src.name.startswith("CUPILLARS_"):
-                    new_cell = generator.layout.create_cell(src.name)
-                    new_cell.copy_tree(src)
-                    generator.top_cell.insert(
-                        db.DCellInstArray(new_cell, db.DTrans()))
-                    merged += 1
+            for m in methods_in_use:
+                m_layout = per_method[m][0].layout
+                for ci in range(m_layout.cells()):
+                    src = m_layout.cell(ci)
+                    if src.name.startswith("CUPILLARS_"):
+                        new_cell = generator.layout.create_cell(src.name)
+                        new_cell.copy_tree(src)
+                        generator.top_cell.insert(
+                            db.DCellInstArray(new_cell, db.DTrans()))
+                        merged += 1
             print(f"Total Cu-pillar pads placed: {total_pillars} "
                   f"({merged} device group(s))")
 
@@ -2242,12 +2335,19 @@ def convert_hyp_to_gds(
                 if stem.endswith("_interposer"):
                     stem = stem[:-len("_interposer")]
                 drc_path = out_p.with_name(stem + "_cupillar_drc.json")
+                # version 2: per-method parameter sets ("methods") and a
+                # per-device "connection" tag replace the v1 single
+                # body_diameter_um/params pair (per-die method selection).
                 doc = {
-                    "version": 1,
+                    "version": 2,
                     "tool": "hyp_to_gds cu-pillar DRC",
                     "connection_type": connection_type,
-                    "body_diameter_um": body_diameter,
-                    "params": params.to_dict(),
+                    "die_connections": device_methods,
+                    "methods": {
+                        m: {"body_diameter_um": per_method[m][2],
+                            "params": per_method[m][1].to_dict()}
+                        for m in methods_in_use
+                    },
                     "summary": {**agg, "devices": len(device_reports),
                                 "passed": all_passed},
                     "devices": device_reports,
@@ -2277,7 +2377,8 @@ def convert_hyp_to_gds(
         update_chiplet_file(chiplet_file_path, output_path, bbox,
                            connection_type=connection_type,
                            io_pads=placed_io_pads,
-                           devices=parser.devices)
+                           devices=parser.devices,
+                           die_connections=die_connections)
 
     # Generate complete GDS with chiplets if requested
     if with_chiplets and parser.devices:
@@ -2420,6 +2521,16 @@ Examples:
              "Choices: %(choices)s"
     )
     parser.add_argument(
+        "--die-connections",
+        type=str,
+        metavar="REF=METHOD[,REF=METHOD,...]",
+        help="Per-die connection stack overrides (e.g. U1=cupillar_opt1,"
+             "U2=vendorx_microbump). Dies not listed use --connection-type. "
+             "Each die's 3D bodies are drawn with its own method's layers "
+             "and diameter, and its connection field in the .chiplet is set "
+             "accordingly."
+    )
+    parser.add_argument(
         "--io-pads",
         type=str,
         metavar="JSON_FILE",
@@ -2485,6 +2596,18 @@ Examples:
             ref, path = item.split('=', 1)
             pad_locations[ref.strip()] = _expand_path_vars(path.strip())
 
+    # Parse per-die connections: "U1=cupillar_opt1,U2=vendorx_microbump"
+    die_connections = None
+    if args.die_connections:
+        die_connections = {}
+        for item in args.die_connections.split(','):
+            if '=' not in item:
+                print(f"Error: Invalid die-connections format: '{item}'. "
+                      f"Use REF=METHOD.", file=sys.stderr)
+                return 1
+            ref, method = item.split('=', 1)
+            die_connections[ref.strip()] = method.strip()
+
     # Parse the annotation layer "LAYER/DATATYPE" (only used if --annotate-boundaries)
     try:
         _vl, _vd = args.boundary_viz_layer.split('/', 1)
@@ -2510,6 +2633,7 @@ Examples:
         io_pads_json=args.io_pads,
         annotate_boundaries=args.annotate_boundaries,
         boundary_viz_layer=boundary_viz_layer,
+        die_connections=die_connections,
     )
 
     return 0 if success else 1
