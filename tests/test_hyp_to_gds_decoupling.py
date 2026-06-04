@@ -128,3 +128,57 @@ def test_interposer_pdk_env_override_wins(tmp_path, monkeypatch):
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(tmp_path / "nonexistent"))
     found = h._find_interposer_pdk_python()
     assert found is not None and found != fake  # walk found the real one
+
+
+# ---------------------------------------------------------------------------
+# ${VAR} path expansion (env -> sibling-checkout walk -> loud failure)
+# ---------------------------------------------------------------------------
+
+def test_expand_path_vars_passthrough():
+    """Paths without ${ are untouched; empty/None inputs too."""
+    assert h._expand_path_vars("/abs/path/file.gds") == "/abs/path/file.gds"
+    assert h._expand_path_vars("rel/file.gds") == "rel/file.gds"
+    assert h._expand_path_vars("") == ""
+    assert h._expand_path_vars(None) is None
+
+
+def test_expand_path_vars_walk(monkeypatch):
+    """${GDS_TO_KICAD_ROOT} resolves via the sibling walk when env is unset."""
+    monkeypatch.delenv("GDS_TO_KICAD_ROOT", raising=False)
+    got = h._expand_path_vars("${GDS_TO_KICAD_ROOT}/pdks/sg13g2.lyp")
+    assert "${" not in got
+    assert got.endswith("/gds_to_kicad/pdks/sg13g2.lyp")
+    assert Path(got).is_file()
+
+
+def test_expand_path_vars_env_wins(tmp_path, monkeypatch):
+    """A valid env root takes precedence; a bogus one falls through to walk."""
+    fake = tmp_path / "pdk"
+    (fake / "libs.tech" / "klayout").mkdir(parents=True)
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(fake))
+    got = h._expand_path_vars(
+        "${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp")
+    assert got.startswith(str(fake))
+
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(tmp_path / "nonexistent"))
+    got = h._expand_path_vars("${INTERPOSER_PDK_ROOT}/x")
+    assert "${" not in got
+    assert not got.startswith(str(tmp_path))
+
+
+def test_expand_path_vars_unknown_var_is_loud(monkeypatch):
+    """An unresolvable variable must hard-fail naming the variable."""
+    import pytest
+    monkeypatch.delenv("NO_SUCH_ECOSYSTEM_ROOT", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        h._expand_path_vars("${NO_SUCH_ECOSYSTEM_ROOT}/foo.gds")
+    assert "NO_SUCH_ECOSYSTEM_ROOT" in str(exc.value)
+
+
+def test_default_lyp_resolves_canonical(monkeypatch):
+    """With the monorepo present, the default lyp is the interposer PDK's
+    canonical copy, not the bundled fallback."""
+    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
+    got = h._find_default_lyp()
+    assert got.endswith("interposer/libs.tech/klayout/tech/intm4tm2.lyp")
+    assert Path(got).is_file()

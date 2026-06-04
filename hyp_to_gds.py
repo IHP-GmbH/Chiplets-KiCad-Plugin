@@ -1020,9 +1020,11 @@ class GDSGenerator:
             print(f"Warning: Device {device.ref} has no GDS_FILE")
             return False
 
-        gds_path = Path(device.gds_file)
+        # GDS_FILE values flow verbatim from the board into the .hyp; they
+        # may carry ${VAR} ecosystem-root references (expanded here, on read).
+        gds_path = Path(_expand_path_vars(device.gds_file))
         if not gds_path.exists():
-            print(f"Warning: GDS file not found: {device.gds_file}")
+            print(f"Warning: GDS file not found: {gds_path}")
             return False
 
         try:
@@ -1870,13 +1872,93 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
         return False
 
 
+# Ecosystem-root variables accepted inside path inputs (board text vars,
+# footprint fields, CLI arguments, .chiplet entries). Each maps to the
+# directory name walked for next to this checkout plus the marker subpath
+# that must exist under the root. Same discovery convention as
+# _find_interposer_pdk_python (see adk/docs/integration.md).
+_PATH_VAR_MARKERS = {
+    "INTERPOSER_PDK_ROOT": ("interposer", ("libs.tech", "klayout")),
+    "GDS_TO_KICAD_ROOT": ("gds_to_kicad", ("pdks",)),
+    "ADK_ROOT": ("adk", ("klayout", "drc")),
+    "INTERCONNECT_PDK_ROOT": ("interconnect_pdk", ("manifest",)),
+}
+
+_PATH_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _discover_path_var(name: str) -> Optional[str]:
+    """Resolve an ecosystem-root variable: env first, then sibling walk.
+
+    A set-but-invalid environment value (marker subpath missing) falls
+    through to the walk, mirroring _find_interposer_pdk_python.
+    Returns the root as a string, or None when unresolvable.
+    """
+    marker = _PATH_VAR_MARKERS.get(name)
+    env = os.environ.get(name)
+    if env:
+        if marker is None or Path(env).joinpath(*marker[1]).is_dir():
+            return env
+    if marker is None:
+        return None
+    dirname, sub = marker
+    here = Path(__file__).resolve()
+    for base in here.parents:
+        cand = base / dirname
+        if cand.joinpath(*sub).is_dir():
+            return str(cand)
+    return None
+
+
+def _expand_path_vars(path: Optional[str]) -> Optional[str]:
+    """Expand ${VAR} ecosystem-root references in a path input.
+
+    Resolution per variable: environment -> sibling-checkout walk ->
+    LOUD failure (a path that silently keeps a literal ``${VAR}``
+    component would just "not exist" downstream and mask the real
+    problem). Paths without ``${`` pass through untouched, so absolute
+    and relative inputs keep their normal semantics.
+    """
+    if not path or "${" not in path:
+        return path
+
+    def _repl(match):
+        name = match.group(1)
+        value = _discover_path_var(name)
+        if value is None:
+            sys.exit(
+                "ERROR: cannot resolve ${%s} in path '%s'. Set the %s "
+                "environment variable or keep the checkout next to this "
+                "tool (ecosystem discovery convention, see "
+                "adk/docs/integration.md)." % (name, path, name))
+        return value
+
+    return _PATH_VAR_RE.sub(_repl, path)
+
+
+def _find_default_lyp() -> str:
+    """Default layer-properties file for the interposer GDS.
+
+    Prefers the interposer PDK's canonical
+    ``libs.tech/klayout/tech/intm4tm2.lyp`` (env/walk discovery), falling
+    back to the copy bundled with the plugin so a standalone install
+    keeps working without the PDK checkout.
+    """
+    python_dir = _find_interposer_pdk_python()
+    if python_dir is not None:
+        cand = python_dir.parent / "tech" / "intm4tm2.lyp"
+        if cand.is_file():
+            return str(cand)
+    return str(Path(__file__).parent / "intm4tm2.lyp")
+
+
 def _read_gds_top_cell(gds_path: str) -> Optional[str]:
     """Read the top cell name from a GDS file.
 
     Returns the name of the top cell, or None if the file cannot be read.
     """
     try:
-        gds_file = Path(gds_path)
+        gds_file = Path(_expand_path_vars(gds_path))
         if not gds_file.exists():
             return None
         layout = db.Layout()
@@ -2374,8 +2456,10 @@ Examples:
     )
     parser.add_argument(
         "-l", "--lyp",
-        default=str(Path(__file__).parent / "intm4tm2.lyp"),
-        help="KLayout LYP layer properties file (default: intm4tm2.lyp)"
+        default=None,
+        help="KLayout LYP layer properties file (default: the interposer "
+             "PDK's canonical intm4tm2.lyp via env/walk discovery, falling "
+             "back to the bundled copy)"
     )
     parser.add_argument(
         "-c", "--cell",
@@ -2460,6 +2544,18 @@ Examples:
     )
     args = parser.parse_args()
 
+    # Default lyp: canonical interposer PDK copy, bundled fallback.
+    if args.lyp is None:
+        args.lyp = _find_default_lyp()
+
+    # Expand ${VAR} ecosystem-root references in every path argument
+    # (env -> sibling-checkout walk -> loud failure). Plain absolute or
+    # relative paths pass through untouched.
+    for _attr in ("hyp_file", "output", "lyp", "tech_json",
+                  "complete_output", "update_chiplet_file",
+                  "cupillar_gds", "io_pads"):
+        setattr(args, _attr, _expand_path_vars(getattr(args, _attr)))
+
     # Determine output path (interposer-only GDS)
     if args.output:
         output_path = args.output
@@ -2483,7 +2579,7 @@ Examples:
                 print(f"Error: Invalid pad-locations format: '{item}'. Use REF=FILE.", file=sys.stderr)
                 return 1
             ref, path = item.split('=', 1)
-            pad_locations[ref.strip()] = path.strip()
+            pad_locations[ref.strip()] = _expand_path_vars(path.strip())
 
     # Parse the annotation layer "LAYER/DATATYPE" (only used if --annotate-boundaries)
     try:
