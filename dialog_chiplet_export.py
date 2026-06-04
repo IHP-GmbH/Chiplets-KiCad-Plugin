@@ -17,6 +17,7 @@ import wx
 
 from .pipeline.orchestrator import (
     ExportOptions, ExportResult, run_export, available_connection_types,
+    describe_assembly_drc,
 )
 
 
@@ -261,7 +262,6 @@ class ChipletExportDialog(wx.Dialog):
         elif result.cancelled:
             self._set_status("Cancelled")
         elif result.exit_code == 0:
-            self._set_status("Done (exit 0)")
             for label, path in (("chiplet", result.chiplet_path),
                                 ("interposer GDS", result.interposer_gds_path),
                                 ("complete GDS", result.complete_gds_path),
@@ -269,6 +269,15 @@ class ChipletExportDialog(wx.Dialog):
                                 ("intermediate hyp", result.hyp_path)):
                 if path:
                     self._append_log("Wrote %s: %s" % (label, path))
+            verdict = describe_assembly_drc(result)
+            self._append_log(verdict)
+            if result.assembly_drc_report_path:
+                self._append_log("  report: %s"
+                                 % result.assembly_drc_report_path)
+            if result.assembly_drc_exit_code > 0:
+                self._set_status("Done - assembly DRC FAILED")
+            else:
+                self._set_status("Done (exit 0)")
         else:
             self._set_status("Failed (exit %d)" % result.exit_code)
 

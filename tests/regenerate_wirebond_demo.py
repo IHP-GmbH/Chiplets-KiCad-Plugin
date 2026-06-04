@@ -39,7 +39,7 @@ from chiplet_kicad_plugin.pipeline.discovery import (  # noqa: E402
     find_worker_python, find_hyp_to_gds,
 )
 from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
-    ExportOptions, run_export,
+    ExportOptions, run_export, describe_assembly_drc,
 )
 from chiplet_kicad_plugin.writers.chiplet_writer import (  # noqa: E402
     write_chiplet,
@@ -143,6 +143,13 @@ def main():
              "(forwarded to hyp_to_gds.py).",
     )
     parser.add_argument(
+        "--require-drc", action="store_true",
+        help="Exit nonzero unless the ADK assembly DRC ran and PASSED "
+             "(ExportResult.assembly_drc_exit_code == 0). Off by default "
+             "so environments without the klayout CLI can still "
+             "regenerate artifacts.",
+    )
+    parser.add_argument(
         "--connection",
         default="",
         help="Connection stack (cupillar_opt1/2/3, sbump_sac305). When a "
@@ -201,8 +208,15 @@ def main():
     print("chiplet_path:        %s" % result.chiplet_path)
     print("interposer_gds_path: %s" % result.interposer_gds_path)
     print("complete_gds_path:   %s" % result.complete_gds_path)
+    print("%s" % describe_assembly_drc(result))
+    if result.assembly_drc_report_path:
+        print("assembly_drc_report: %s" % result.assembly_drc_report_path)
 
-    sys.exit(0 if result.exit_code == 0 and not result.error else 1)
+    ok = result.exit_code == 0 and not result.error
+    if args.require_drc and result.assembly_drc_exit_code != 0:
+        print("FAIL: --require-drc set and assembly DRC did not pass")
+        ok = False
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":
