@@ -96,3 +96,35 @@ def test_auto_emit_skips_when_no_adapter_bearing_connection():
     got = h._maybe_set_interconnect_adapter(data)
     assert got is None
     assert "interconnect" not in data
+
+
+# ---------------------------------------------------------------------------
+# Interposer PDK discovery (ecosystem convention: env var -> upward walk)
+# ---------------------------------------------------------------------------
+
+def test_interposer_pdk_python_found_via_walk():
+    """With no env override, the upward walk finds the sibling checkout."""
+    import os
+    old = os.environ.pop("INTERPOSER_PDK_ROOT", None)
+    try:
+        found = h._find_interposer_pdk_python()
+        assert found is not None
+        assert (found / "bump_mirror.py").is_file()
+        assert found.parts[-3:] == ("libs.tech", "klayout", "python")
+    finally:
+        if old is not None:
+            os.environ["INTERPOSER_PDK_ROOT"] = old
+
+
+def test_interposer_pdk_env_override_wins(tmp_path, monkeypatch):
+    """INTERPOSER_PDK_ROOT pointing at a valid root takes precedence; a
+    bogus root falls through to the walk instead of failing."""
+    fake = tmp_path / "pdk" / "libs.tech" / "klayout" / "python"
+    fake.mkdir(parents=True)
+    (fake / "bump_mirror.py").write_text("# stub\n")
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(tmp_path / "pdk"))
+    assert h._find_interposer_pdk_python() == fake
+
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(tmp_path / "nonexistent"))
+    found = h._find_interposer_pdk_python()
+    assert found is not None and found != fake  # walk found the real one
