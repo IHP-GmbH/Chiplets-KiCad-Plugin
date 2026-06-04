@@ -10,6 +10,7 @@ The pipeline body lives in ``pipeline/orchestrator.py``; this file
 contains only UI plumbing.
 """
 
+import os
 import threading
 from pathlib import Path
 
@@ -19,6 +20,107 @@ from .pipeline.orchestrator import (
     ExportOptions, ExportResult, run_export, available_connection_types,
     describe_assembly_drc, discover_dependency_root,
 )
+
+
+class _DirBrowseDialog(wx.Dialog):
+    """Directory chooser built on wx.GenericDirCtrl.
+
+    Deliberately NOT the native GTK folder chooser: its places dropdown
+    ("File System", "Other Locations", network mounts) enumerates eagerly
+    and can hang the UI on dead automounts or a missing desktop portal.
+    The generic tree expands lazily -- only what the user clicks is read --
+    and carries a New-folder button so the target directory can be created
+    right here.
+    """
+
+    def __init__(self, parent, start_path=""):
+        super().__init__(
+            parent,
+            title="Select directory",
+            size=(560, 520),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        outer = wx.BoxSizer(wx.VERTICAL)
+
+        self._tree = wx.GenericDirCtrl(self, style=wx.DIRCTRL_DIR_ONLY)
+        start = start_path or str(Path.home())
+        if Path(start).is_dir():
+            self._tree.SetPath(start)
+        outer.Add(self._tree, 1, wx.EXPAND | wx.ALL, 8)
+
+        btns = wx.BoxSizer(wx.HORIZONTAL)
+        new_btn = wx.Button(self, label="New folder...")
+        new_btn.Bind(wx.EVT_BUTTON, self._on_new_folder)
+        btns.Add(new_btn, 0, wx.ALL, 4)
+        btns.AddStretchSpacer(1)
+        std = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
+        btns.Add(std, 0, wx.ALL, 4)
+        outer.Add(btns, 0, wx.EXPAND | wx.ALL, 4)
+
+        self.SetSizer(outer)
+
+    def GetPath(self):
+        return self._tree.GetPath()
+
+    def _on_new_folder(self, _event):
+        base = self._tree.GetPath() or str(Path.home())
+        name = wx.GetTextFromUser(
+            "Name of the new folder under:\n%s" % base,
+            "New folder", "", self)
+        if not name:
+            return
+        target = os.path.join(base, name)
+        try:
+            os.makedirs(target, exist_ok=False)
+        except OSError as exc:
+            wx.MessageBox("Could not create folder:\n%s" % exc,
+                          "New folder", wx.OK | wx.ICON_ERROR, self)
+            return
+        self._tree.ReCreateTree()
+        self._tree.SetPath(target)
+
+
+class _DirField(wx.Panel):
+    """Text field + Browse button for picking a directory.
+
+    Replaces wx.DirPickerCtrl, whose GTK places dropdown froze the dialog
+    (see _DirBrowseDialog). The path is plain editable text; Browse opens
+    the lazy generic tree. ``on_change`` fires on every path change (typed
+    or browsed) so dependent widgets can refresh.
+    """
+
+    def __init__(self, parent, path="", on_change=None):
+        super().__init__(parent)
+        self._on_change = on_change
+        sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self._text = wx.TextCtrl(self, value=path)
+        self._browse = wx.Button(self, label="Browse...",
+                                 style=wx.BU_EXACTFIT)
+        sizer.Add(self._text, 1, wx.EXPAND | wx.RIGHT, 4)
+        sizer.Add(self._browse, 0)
+        self.SetSizer(sizer)
+
+        self._browse.Bind(wx.EVT_BUTTON, self._on_browse)
+        if on_change is not None:
+            self._text.Bind(wx.EVT_TEXT, lambda _e: on_change())
+
+    def GetPath(self):
+        return self._text.GetValue().strip()
+
+    def SetPath(self, path):
+        self._text.SetValue(path or "")
+
+    def SetToolTip(self, tip):
+        self._text.SetToolTip(tip)
+        super().SetToolTip(tip)
+
+    def _on_browse(self, _event):
+        dlg = _DirBrowseDialog(self, start_path=self.GetPath())
+        try:
+            if dlg.ShowModal() == wx.ID_OK and dlg.GetPath():
+                self._text.SetValue(dlg.GetPath())
+        finally:
+            dlg.Destroy()
 
 
 class ChipletExportDialog(wx.Dialog):
@@ -52,8 +154,7 @@ class ChipletExportDialog(wx.Dialog):
 
         # Output directory
         out_box = wx.StaticBoxSizer(wx.HORIZONTAL, panel, "Output directory")
-        self._out_dir_ctrl = wx.DirPickerCtrl(
-            panel, path=self._default_out_dir())
+        self._out_dir_ctrl = _DirField(panel, path=self._default_out_dir())
         out_box.Add(self._out_dir_ctrl, 1, wx.EXPAND | wx.ALL, 4)
         outer.Add(out_box, 0, wx.EXPAND | wx.ALL, 8)
 
@@ -93,7 +194,7 @@ class ChipletExportDialog(wx.Dialog):
 
         pdk_grid.Add(wx.StaticText(panel, label="Interposer PDK:"),
                      0, wx.ALIGN_CENTER_VERTICAL)
-        self._interposer_root_ctrl = wx.DirPickerCtrl(
+        self._interposer_root_ctrl = _DirField(
             panel,
             path=discover_dependency_root("INTERPOSER_PDK_ROOT", self._board))
         self._interposer_root_ctrl.SetToolTip(
@@ -105,9 +206,10 @@ class ChipletExportDialog(wx.Dialog):
 
         pdk_grid.Add(wx.StaticText(panel, label="Interconnect PDK:"),
                      0, wx.ALIGN_CENTER_VERTICAL)
-        self._interconnect_root_ctrl = wx.DirPickerCtrl(
+        self._interconnect_root_ctrl = _DirField(
             panel,
-            path=discover_dependency_root("INTERCONNECT_PDK_ROOT", self._board))
+            path=discover_dependency_root("INTERCONNECT_PDK_ROOT", self._board),
+            on_change=self._refresh_connection_choices)
         self._interconnect_root_ctrl.SetToolTip(
             "Interconnect PDK checkout. Its manifest defines the connection "
             "stacks below (changing this re-reads the list) plus the 3D "
@@ -117,7 +219,7 @@ class ChipletExportDialog(wx.Dialog):
 
         pdk_grid.Add(wx.StaticText(panel, label="ADK:"),
                      0, wx.ALIGN_CENTER_VERTICAL)
-        self._adk_root_ctrl = wx.DirPickerCtrl(
+        self._adk_root_ctrl = _DirField(
             panel,
             path=discover_dependency_root("ADK_ROOT", self._board))
         self._adk_root_ctrl.SetToolTip(
@@ -129,9 +231,6 @@ class ChipletExportDialog(wx.Dialog):
 
         pdk_box.Add(pdk_grid, 0, wx.EXPAND | wx.ALL, 4)
         outer.Add(pdk_box, 0, wx.EXPAND | wx.ALL, 8)
-
-        self._interconnect_root_ctrl.Bind(
-            wx.EVT_DIRPICKER_CHANGED, self._refresh_connection_choices)
 
         # Pipeline options
         opts_box = wx.StaticBoxSizer(wx.VERTICAL, panel, "Pipeline options")
@@ -232,6 +331,8 @@ class ChipletExportDialog(wx.Dialog):
         Preserves the current selection when the new manifest still offers
         it; otherwise resets to "" (no --connection-type).
         """
+        if not hasattr(self, "_conn_ctrl"):
+            return  # dialog still under construction
         current = ""
         idx = self._conn_ctrl.GetSelection()
         if idx is not None and 0 <= idx < len(self._conn_choices):
