@@ -227,6 +227,154 @@ def load_interconnect_adapter(chiplet_path: str) -> str:
         chiplet_path, "interconnect", DEFAULT_INTERCONNECT_ADAPTER)
 
 
+def _read_component_connections(chiplet_path: str) -> List[tuple]:
+    """``[(component_id, connection_id), ...]`` from a ``.chiplet`` YAML.
+
+    Minimal hand-rolled parser (KiCad's bundled Python lacks PyYAML),
+    sibling of :func:`_read_adapter_from_block`. Reads the top-level
+    ``components:`` list and collects each item's ``id`` and ``connection``
+    fields; items without a connection are skipped. Handles both list
+    styles the suite emits (items at column 0 or indented under the key);
+    nested lists (``io_pads:``) are excluded by indent.
+    """
+    try:
+        with open(chiplet_path, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+
+    def _value(text):
+        value = text.strip()
+        if (len(value) >= 2 and value[0] in ("'", '"')
+                and value[-1] == value[0]):
+            value = value[1:-1]
+        return value
+
+    entries = []
+    state = {"id": "", "conn": ""}
+
+    def _flush():
+        if state["id"] and state["conn"]:
+            entries.append((state["id"], state["conn"]))
+        state["id"] = ""
+        state["conn"] = ""
+
+    in_components = False
+    item_indent = None
+    for raw in lines:
+        line = raw.rstrip("\n")
+        if "#" in line:
+            line = line[: line.index("#")].rstrip()
+        if not line.strip():
+            continue
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        if indent == 0 and not stripped.startswith("- "):
+            _flush()
+            in_components = (stripped == "components:")
+            item_indent = None
+            continue
+        if not in_components:
+            continue
+        if stripped.startswith("- "):
+            if item_indent is None:
+                item_indent = indent
+            if indent == item_indent:
+                _flush()
+                rest = stripped[2:].strip()
+                if rest.startswith("id:"):
+                    state["id"] = _value(rest[len("id:"):])
+            continue
+        if item_indent is None or indent != item_indent + 2:
+            continue  # nested list field (io_pads entries etc.)
+        if stripped.startswith("connection:"):
+            state["conn"] = _value(stripped[len("connection:"):])
+        elif stripped.startswith("id:") and not state["id"]:
+            state["id"] = _value(stripped[len("id:"):])
+    _flush()
+    return entries
+
+
+def derive_interconnect_methods(chiplet_path: str,
+                                interconnect_root: str = "",
+                                board=None) -> Dict[str, dict]:
+    """Per-method IXN parameters derived from the ``.chiplet`` + manifest.
+
+    The per-die ``connection:`` ids are the interconnect method ids for
+    manifest-era assemblies; the interconnect PDK manifest is the single
+    source of truth for each method's pitch rules. Returns
+    ``{method_id: {"dies": [ids...], "IXN_spacing": f, "IXN_pitch": f,
+    "IXN_pad_size": f}}`` for the methods the manifest knows; connection
+    ids the manifest does not know are skipped (custom/legacy stacks --
+    the assembly-global adapter covers them). Empty dict when nothing
+    derivable (no connections, no manifest): the DRC then runs exactly as
+    before this refinement existed.
+    """
+    import json
+
+    connections = _read_component_connections(chiplet_path)
+    if not connections:
+        return {}
+    root = interconnect_root or discover_dependency_root(
+        "INTERCONNECT_PDK_ROOT", board=board)
+    if not root:
+        return {}
+    manifest_path = Path(root) / "manifest" / "interconnect_methods.json"
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            methods_db = json.load(fh).get("methods", {})
+    except Exception:
+        return {}
+
+    derived: Dict[str, dict] = {}
+    for component_id, connection in connections:
+        method = methods_db.get(connection)
+        if not method:
+            continue
+        try:
+            entry = derived.setdefault(connection, {
+                "dies": [],
+                "IXN_spacing": float(method["pitch_rules"]["IXN_spacing"]),
+                "IXN_pitch": float(method["pitch_rules"]["IXN_pitch"]),
+                "IXN_pad_size": float(method["fab_params"]["passiv_opening_um"]),
+            })
+        except (KeyError, TypeError, ValueError):
+            continue  # malformed manifest entry: leave it to the adapter
+        if component_id not in entry["dies"]:
+            entry["dies"].append(component_id)
+    return derived
+
+
+def write_ixn_methods_sidecar(methods: Dict[str, dict], gds_path: str,
+                              chiplet_path: str = "") -> str:
+    """Write ``<gds-stem>.ixn_methods.json`` next to the GDS.
+
+    Sibling of the producer's ``<gds-stem>.boundaries.json``: the ADK deck
+    consumes both to scope the IXN checks per method. Returns the sidecar
+    path, or "" when ``methods`` is empty (nothing written).
+    """
+    import json
+
+    if not methods:
+        return ""
+    sidecar = os.path.join(
+        os.path.dirname(gds_path) or ".",
+        Path(gds_path).stem + ".ixn_methods.json",
+    )
+    payload = {
+        "schema": "adk-ixn-methods",
+        "version": "1.0.0",
+        "generator": "chiplet_kicad_plugin/orchestrator",
+        "assembly_gds": os.path.basename(gds_path),
+        "source_chiplet": os.path.basename(chiplet_path) if chiplet_path else "",
+        "methods": {mid: methods[mid] for mid in sorted(methods)},
+    }
+    with open(sidecar, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=1)
+        fh.write("\n")
+    return sidecar
+
+
 def available_connection_types(interconnect_root: str = "",
                                board=None) -> List[str]:
     """Connection-type choices for the export dialog dropdown.
@@ -288,7 +436,8 @@ def build_adk_drc_argv(adk_runner_path: str,
                        topcell: Optional[str] = None,
                        threads: Optional[int] = None,
                        run_mode: Optional[str] = None,
-                       interconnect_adapter: str = "") -> List[str]:
+                       interconnect_adapter: str = "",
+                       interconnect_methods: str = "") -> List[str]:
     """Construct argv for the ADK ``run_drc.py`` subprocess.
 
     The returned list begins with ``adk_runner_path`` and the required
@@ -313,6 +462,8 @@ def build_adk_drc_argv(adk_runner_path: str,
         args += ["--run_mode", run_mode]
     if interconnect_adapter:
         args += ["--interconnect-adapter", interconnect_adapter]
+    if interconnect_methods:
+        args += ["--interconnect-methods", interconnect_methods]
     return args
 
 
@@ -586,6 +737,29 @@ def run_export(board, options, plugin_dir,
                     options.interconnect_adapter
                     or load_interconnect_adapter(chiplet_final)
                 )
+                # Per-method IXN refinement: derive {method -> dies} from the
+                # .chiplet's per-die connections + the interconnect PDK
+                # manifest, written as a sidecar next to the complete GDS
+                # (sibling of the boundaries manifest). Best-effort: any
+                # failure leaves the assembly-global adapter behavior.
+                ixn_methods_sidecar = ""
+                try:
+                    derived_methods = derive_interconnect_methods(
+                        chiplet_final,
+                        interconnect_root=options.interconnect_pdk_root,
+                        board=board,
+                    )
+                    ixn_methods_sidecar = write_ixn_methods_sidecar(
+                        derived_methods, complete_gds_abs, chiplet_final,
+                    )
+                    if ixn_methods_sidecar:
+                        _log("Interconnect methods sidecar: %s (%s)" % (
+                            ixn_methods_sidecar,
+                            ", ".join(sorted(derived_methods)),
+                        ))
+                except Exception as exc:
+                    _log("Warning: per-method interconnect derivation "
+                         "failed: %s" % exc)
                 drc_run_dir = os.path.join(
                     options.output_dir, "assembly_drc",
                 )
@@ -601,6 +775,7 @@ def run_export(board, options, plugin_dir,
                     run_dir=drc_run_dir,
                     topcell=options.top_cell or None,
                     interconnect_adapter=effective_interconnect,
+                    interconnect_methods=ixn_methods_sidecar,
                 )
                 adk_command = [worker_py] + adk_cli
                 _log("$ " + " ".join(adk_command))

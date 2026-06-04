@@ -27,6 +27,8 @@ from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
     build_adk_drc_argv, build_cli_args, build_worker_env,
     load_interposer_adapter, load_interconnect_adapter,
     available_connection_types, discover_dependency_root,
+    derive_interconnect_methods, write_ixn_methods_sidecar,
+    _read_component_connections,
 )
 
 
@@ -373,6 +375,126 @@ def test_available_connection_types_from_manifest():
     assert types[0] == ""  # always first: empty = no --connection-type flag
     for method in ("cupillar_opt2", "sbump_sac305", "vendorx_microbump"):
         assert method in types
+
+
+# ---------------------------------------------------------------------------
+# Per-method interconnect (derive from per-die connections + manifest)
+# ---------------------------------------------------------------------------
+
+MIXED_CHIPLET = """\
+format_version: "1.0"
+interconnect:
+  adapter: "ihp_cupillar"
+components:
+- id: interposer
+  type: interposer
+- id: U1
+  type: die
+  connection: method_x
+  io_pads:
+  - id: J1
+    connection: nested_must_not_count
+- id: U2
+  type: die
+  connection: method_y
+- id: U3
+  type: die
+  connection: method_x
+- id: U4
+  type: die
+  connection: custom_stack_not_in_manifest
+- id: U5
+  type: die
+"""
+
+
+def _write_fake_interconnect_root(tmp_path):
+    root = tmp_path / "interconnect_pdk_root"
+    manifest_dir = root / "manifest"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "interconnect_methods.json").write_text(json.dumps({
+        "methods": {
+            "method_x": {
+                "pitch_rules": {"IXN_spacing": 40.0, "IXN_pitch": 75.0},
+                "fab_params": {"passiv_opening_um": 35.0},
+            },
+            "method_y": {
+                "pitch_rules": {"IXN_spacing": 15.0, "IXN_pitch": 50.0},
+                "fab_params": {"passiv_opening_um": 35.0},
+            },
+        },
+    }), encoding="utf-8")
+    return str(root)
+
+
+def test_read_component_connections_column_zero_items(tmp_path):
+    p = _write_chiplet(tmp_path, MIXED_CHIPLET)
+    conns = _read_component_connections(p)
+    # interposer and U5 have no connection; the nested io_pads entry's
+    # connection must not leak into U1's.
+    assert conns == [("U1", "method_x"), ("U2", "method_y"),
+                     ("U3", "method_x"), ("U4", "custom_stack_not_in_manifest")]
+
+
+def test_read_component_connections_indented_items(tmp_path):
+    p = _write_chiplet(tmp_path, (
+        "components:\n"
+        "  - id: die_a\n"
+        "    connection: m_a\n"
+        "  - id: die_b\n"
+        "    type: die\n"
+        "    connection: 'm_b'\n"
+        "other_block:\n"
+        "  - id: not_a_component\n"
+        "    connection: nope\n"
+    ))
+    assert _read_component_connections(p) == [("die_a", "m_a"),
+                                              ("die_b", "m_b")]
+
+
+def test_derive_interconnect_methods_groups_dies_per_method(tmp_path):
+    chiplet = _write_chiplet(tmp_path, MIXED_CHIPLET)
+    root = _write_fake_interconnect_root(tmp_path)
+    methods = derive_interconnect_methods(chiplet, interconnect_root=root)
+    assert sorted(methods) == ["method_x", "method_y"]
+    assert methods["method_x"]["dies"] == ["U1", "U3"]
+    assert methods["method_y"]["dies"] == ["U2"]
+    assert methods["method_x"]["IXN_spacing"] == 40.0
+    assert methods["method_x"]["IXN_pitch"] == 75.0
+    assert methods["method_x"]["IXN_pad_size"] == 35.0
+    # The unknown stack id is left to the assembly-global adapter.
+    assert "custom_stack_not_in_manifest" not in methods
+
+
+def test_derive_interconnect_methods_empty_without_manifest(tmp_path):
+    chiplet = _write_chiplet(tmp_path, MIXED_CHIPLET)
+    assert derive_interconnect_methods(
+        chiplet, interconnect_root=str(tmp_path / "nowhere")) == {}
+
+
+def test_write_ixn_methods_sidecar_next_to_gds(tmp_path):
+    methods = {
+        "method_x": {"dies": ["U1"], "IXN_spacing": 40.0,
+                     "IXN_pitch": 75.0, "IXN_pad_size": 35.0},
+    }
+    gds = tmp_path / "demo_complete.gds"
+    sidecar = write_ixn_methods_sidecar(methods, str(gds), "demo.chiplet")
+    assert sidecar == str(tmp_path / "demo_complete.ixn_methods.json")
+    data = json.loads(Path(sidecar).read_text(encoding="utf-8"))
+    assert data["schema"] == "adk-ixn-methods"
+    assert data["assembly_gds"] == "demo_complete.gds"
+    assert data["source_chiplet"] == "demo.chiplet"
+    assert data["methods"]["method_x"]["dies"] == ["U1"]
+    # Empty input writes nothing.
+    assert write_ixn_methods_sidecar({}, str(gds)) == ""
+
+
+def test_build_adk_drc_argv_adds_interconnect_methods_when_set():
+    args = build_adk_drc_argv(ADK_RUNNER, GDS, ADAPTER,
+                              interconnect_methods="/tmp/x.ixn_methods.json")
+    assert args[args.index("--interconnect-methods") + 1] == "/tmp/x.ixn_methods.json"
+    args = build_adk_drc_argv(ADK_RUNNER, GDS, ADAPTER)
+    assert "--interconnect-methods" not in args
 
 
 # ---------------------------------------------------------------------------
