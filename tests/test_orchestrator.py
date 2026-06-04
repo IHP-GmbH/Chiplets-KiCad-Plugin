@@ -21,7 +21,7 @@ if str(PLUGIN_ROOT.parent) not in sys.path:
 from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
     DEFAULT_INTERPOSER_ADAPTER,
     DEFAULT_INTERCONNECT_ADAPTER,
-    ExportOptions, ExportResult,
+    ExportOptions, ExportResult, describe_assembly_drc,
     build_adk_drc_argv, build_cli_args,
     load_interposer_adapter, load_interconnect_adapter,
     available_connection_types,
@@ -185,6 +185,15 @@ def test_export_options_default_assembly_drc_enabled():
     opts = ExportOptions()
     assert opts.emit_assembly_drc is True
     assert opts.interposer_adapter == ""
+
+
+def test_describe_assembly_drc_verdicts():
+    res = ExportResult()
+    assert describe_assembly_drc(res) == "assembly DRC: NOT RUN"
+    res.assembly_drc_exit_code = 0
+    assert describe_assembly_drc(res) == "assembly DRC: PASSED"
+    res.assembly_drc_exit_code = 3
+    assert describe_assembly_drc(res) == "assembly DRC: FAILED (exit 3)"
 
 
 def test_export_result_default_assembly_drc_fields():
