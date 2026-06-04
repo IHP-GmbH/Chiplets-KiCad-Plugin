@@ -15,7 +15,7 @@ from hyp_to_gds import GDSGenerator, LayerMap, update_chiplet_file  # noqa: E402
 import os  # noqa: E402
 LYP_PATH = Path(os.environ.get(
     "INTERPOSER_LYP",
-    REPO.parents[1] / "interposer" / "interposer_klayout" / "tech" / "intm4tm2.lyp",
+    REPO.parents[1] / "interposer" / "libs.tech" / "klayout" / "tech" / "intm4tm2.lyp",
 ))
 TM2_LAYER = (134, 0)
 

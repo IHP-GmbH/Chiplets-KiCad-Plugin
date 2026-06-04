@@ -1997,13 +1997,13 @@ def _maybe_set_interconnect_adapter(data):
 def _import_bump_mirror():
     """Import bump_mirror (Cu-pillar geometry + DRC + auto-resolve).
 
-    Located at <project_root>/interposer/scripts/bump_mirror.py relative to
-    this file. Returns the module, or None if it cannot be imported so the
-    caller degrades gracefully (warn + no pillars).
+    Located at <project_root>/interposer/libs.tech/klayout/python/
+    bump_mirror.py relative to this file. Returns the module, or None if it
+    cannot be imported so the caller degrades gracefully (warn + no pillars).
     """
     try:
         scripts_dir = (Path(__file__).resolve().parent.parent
-                       / "interposer" / "scripts")
+                       / "interposer" / "libs.tech" / "klayout" / "python")
         if scripts_dir.is_dir() and str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
         import bump_mirror
