@@ -23,7 +23,7 @@ from hyp_to_gds import GDSGenerator, LayerMap  # noqa: E402
 
 # The plugin bundles the LYP it uses by default; prefer it so the test is
 # self-contained (no dependency on the sibling interposer subproject).
-LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", REPO / "interposer_ihp.lyp"))
+LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", REPO / "intm4tm2.lyp"))
 EXCHANGE0 = (190, 0)
 DEFAULT_VIZ = (1000, 0)
 
