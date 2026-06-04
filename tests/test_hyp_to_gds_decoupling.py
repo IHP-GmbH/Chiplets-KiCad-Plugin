@@ -130,6 +130,21 @@ def test_interposer_pdk_env_override_wins(tmp_path, monkeypatch):
     assert found is not None and found != fake  # walk found the real one
 
 
+def test_interconnect_pdk_resolves_live_not_fallback(monkeypatch):
+    """The interconnect PDK probes resolve the real sibling checkout under
+    its IHP layout (libs.tech/klayout/python). Guards against a silent
+    fall-back to builtin tables if the layout moves again: both the manifest
+    reader and the 3D generator must import, via the walk alone."""
+    monkeypatch.delenv("INTERCONNECT_PDK_ROOT", raising=False)
+    cands = h._interconnect_python_candidates()
+    hit = [c for c in cands if (c / "interconnect_manifest.py").is_file()]
+    assert hit, "walk did not locate interconnect_pdk/libs.tech/klayout/python"
+    assert hit[0].parts[-4:] == (
+        "interconnect_pdk", "libs.tech", "klayout", "python")
+    assert h._import_interconnect_manifest() is not None
+    assert h._import_bump3d() is not None
+
+
 # ---------------------------------------------------------------------------
 # ${VAR} path expansion (env -> sibling-checkout walk -> loud failure)
 # ---------------------------------------------------------------------------

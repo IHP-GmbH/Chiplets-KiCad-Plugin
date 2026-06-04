@@ -8,8 +8,9 @@ and formats the YAML byte-identically to the pre-split literal that
 export_chiplet.cpp still emits -- so the byte-exact writer-parity gate stays
 green.
 
-The manifest reader (interconnect_pdk/python/interconnect_manifest.py) is
-located via $INTERCONNECT_PDK_ROOT or a sibling-repo search, then imported.
+The manifest reader (interconnect_pdk/libs.tech/klayout/python/
+interconnect_manifest.py) is located via $INTERCONNECT_PDK_ROOT or a
+sibling-repo search, then imported.
 """
 
 import os
@@ -20,20 +21,22 @@ from pathlib import Path
 def _manifest_reader():
     """Import and return the interconnect_pdk manifest reader module.
 
-    Resolution: $INTERCONNECT_PDK_ROOT/python, then a sibling-repo walk up from
-    this file (locates <project>/interconnect_pdk/python). Raises ImportError
+    Resolution: $INTERCONNECT_PDK_ROOT/libs.tech/klayout/python, then a
+    sibling-repo walk up from this file (locates
+    <project>/interconnect_pdk/libs.tech/klayout/python). Raises ImportError
     with actionable text if the interconnect PDK is not installed.
     """
     if "interconnect_manifest" in sys.modules:
         return sys.modules["interconnect_manifest"]
 
     candidates = []
+    py_subdir = ("libs.tech", "klayout", "python")
     env = os.environ.get("INTERCONNECT_PDK_ROOT")
     if env:
-        candidates.append(Path(env) / "python")
+        candidates.append(Path(env).joinpath(*py_subdir))
     here = Path(__file__).resolve()
     for base in here.parents:
-        candidates.append(base / "interconnect_pdk" / "python")
+        candidates.append((base / "interconnect_pdk").joinpath(*py_subdir))
 
     for cand in candidates:
         if (cand / "interconnect_manifest.py").is_file():
