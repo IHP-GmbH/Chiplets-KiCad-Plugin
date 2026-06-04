@@ -53,8 +53,8 @@ def find_die_flipped_cell(layout: db.Layout, die_ref: str) -> Optional[db.Cell]:
 
 
 def find_cupillars_cell(layout: db.Layout, die_ref: str) -> Optional[db.Cell]:
-    """Locate the cu-pillar group cell. hyp_to_gds.py::add_cupillar_pads
-    names it f"CUPILLARS_{device_ref}".
+    """Locate the cu-pillar group cell. bump_mirror.py::add_device_bumps
+    (interposer PDK) names it f"CUPILLARS_{ref}".
     """
     name = f"CUPILLARS_{die_ref}"
     if layout.has_cell(name):
@@ -201,7 +201,7 @@ def main() -> int:
             f"tolerance {args.centroid_tolerance_um:.3f} um. Probable cause: "
             f"systematic X offset between die placement and cu-pillar "
             f"placement (check kicad_pcb_to_iopads.py center_x_dbu output "
-            f"or add_cupillar_pads coordinate math).")
+            f"or bump_mirror compute_bump_locations math).")
 
     if failures:
         print(f"\nFAIL: {len(failures)} alignment check(s) failed:",

@@ -1143,164 +1143,16 @@ class GDSGenerator:
         bbox = self.top_cell.dbbox()  # DBox in micrometers (since we use dbu=0.001)
         return (bbox.left, bbox.bottom, bbox.width(), bbox.height())
 
-    # Cu-pillar pad layer definitions (layer_num, datatype)
+    # Cu-pillar pad layer definitions (layer_num, datatype). The TopMetal2
+    # entry is shared with the wire-bond I/O pad cell below. Cu-pillar cell
+    # generation itself lives in the interposer PDK's bump_mirror (fab pads)
+    # delegating 3D bodies to the interconnect PDK's bump3d_generator.
     CUPILLAR_FAB_LAYERS = {
         'TopMetal2':      (134, 0),
         'Passiv:pillar':  (9, 35),
         'dfpad:pillar':   (41, 35),
         'Recog:pillar':   (99, 35),
     }
-
-    # 3D visualization auxiliary layers (not fabrication)
-    # Cu pillar body diameter is larger than passiv opening (Table 6.1)
-    CUPILLAR_3D_LAYERS = {
-        'CuPillar:pillar':  (500, 35),
-        'SnAgCap:pillar':   (501, 35),
-    }
-    CUPILLAR_BODY_DIAMETER = 44.0  # um (Table 6.1 Option 1: 44 +/- 3)
-
-    def _create_cupillar_cell(self, diameter_um: float = 35.0,
-                               encl_um: float = 7.5,
-                               num_points: int = 256) -> db.Cell:
-        """Create a static cu-pillar pad cell with circle geometry.
-
-        Generates fabrication layers (same as CuPillarPad pcell) plus
-        3D auxiliary layers for visualization and simulation.
-
-        Args:
-            diameter_um: Passivation opening diameter in micrometers
-            encl_um: TopMetal2 enclosure around opening in micrometers
-            num_points: Number of polygon points for circle approximation
-
-        Returns:
-            KLayout Cell containing the cu-pillar pad geometry
-        """
-        radius = diameter_um / 2.0
-        tm2_radius = radius + encl_um
-
-        cell_name = f"CUPILLAR_{diameter_um:.0f}um"
-        cell = self.layout.create_cell(cell_name)
-
-        # Fabrication layers
-        for layer_name, (layer_num, datatype) in self.CUPILLAR_FAB_LAYERS.items():
-            layer_idx = self.layout.layer(layer_num, datatype)
-            r = radius if layer_name == 'Passiv:pillar' else tm2_radius
-
-            points = []
-            for i in range(num_points):
-                angle = 2 * math.pi * i / num_points
-                x = r * math.cos(angle)
-                y = r * math.sin(angle)
-                points.append(db.DPoint(x, y))
-            poly = db.DPolygon(points)
-            cell.shapes(layer_idx).insert(poly)
-
-        # 3D auxiliary layers (Cu pillar body + SnAg cap, same XY footprint).
-        # Owned by the interconnect PDK; delegate to its generator when present,
-        # otherwise fall back to the built-in IHP layers (0-regression).
-        body_radius = self.CUPILLAR_BODY_DIAMETER / 2.0
-        bump3d = _import_bump3d()
-        if bump3d is not None:
-            bump3d.add_3d_bodies(self.layout, cell, body_radius,
-                                 num_points=num_points)
-        else:
-            for layer_name, (layer_num, datatype) in self.CUPILLAR_3D_LAYERS.items():
-                layer_idx = self.layout.layer(layer_num, datatype)
-                points = []
-                for i in range(num_points):
-                    angle = 2 * math.pi * i / num_points
-                    x = body_radius * math.cos(angle)
-                    y = body_radius * math.sin(angle)
-                    points.append(db.DPoint(x, y))
-                poly = db.DPolygon(points)
-                cell.shapes(layer_idx).insert(poly)
-
-        return cell
-
-    def _get_or_create_cupillar_cell(self, diameter_um: float = 35.0,
-                                      encl_um: float = 7.5) -> db.Cell:
-        """Get or create a cached cu-pillar pad cell."""
-        if not hasattr(self, '_cupillar_cells'):
-            self._cupillar_cells: Dict[str, db.Cell] = {}
-
-        cache_key = f"{diameter_um}_{encl_um}"
-        if cache_key not in self._cupillar_cells:
-            cell = self._create_cupillar_cell(diameter_um, encl_um)
-            self._cupillar_cells[cache_key] = cell
-            print(f"  Created cu-pillar cell: {diameter_um:.0f}um diameter, "
-                  f"{encl_um:.1f}um TM2 enclosure")
-        return self._cupillar_cells[cache_key]
-
-    def add_cupillar_pads(self, device_ref: str, pad_locations_json: str,
-                          device_x_um: float, device_y_um: float,
-                          device_rotation: float = 0.0,
-                          diameter_um: float = 35.0,
-                          encl_um: float = 7.5) -> int:
-        """Add cu-pillar pads at chiplet pad locations.
-
-        Reads pad coordinates from a pin_list JSON file and instantiates
-        cu-pillar pad cells at each location, transformed to interposer
-        global coordinates.
-
-        Args:
-            device_ref: Device reference (e.g., "U1")
-            pad_locations_json: Path to pin_list JSON file
-            device_x_um: Device placement X in micrometers (interposer coords)
-            device_y_um: Device placement Y in micrometers (interposer coords)
-            device_rotation: Device rotation in degrees
-            diameter_um: Cu-pillar opening diameter
-            encl_um: TopMetal2 enclosure
-
-        Returns:
-            Number of cu-pillar pads placed
-        """
-        pad_path = Path(pad_locations_json)
-        if not pad_path.exists():
-            print(f"Warning: Pad locations file not found: {pad_locations_json}")
-            return 0
-
-        with open(pad_path, 'r') as f:
-            data = json.load(f)
-
-        pins = data.get('pins', [])
-        if not pins:
-            print(f"Warning: No pins found in {pad_locations_json}")
-            return 0
-
-        # Get or create the cu-pillar cell template
-        cupillar_cell = self._get_or_create_cupillar_cell(diameter_um, encl_um)
-
-        # Create a group cell for this device's cu-pillars
-        group_cell = self.layout.create_cell(f"CUPILLARS_{device_ref}")
-        self.top_cell.insert(db.DCellInstArray(group_cell, db.DTrans()))
-
-        # DBU to um conversion: pin_list coordinates are in database units
-        # For IHP SG13G2: 1 DBU = 1 nm, so dbu_to_um = 0.001
-        dbu_to_um = 0.001
-
-        count = 0
-        for pin in pins:
-            # Convert pad center from chiplet-local DBU to micrometers
-            pad_x_um = pin.get('center_x_dbu', 0.0) * dbu_to_um
-            pad_y_um = pin.get('center_y_dbu', 0.0) * dbu_to_um
-
-            # Transform from chiplet-local to interposer-global coordinates
-            if device_rotation != 0.0:
-                angle_rad = math.radians(device_rotation)
-                cos_a = math.cos(angle_rad)
-                sin_a = math.sin(angle_rad)
-                global_x = device_x_um + pad_x_um * cos_a - pad_y_um * sin_a
-                global_y = device_y_um + pad_x_um * sin_a + pad_y_um * cos_a
-            else:
-                global_x = device_x_um + pad_x_um
-                global_y = device_y_um + pad_y_um
-
-            trans = db.DTrans(db.DVector(global_x, global_y))
-            group_cell.insert(db.DCellInstArray(cupillar_cell, trans))
-            count += 1
-
-        print(f"  Placed {count} cu-pillar pads for {device_ref}")
-        return count
 
     # I/O pads (external interposer pads): wire-bond MVP; flipped_bump and
     # tsv_bump reserved for follow-up PRs.
@@ -2006,20 +1858,6 @@ def _import_interconnect_manifest():
     return None
 
 
-def _import_bump3d():
-    """Import the interconnect PDK 3D body generator (sibling repo), or None."""
-    try:
-        for cand in _interconnect_python_candidates():
-            if (cand / "bump3d_generator.py").is_file():
-                if str(cand) not in sys.path:
-                    sys.path.insert(0, str(cand))
-                import bump3d_generator
-                return bump3d_generator
-    except Exception:
-        pass
-    return None
-
-
 def _connection_to_body_diameter(connection_type):
     """Cu-pillar body diameter (um) for a connection-stack id, or None.
 
@@ -2060,28 +1898,78 @@ def _connection_to_adapter(connection_type):
     return method.get("adapter")
 
 
+# Layer properties of the interconnect PDK's 3D body layers. Writer-verbatim
+# ${VAR} form (readers expand via the ecosystem discovery convention); covers
+# every method in the manifest, so it is adapter-independent.
+_INTERCONNECT_LYP_REF = (
+    "${INTERCONNECT_PDK_ROOT}/libs.tech/klayout/tech/interconnect.lyp")
+
+
+def _interconnect_technology_block(adapter):
+    """Technology metadata for an interconnect adapter, or None.
+
+    Mirrors the entries under ``technologies:`` (description /
+    layer_properties / dbu) so viewers treat the interconnect method as a
+    PDK-backed technology with its own provenance, instead of folding its
+    identity into the interposer. None when the manifest is unavailable or
+    no method declares the adapter (e.g. a hand-set custom adapter).
+    """
+    im = _import_interconnect_manifest()
+    if im is None:
+        return None
+    vendor = None
+    try:
+        for mid in im.list_methods():
+            method = im.get_method(mid)
+            if method.get("adapter") == adapter:
+                vendor = method.get("vendor")
+                break
+        else:
+            return None
+    except Exception:
+        return None
+    description = "Chiplet attachment"
+    if vendor:
+        description += f" ({vendor})"
+    return {
+        "description": description,
+        "layer_properties": _INTERCONNECT_LYP_REF,
+        "dbu": 0.001,
+    }
+
+
 def _maybe_set_interconnect_adapter(data):
-    """Declare ``interconnect.adapter`` on a .chiplet dict, in place.
+    """Declare ``interconnect`` (adapter + technology) on a .chiplet dict.
 
     Scans die components for a connection whose manifest method carries an
     adapter and declares it at the assembly root, so chiplet-studio merges the
     method's 3D body fragment and the ADK applies the method's IXN pitch/spacing
     DRC. Works whether the die connection was chosen via --connection-type or
-    carried in from the board. No-op (returns None) when an adapter is already
-    declared (an explicit choice wins) or no die has an adapter-bearing
-    connection. Returns the adapter that was set, otherwise None.
+    carried in from the board. An adapter already declared on the .chiplet is
+    never overwritten (an explicit choice wins); the ``technology`` subblock is
+    derived data and is refreshed for whatever adapter is effective, so files
+    from older exports gain it on re-export. Returns the adapter that was
+    newly set, otherwise None.
     """
     existing = data.get("interconnect")
-    if isinstance(existing, dict) and existing.get("adapter"):
-        return None
-    for comp in data.get("components", []):
-        if comp.get("type") != "die":
-            continue
-        adapter = _connection_to_adapter(comp.get("connection", ""))
-        if adapter:
-            data.setdefault("interconnect", {})["adapter"] = adapter
-            return adapter
-    return None
+    adapter = existing.get("adapter") if isinstance(existing, dict) else None
+    newly_set = None
+    if not adapter:
+        for comp in data.get("components", []):
+            if comp.get("type") != "die":
+                continue
+            adapter = _connection_to_adapter(comp.get("connection", ""))
+            if adapter:
+                newly_set = adapter
+                break
+    if adapter:
+        if not isinstance(data.get("interconnect"), dict):
+            data["interconnect"] = {}
+        data["interconnect"]["adapter"] = adapter
+        tech = _interconnect_technology_block(adapter)
+        if tech:
+            data["interconnect"]["technology"] = tech
+    return newly_set
 
 
 def _find_interposer_pdk_python():
@@ -2276,8 +2164,16 @@ def convert_hyp_to_gds(
                   f"body diameter={body_diameter} um) with DRC validation...")
             device_map = {dev.ref: dev for dev in parser.devices}
             params = bm.DrcParams.from_body_diameter(body_diameter)
+            # The method's 3D body layers come from the interconnect manifest
+            # (e.g. a vendor's 510/511), not an assumed IHP cu-pillar pair.
+            # _connection_to_body_diameter above already proved the manifest
+            # resolves for this connection_type.
+            im = _import_interconnect_manifest()
+            bodies = im.layers_3d(connection_type)
+            print("  3D bodies: " + ", ".join(
+                f"{name} ({lnum}/{ldt})" for name, lnum, ldt in bodies))
             pillar_gen = bm.CuPillarGenerator(
-                enclosure_um=params.min_enclosure_um)
+                enclosure_um=params.min_enclosure_um, bodies=bodies)
             total_pillars = 0
             device_reports = {}
             for dev_ref, pin_json in pad_locations.items():
