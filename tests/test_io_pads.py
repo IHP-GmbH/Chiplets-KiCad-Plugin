@@ -11,12 +11,13 @@ sys.path.insert(0, str(REPO))
 
 from hyp_to_gds import GDSGenerator, LayerMap, update_chiplet_file  # noqa: E402
 
-# The interposer LYP lives in the interposer/ subproject. Allow override via env.
+# Interposer LYP via the ecosystem discovery convention (env -> walk ->
+# bundled fallback); INTERPOSER_LYP still overrides. The old fixed
+# ../interposer path silently skipped this whole module on hosts and in
+# the adk-tools image, letting the io_pads frame assertions rot.
 import os  # noqa: E402
-LYP_PATH = Path(os.environ.get(
-    "INTERPOSER_LYP",
-    REPO.parents[1] / "interposer" / "libs.tech" / "klayout" / "tech" / "intm4tm2.lyp",
-))
+import hyp_to_gds as _h  # noqa: E402
+LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", _h._find_default_lyp()))
 TM2_LAYER = (134, 0)
 
 
@@ -163,6 +164,56 @@ def test_update_chiplet_file_injects_io_pads(tmp_path):
     j1 = next(p for p in pads if p["id"] == "J1")
     assert j1["io_class"] == "wire_bond"
     assert j1["net"] == "VDD_EXT"
-    assert j1["position"] == {"x": 100.0, "y": 200.0}
+    # Re-anchored to the GDS-bbox-corner frame (coord_frame_contract 4.2):
+    # input (100, 200) minus bbox lower-left (-500, -500).
+    assert j1["position"] == {"x": 600.0, "y": 700.0}
     assert j1["size"] == {"x": 100.0, "y": 100.0}
     assert j1["layer"] == "TopMetal2"
+
+    # Colocated GDS -> relative reference (readers anchor on the
+    # .chiplet's directory), keeping the exported set portable.
+    assert interposer["layout"] == "interposer.gds"
+
+
+def test_update_chiplet_layout_ref_relative_only_when_colocated(tmp_path):
+    """GDS outside the .chiplet's tree keeps an absolute layout path
+    (machine-local by default); inside it, the reference is relative."""
+    chiplet_dir = tmp_path / "proj"
+    chiplet_dir.mkdir()
+    chiplet_path = chiplet_dir / "demo.chiplet"
+    chiplet_path.write_text(
+        "format_version: '1.0'\n"
+        "assembly:\n"
+        "  name: demo\n"
+        "  units: um\n"
+        "components:\n"
+        "- id: interposer\n"
+        "  type: interposer\n"
+        "  technology: intm4tm2\n"
+        "  layout: ''\n"
+    )
+    layout = db.Layout()
+    layout.dbu = 0.001
+    cell = layout.create_cell("TOP")
+    layer_idx = layout.layer(*TM2_LAYER)
+    cell.shapes(layer_idx).insert(db.DBox(0.0, 0.0, 100.0, 100.0))
+    outside_gds = tmp_path / "elsewhere.gds"
+    layout.write(str(outside_gds))
+
+    import yaml
+    assert update_chiplet_file(str(chiplet_path), str(outside_gds))
+    with chiplet_path.open() as f:
+        data = yaml.safe_load(f)
+    interposer = next(c for c in data["components"]
+                      if c["id"] == "interposer")
+    assert interposer["layout"] == str(outside_gds.resolve())
+
+    subdir_gds = chiplet_dir / "out" / "inside.gds"
+    subdir_gds.parent.mkdir()
+    layout.write(str(subdir_gds))
+    assert update_chiplet_file(str(chiplet_path), str(subdir_gds))
+    with chiplet_path.open() as f:
+        data = yaml.safe_load(f)
+    interposer = next(c for c in data["components"]
+                      if c["id"] == "interposer")
+    assert interposer["layout"] == str(Path("out") / "inside.gds")
