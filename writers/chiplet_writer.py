@@ -206,13 +206,50 @@ def read_die_connections(board):
     return result
 
 
+def _get_field(footprint, name):
+    """Footprint field object by name, or None (the SWIG bindings expose
+    GetFields() but not GetFieldByName)."""
+    for field in footprint.GetFields():
+        if field.GetName() == name:
+            return field
+    return None
+
+
+def _style_managed_field(field):
+    """Style a machine-managed footprint field: F.Fab, hidden, small text.
+
+    KiCad creates new fields visible on F.SilkS at 1.27 mm -- on a
+    um-scale interposer board that draws method ids across the whole
+    layout. Returns True when anything was adjusted (idempotent).
+    """
+    changed = False
+    if field.GetLayer() != pcbnew.F_Fab:
+        field.SetLayer(pcbnew.F_Fab)
+        changed = True
+    if field.IsVisible():
+        field.SetVisible(False)
+        changed = True
+    small = pcbnew.FromMM(0.2)
+    size = field.GetTextSize()
+    if size.x != small or size.y != small:
+        field.SetTextSize(pcbnew.VECTOR2I(small, small))
+        changed = True
+    thin = pcbnew.FromMM(0.05)
+    if field.GetTextThickness() != thin:
+        field.SetTextThickness(thin)
+        changed = True
+    return changed
+
+
 def write_die_connections(board, mapping):
     """Persist per-die interconnect methods to footprint CONNECTION fields.
 
     `mapping` is {ref: method id}; an empty value clears the override (the
     die falls back to the assembly default). Only die footprints (GDS_FILE
-    present) are touched, and only when the field text actually changes.
-    Returns the refs that were modified; the caller owns saving the board.
+    present) are touched, and only when the field text or its presentation
+    actually changes (the field is kept hidden on F.Fab at small size --
+    see _style_managed_field). Returns the refs that were modified; the
+    caller owns saving the board.
     """
     changed = []
     for fp in list(board.Footprints()):
@@ -222,10 +259,13 @@ def write_die_connections(board, mapping):
         if ref not in mapping:
             continue
         new = (mapping[ref] or "").strip()
-        if _field_text(fp, CONNECTION_FIELD).strip() == new:
-            continue
-        fp.SetField(CONNECTION_FIELD, new)
-        changed.append(ref)
+        text_changed = _field_text(fp, CONNECTION_FIELD).strip() != new
+        if text_changed:
+            fp.SetField(CONNECTION_FIELD, new)
+        field = _get_field(fp, CONNECTION_FIELD)
+        restyled = _style_managed_field(field) if field is not None else False
+        if text_changed or restyled:
+            changed.append(ref)
     return changed
 
 
