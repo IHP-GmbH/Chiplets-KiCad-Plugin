@@ -57,6 +57,10 @@ def _candidate_chiplet_boards():
     project_root = PLUGIN_ROOT.parent
     candidates = [
         os.environ.get("CHIPLET_WRITER_BOARD"),
+        # adk-tools image / meta-repo layout (examples/ ships the demo)
+        str(project_root / "examples"
+            / "interposer_wire_bonding_demo"
+            / "interposer_wire_bonding_demo.kicad_pcb"),
         str(project_root / "kicad_designs"
             / "interposer_wire_bonding_demo"
             / "interposer_wire_bonding_demo.kicad_pcb"),
