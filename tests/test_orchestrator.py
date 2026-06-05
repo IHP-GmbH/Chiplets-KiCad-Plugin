@@ -514,22 +514,23 @@ def test_build_adk_drc_argv_adds_interconnect_methods_when_set():
 # Explicit PDK roots (dialog pickers; the GUI face of the env-var leg)
 # ---------------------------------------------------------------------------
 
-def _fake_pdk_tree(base, var_name):
+def _fake_pdk_tree(base, var_name, name_index=0):
     """Create <base>/<dirname>/<marker...> for a dependency root."""
-    dirname, marker = DEPENDENCY_ROOT_MARKERS[var_name]
-    root = base / dirname
+    dirnames, marker = DEPENDENCY_ROOT_MARKERS[var_name]
+    root = base / dirnames[name_index]
     root.joinpath(*marker).mkdir(parents=True)
     return root
 
 
 def test_discover_dependency_root_walk_finds_real_siblings(monkeypatch):
     """With no env vars set, the sibling walk resolves every root of this
-    workspace, and each resolved path ends in the conventional dir name."""
-    for var, (dirname, marker) in DEPENDENCY_ROOT_MARKERS.items():
+    workspace; each resolved path ends in one of the accepted dir names
+    (canonical ecosystem name or upstream repository name)."""
+    for var, (dirnames, marker) in DEPENDENCY_ROOT_MARKERS.items():
         monkeypatch.delenv(var, raising=False)
         root = discover_dependency_root(var)
         assert root, "walk did not resolve %s" % var
-        assert Path(root).name == dirname
+        assert Path(root).name in dirnames
         assert Path(root).joinpath(*marker).exists()
 
 
@@ -543,7 +544,23 @@ def test_discover_dependency_root_env_wins_and_bogus_falls_through(
     monkeypatch.setenv("INTERCONNECT_PDK_ROOT", str(tmp_path / "nonexistent"))
     found = discover_dependency_root("INTERCONNECT_PDK_ROOT")
     assert found and found != str(fake)
-    assert Path(found).name == "interconnect_pdk"
+    assert Path(found).name in DEPENDENCY_ROOT_MARKERS[
+        "INTERCONNECT_PDK_ROOT"][0]
+
+
+def test_discover_dependency_root_walk_accepts_repo_names(tmp_path,
+                                                          monkeypatch):
+    """A sibling named after the upstream repository (default GitHub clone
+    dir, e.g. OpenIntM4TM2) resolves through the walk too."""
+    for var in DEPENDENCY_ROOT_MARKERS:
+        monkeypatch.delenv(var, raising=False)
+    fake = _fake_pdk_tree(tmp_path / "ws", "INTERPOSER_PDK_ROOT",
+                          name_index=1)
+    start = tmp_path / "ws" / "plugin" / "pipeline" / "orchestrator.py"
+    start.parent.mkdir(parents=True)
+    found = discover_dependency_root("INTERPOSER_PDK_ROOT",
+                                     start=str(start))
+    assert found == str(fake)
 
 
 def test_available_connection_types_explicit_root(tmp_path):

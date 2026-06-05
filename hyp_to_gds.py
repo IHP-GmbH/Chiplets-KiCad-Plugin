@@ -1941,14 +1941,18 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
 
 # Ecosystem-root variables accepted inside path inputs (board text vars,
 # footprint fields, CLI arguments, .chiplet entries). Each maps to the
-# directory name walked for next to this checkout plus the marker subpath
-# that must exist under the root. Same discovery convention as
+# candidate directory names walked for next to this checkout (canonical
+# ecosystem name first, then the upstream repository name so default
+# GitHub clones resolve too) plus the marker subpath that must exist
+# under the root. Same discovery convention as
 # _find_interposer_pdk_python (see adk/docs/integration.md).
 _PATH_VAR_MARKERS = {
-    "INTERPOSER_PDK_ROOT": ("interposer", ("libs.tech", "klayout")),
-    "GDS_TO_KICAD_ROOT": ("gds_to_kicad", ("pdks",)),
-    "ADK_ROOT": ("adk", ("klayout", "drc")),
-    "INTERCONNECT_PDK_ROOT": ("interconnect_pdk", ("manifest",)),
+    "INTERPOSER_PDK_ROOT": (("interposer", "OpenIntM4TM2"),
+                            ("libs.tech", "klayout")),
+    "GDS_TO_KICAD_ROOT": (("gds_to_kicad", "gds-to-kicad"), ("pdks",)),
+    "ADK_ROOT": (("adk", "ADK"), ("klayout", "drc")),
+    "INTERCONNECT_PDK_ROOT": (("interconnect_pdk",
+                               "IHP-Interconnect-IntM4TM2"), ("manifest",)),
 }
 
 _PATH_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -1968,12 +1972,13 @@ def _discover_path_var(name: str) -> Optional[str]:
             return env
     if marker is None:
         return None
-    dirname, sub = marker
+    dirnames, sub = marker
     here = Path(__file__).resolve()
     for base in here.parents:
-        cand = base / dirname
-        if cand.joinpath(*sub).is_dir():
-            return str(cand)
+        for dirname in dirnames:
+            cand = base / dirname
+            if cand.joinpath(*sub).is_dir():
+                return str(cand)
     return None
 
 
