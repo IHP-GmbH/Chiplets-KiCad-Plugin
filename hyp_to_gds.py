@@ -68,6 +68,15 @@ class TraceArc:
 
 
 @dataclass
+class PerimeterSegment:
+    """One BOARD-section PERIMETER_SEGMENT (the board outline / Edge.Cuts)."""
+    x1: float  # HYP units (inches or meters)
+    y1: float
+    x2: float
+    y2: float
+
+
+@dataclass
 class Padstack:
     """Represents a via padstack definition from HYP file."""
     index: int
@@ -222,6 +231,16 @@ class HYPParser:
         r'\(PIN\s+X=(-?[\d.eE+-]+)\s+Y=(-?[\d.eE+-]+)\s+R="([^"]+)"\s+P=(\d+)\)'
     )
 
+    # Board outline from the {BOARD section (KiCad exports Edge.Cuts here).
+    # PERIMETER_SEGMENT appears only inside {BOARD per the HYP spec, so a
+    # global scan is safe. PERIMETER_ARC is not supported (KiCad polygonizes
+    # the outline before export); its presence is counted and warned about.
+    PERIMETER_SEGMENT_PATTERN = re.compile(
+        r'\(PERIMETER_SEGMENT\s+X1=(-?[\d.eE+-]+)\s+Y1=(-?[\d.eE+-]+)\s+'
+        r'X2=(-?[\d.eE+-]+)\s+Y2=(-?[\d.eE+-]+)\)'
+    )
+    PERIMETER_ARC_PATTERN = re.compile(r'\(PERIMETER_ARC\b')
+
     def __init__(self, hyp_path: str):
         self.hyp_path = hyp_path
         self.segments: List[TraceSegment] = []
@@ -232,6 +251,7 @@ class HYPParser:
         self.pins: List[Pin] = []
         self.units: str = "ENGLISH"  # Default to inches
         self.stackup_layers: List[str] = []  # Layer order from STACKUP (top to bottom)
+        self.perimeter_segments: List[PerimeterSegment] = []  # board outline
 
     def parse(self) -> None:
         """Parse the HYP file and extract all geometry."""
@@ -244,6 +264,7 @@ class HYPParser:
 
         self._parse_units(content)
         self._parse_stackup(content)
+        self._parse_board_perimeter(content)
         self._parse_padstacks(content)
         self._parse_devices(content)
         self._parse_segments_and_vias(content)
@@ -265,6 +286,27 @@ class HYPParser:
                     layer_match = re.search(r'L="([^"]+)"', line)
                     if layer_match:
                         self.stackup_layers.append(layer_match.group(1))
+
+    def _parse_board_perimeter(self, content: str) -> None:
+        """Parse the board outline (BOARD-section PERIMETER_SEGMENTs).
+
+        KiCad's Hyperlynx export writes the Edge.Cuts outline here. The
+        segments are later chained into closed loops and drawn on the
+        prBoundary layer (see GDSGenerator.add_board_outline).
+        """
+        for m in self.PERIMETER_SEGMENT_PATTERN.finditer(content):
+            self.perimeter_segments.append(PerimeterSegment(
+                x1=float(m.group(1)),
+                y1=float(m.group(2)),
+                x2=float(m.group(3)),
+                y2=float(m.group(4)),
+            ))
+        n_arcs = len(self.PERIMETER_ARC_PATTERN.findall(content))
+        if n_arcs:
+            print(f"Warning: {n_arcs} PERIMETER_ARC entries are not "
+                  f"supported; the board outline will not be drawn",
+                  file=sys.stderr)
+            self.perimeter_segments = []
 
     def _parse_padstacks(self, content: str) -> None:
         """Parse PADSTACK definitions."""
@@ -1143,6 +1185,94 @@ class GDSGenerator:
         bbox = self.top_cell.dbbox()  # DBox in micrometers (since we use dbu=0.001)
         return (bbox.left, bbox.bottom, bbox.width(), bbox.height())
 
+    # Board outline layer: prBoundary.drawing in the interposer PDK layer
+    # table (same convention as SG13G2). Drawn from the .hyp BOARD perimeter
+    # (= KiCad Edge.Cuts); read back by update_chiplet_file to size the
+    # interposer component from the fab outline instead of the drawn-copper
+    # extent. A future assembly containment rule (chiplet inside interposer)
+    # reads the same layer.
+    PRBOUNDARY_LAYER = (189, 0)
+
+    def add_board_outline(self, perimeter_segments: List[PerimeterSegment]) -> int:
+        """Draw the board outline on prBoundary (189/0).
+
+        Chains the BOARD-section PERIMETER_SEGMENTs into closed loops by
+        matching endpoints and inserts one polygon per loop. All-or-nothing:
+        if any segment fails to chain into a closed loop, nothing is drawn
+        and a loud warning is printed -- a partial outline would understate
+        the bbox, which is worse than the drawn-geometry fallback.
+
+        Returns:
+            Number of closed loops drawn (0 = nothing drawn).
+        """
+        if not perimeter_segments:
+            return 0
+
+        # Endpoint match tolerance in um. The writers emit %.9f in meters
+        # (1e-3 um quantization); 5 nm is far below any real outline feature.
+        tol = 0.005
+
+        def _close(p, q):
+            return abs(p[0] - q[0]) <= tol and abs(p[1] - q[1]) <= tol
+
+        remaining = []
+        for seg in perimeter_segments:
+            a = (self._to_um(seg.x1), self._to_um_y(seg.y1))
+            b = (self._to_um(seg.x2), self._to_um_y(seg.y2))
+            if not _close(a, b):  # drop degenerate zero-length segments
+                remaining.append((a, b))
+
+        loops = []
+        while remaining:
+            a, b = remaining.pop(0)
+            pts = [a, b]
+            while True:
+                if _close(pts[-1], pts[0]):
+                    pts.pop()  # drop the closing duplicate
+                    break
+                for i, (p, q) in enumerate(remaining):
+                    if _close(p, pts[-1]):
+                        pts.append(q)
+                        remaining.pop(i)
+                        break
+                    if _close(q, pts[-1]):
+                        pts.append(p)
+                        remaining.pop(i)
+                        break
+                else:
+                    print(f"Warning: board outline does not close "
+                          f"({len(perimeter_segments)} perimeter segments, "
+                          f"open end at ({pts[-1][0]:.2f}, {pts[-1][1]:.2f}) "
+                          f"um); prBoundary not drawn", file=sys.stderr)
+                    return 0
+            if len(pts) < 3:
+                print(f"Warning: degenerate board outline loop "
+                      f"({len(pts)} points); prBoundary not drawn",
+                      file=sys.stderr)
+                return 0
+            loops.append(pts)
+
+        layer_idx = self.layout.layer(*self.PRBOUNDARY_LAYER)
+        for pts in loops:
+            poly = db.DSimplePolygon([db.DPoint(x, y) for (x, y) in pts])
+            self.top_cell.shapes(layer_idx).insert(poly)
+        return len(loops)
+
+    def get_outline_bbox(self) -> Optional[Tuple[float, float, float, float]]:
+        """Bbox of the drawn board outline (prBoundary 189/0), or None.
+
+        Returns:
+            (x_min, y_min, width, height) in micrometers, or None when the
+            outline layer is absent or empty.
+        """
+        layer_idx = self.layout.find_layer(*self.PRBOUNDARY_LAYER)
+        if layer_idx is None:
+            return None
+        bbox = self.top_cell.dbbox(layer_idx)
+        if bbox.empty():
+            return None
+        return (bbox.left, bbox.bottom, bbox.width(), bbox.height())
+
     # Cu-pillar pad layer definitions (layer_num, datatype). The TopMetal2
     # entry is shared with the wire-bond I/O pad cell below. Cu-pillar cell
     # generation itself lives in the interposer PDK's bump_mirror (fab pads)
@@ -1455,7 +1585,9 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                         interposer_thickness: float = 13.83,
                         io_pads: Optional[List[Dict]] = None,
                         devices: Optional[List['Device']] = None,
-                        die_connections: Optional[Dict[str, str]] = None) -> bool:
+                        die_connections: Optional[Dict[str, str]] = None,
+                        outline_bbox: Optional[Tuple[float, float, float,
+                                                     float]] = None) -> bool:
     """
     Update .chiplet file with interposer GDS absolute path, dimensions, position,
     correct z-values for dies, and top_cell names from GDS files.
@@ -1485,6 +1617,14 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                  id}. A die not listed keeps connection_type. The stacks of
                  every method in use are injected, and each die's z comes
                  from its own stack.
+        outline_bbox: Optional (x_min, y_min, width, height) in micrometers
+                 of the board outline (prBoundary 189/0, drawn from KiCad's
+                 Edge.Cuts). When available, interposer dimensions come
+                 from it -- the fab outline -- instead of the drawn-geometry
+                 bbox; position keeps the full-bbox center (the
+                 anchor: bbox_center mesh contract). When None and bbox is
+                 computed from the GDS here, it is derived from layer
+                 189/0 if present in the file.
 
     Returns:
         True if successful, False otherwise.
@@ -1512,6 +1652,13 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                         gds_bbox.width(), gds_bbox.height())
                 print(f"Computed interposer bbox from GDS: "
                       f"{bbox[2]:.2f} x {bbox[3]:.2f} um")
+                if outline_bbox is None:
+                    oidx = layout.find_layer(*GDSGenerator.PRBOUNDARY_LAYER)
+                    if oidx is not None:
+                        ob = layout.top_cell().dbbox(oidx)
+                        if not ob.empty():
+                            outline_bbox = (ob.left, ob.bottom,
+                                            ob.width(), ob.height())
             except Exception as e:
                 print(f"Warning: Could not read interposer GDS bbox: {e}",
                       file=sys.stderr)
@@ -1541,8 +1688,18 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                 # Update width/height from bbox
                 if bbox:
                     x_min, y_min, width, height = bbox
-                    component['dimensions']['width'] = width
-                    component['dimensions']['height'] = height
+
+                    # Dimensions: the fab outline (KiCad Edge.Cuts ->
+                    # prBoundary 189/0) when drawn; the drawn-geometry
+                    # bbox otherwise (legacy GDS without an outline).
+                    if outline_bbox:
+                        dim_w, dim_h = outline_bbox[2], outline_bbox[3]
+                        dim_src = "board outline, prBoundary 189/0"
+                    else:
+                        dim_w, dim_h = width, height
+                        dim_src = "drawn-geometry bbox"
+                    component['dimensions']['width'] = dim_w
+                    component['dimensions']['height'] = dim_h
 
                     # Per chiplet-studio/docs/coord_frame_contract.md
                     # section 1: position is the geometric center of
@@ -1550,6 +1707,16 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     # frame. The interposer's bbox center, expressed
                     # in its own bbox-corner frame, is (width/2,
                     # height/2).
+                    #
+                    # Position stays on the FULL bbox even when the
+                    # dimensions come from the outline: with anchor:
+                    # bbox_center the studio places the MESH bbox center
+                    # (all GDS layers, outline included) at `position`.
+                    # When the outline contains all drawn geometry -- the
+                    # normal case -- both centers coincide; when copper
+                    # leaks off-board they don't, and keeping the mesh
+                    # contract preserves die/pillar registry (the loud
+                    # off-board warning fires in convert_hyp_to_gds).
                     if 'position' not in component:
                         component['position'] = {}
                     component['position']['x'] = width / 2.0
@@ -1560,8 +1727,8 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     component['anchor'] = 'bbox_center'
 
                     print(f"Updated interposer: layout={abs_path}")
-                    print(f"  dimensions: {width:.2f} x {height:.2f} um, "
-                          f"thickness={interposer_thickness} um")
+                    print(f"  dimensions: {dim_w:.2f} x {dim_h:.2f} um "
+                          f"({dim_src}), thickness={interposer_thickness} um")
                     print(f"  position: ({width/2.0:.2f}, {height/2.0:.2f}) um "
                           f"(bbox center, canonical GDS-bbox-corner frame)")
                     print(f"  anchor: bbox_center")
@@ -2182,6 +2349,20 @@ def convert_hyp_to_gds(
 
     print(f"Successfully converted {via_success}/{len(parser.vias)} vias")
 
+    # Board outline (KiCad Edge.Cuts -> .hyp BOARD perimeter) on prBoundary.
+    # Downstream, update_chiplet_file sizes the interposer from this layer
+    # so viewers show the fab outline rather than the drawn-copper extent.
+    if parser.perimeter_segments:
+        n_loops = generator.add_board_outline(parser.perimeter_segments)
+        if n_loops:
+            pl, pd = GDSGenerator.PRBOUNDARY_LAYER
+            print(f"Board outline: {len(parser.perimeter_segments)} perimeter "
+                  f"segment(s) -> {n_loops} closed loop(s) on prBoundary "
+                  f"{pl}/{pd}")
+    else:
+        print("No board perimeter in HYP; prBoundary not drawn (interposer "
+              "dimensions fall back to the drawn-geometry bbox)")
+
     # Add cu-pillar pads: prefer pre-generated GDS, fall back to inline generation
     if cupillar_gds_path:
         cupillar_path = Path(cupillar_gds_path)
@@ -2371,6 +2552,27 @@ def convert_hyp_to_gds(
     generator.write(output_path)
     print(f"Interposer GDS file written to: {output_path}")
 
+    # Early design-error signal (precursor of the assembly containment
+    # rule): drawn geometry sticking out of the board outline. KiCad's own
+    # DRC flags the off-board footprint at design time; this catches it
+    # again at the GDS, where it would otherwise silently widen the layout.
+    outline_bbox = generator.get_outline_bbox()
+    if outline_bbox:
+        fx, fy, fw, fh = generator.get_top_cell_bbox()
+        ox, oy, ow, oh = outline_bbox
+        excess = [(name, v) for name, v in (
+            ("left", ox - fx),
+            ("bottom", oy - fy),
+            ("right", (fx + fw) - (ox + ow)),
+            ("top", (fy + fh) - (oy + oh)),
+        ) if v > 0.005]
+        if excess:
+            detail = ", ".join(f"{name} {v:.2f} um" for name, v in excess)
+            print(f"Warning: drawn geometry extends outside the board "
+                  f"outline ({detail}). A die or trace sits off-board; "
+                  f"the interposer keeps its outline size in viewers.",
+                  file=sys.stderr)
+
     # Update chiplet file if requested
     if chiplet_file_path:
         bbox = generator.get_top_cell_bbox()
@@ -2378,7 +2580,8 @@ def convert_hyp_to_gds(
                            connection_type=connection_type,
                            io_pads=placed_io_pads,
                            devices=parser.devices,
-                           die_connections=die_connections)
+                           die_connections=die_connections,
+                           outline_bbox=outline_bbox)
 
     # Generate complete GDS with chiplets if requested
     if with_chiplets and parser.devices:
