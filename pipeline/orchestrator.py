@@ -37,15 +37,19 @@ DEFAULT_INTERPOSER_ADAPTER = "intm4tm2"
 DEFAULT_INTERCONNECT_ADAPTER = ""
 
 # Ecosystem dependency roots the export pipeline consumes. The marker subpath
-# validates a candidate root (same shape as hyp_to_gds._PATH_VAR_MARKERS). The
+# validates a candidate root (same shape as hyp_to_gds._PATH_VAR_MARKERS); the
+# walk tries each candidate directory name (canonical ecosystem name first,
+# then the upstream repository name so default GitHub clones resolve too). The
 # dialog surfaces each root as a pre-filled, overridable picker; an override is
 # handed to the worker subprocesses through the corresponding environment
 # variable -- explicit selection IS the convention's env leg, so swapping in
 # another PDK checkout (a vendor fork, a release tag) needs no code change.
 DEPENDENCY_ROOT_MARKERS = {
-    "INTERPOSER_PDK_ROOT": ("interposer", ("libs.tech", "klayout")),
-    "INTERCONNECT_PDK_ROOT": ("interconnect_pdk", ("manifest",)),
-    "ADK_ROOT": ("adk", ("klayout", "drc")),
+    "INTERPOSER_PDK_ROOT": (("interposer", "OpenIntM4TM2"),
+                            ("libs.tech", "klayout")),
+    "INTERCONNECT_PDK_ROOT": (("interconnect_pdk",
+                               "IHP-Interconnect-IntM4TM2"), ("manifest",)),
+    "ADK_ROOT": (("adk", "ADK"), ("klayout", "drc")),
 }
 
 
@@ -60,7 +64,7 @@ def discover_dependency_root(var_name: str, board=None,
     """
     from .discovery import _lookup_text_var
 
-    dirname, marker = DEPENDENCY_ROOT_MARKERS[var_name]
+    dirnames, marker = DEPENDENCY_ROOT_MARKERS[var_name]
 
     def _valid(root) -> bool:
         try:
@@ -76,9 +80,10 @@ def discover_dependency_root(var_name: str, board=None,
         return str(Path(text).absolute())
     here = Path(start or __file__).resolve()
     for base in here.parents:
-        cand = base / dirname
-        if _valid(cand):
-            return str(cand)
+        for dirname in dirnames:
+            cand = base / dirname
+            if _valid(cand):
+                return str(cand)
     return ""
 
 
