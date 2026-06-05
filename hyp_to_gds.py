@@ -1672,7 +1672,18 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
         for component in data.get('components', []):
             if component.get('id') == 'interposer':
                 abs_path = str(Path(interposer_gds_path).resolve())
-                component['layout'] = abs_path
+                # Colocated artifacts get a relative reference (readers
+                # anchor relative paths on the .chiplet's directory), so
+                # the exported set stays portable: move/copy/commit the
+                # output directory and it still opens. Anything outside
+                # the .chiplet's tree keeps the absolute path (.chiplet
+                # is machine-local by default).
+                try:
+                    layout_ref = str(Path(abs_path).relative_to(
+                        chiplet_file.resolve().parent))
+                except ValueError:
+                    layout_ref = abs_path
+                component['layout'] = layout_ref
 
                 # Read top_cell from interposer GDS
                 interposer_top_cell = _read_gds_top_cell(abs_path)
@@ -1726,14 +1737,14 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     # interposer mesh is centered on its own GDS bbox.
                     component['anchor'] = 'bbox_center'
 
-                    print(f"Updated interposer: layout={abs_path}")
+                    print(f"Updated interposer: layout={layout_ref}")
                     print(f"  dimensions: {dim_w:.2f} x {dim_h:.2f} um "
                           f"({dim_src}), thickness={interposer_thickness} um")
                     print(f"  position: ({width/2.0:.2f}, {height/2.0:.2f}) um "
                           f"(bbox center, canonical GDS-bbox-corner frame)")
                     print(f"  anchor: bbox_center")
                 else:
-                    print(f"Updated interposer layout path to: {abs_path}")
+                    print(f"Updated interposer layout path to: {layout_ref}")
                     print(f"  thickness={interposer_thickness} um")
 
                 if io_pads is not None:
