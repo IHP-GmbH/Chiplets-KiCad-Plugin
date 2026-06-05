@@ -172,8 +172,9 @@ def test_interconnect_pdk_resolves_live_not_fallback(monkeypatch):
     cands = h._interconnect_python_candidates()
     hit = [c for c in cands if (c / "interconnect_manifest.py").is_file()]
     assert hit, "walk did not locate interconnect_pdk/libs.tech/klayout/python"
-    assert hit[0].parts[-4:] == (
-        "interconnect_pdk", "libs.tech", "klayout", "python")
+    assert hit[0].parts[-3:] == ("libs.tech", "klayout", "python")
+    assert hit[0].parts[-4] in h._PATH_VAR_MARKERS[
+        "INTERCONNECT_PDK_ROOT"][0]
     assert h._import_interconnect_manifest() is not None
 
 
@@ -239,7 +240,9 @@ def test_default_lyp_resolves_canonical(monkeypatch):
     canonical copy, not the bundled fallback."""
     monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
     got = h._find_default_lyp()
-    assert got.endswith("interposer/libs.tech/klayout/tech/intm4tm2.lyp")
+    assert got.endswith("libs.tech/klayout/tech/intm4tm2.lyp")
+    assert Path(got).parts[-5] in h._PATH_VAR_MARKERS[
+        "INTERPOSER_PDK_ROOT"][0]
     assert Path(got).is_file()
 
 

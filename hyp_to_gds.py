@@ -2055,8 +2055,8 @@ def _interconnect_python_candidates():
         candidates.append(Path(env).joinpath(*_INTERCONNECT_PY))
     here = Path(__file__).resolve()
     for base in here.parents:
-        candidates.append(
-            (base / "interconnect_pdk").joinpath(*_INTERCONNECT_PY))
+        for dirname in _PATH_VAR_MARKERS["INTERCONNECT_PDK_ROOT"][0]:
+            candidates.append((base / dirname).joinpath(*_INTERCONNECT_PY))
     return candidates
 
 
@@ -2209,9 +2209,10 @@ def _find_interposer_pdk_python():
             return cand
     here = Path(__file__).resolve()
     for base in here.parents:
-        cand = base / "interposer" / "libs.tech" / "klayout" / "python"
-        if (cand / "bump_mirror.py").is_file():
-            return cand
+        for dirname in _PATH_VAR_MARKERS["INTERPOSER_PDK_ROOT"][0]:
+            cand = base / dirname / "libs.tech" / "klayout" / "python"
+            if (cand / "bump_mirror.py").is_file():
+                return cand
     return None
 
 
