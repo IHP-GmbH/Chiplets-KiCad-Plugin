@@ -448,3 +448,131 @@ def test_single_method_export_unchanged_by_die_connections_param(
         layers = _cell_layers(str(out), "CUPILLARS_%s" % ref)
         assert {(500, 35), (501, 35)} <= layers
         assert not ({(510, 35), (511, 35)} & layers)
+
+
+# ---------------------------------------------------------------------------
+# Board outline -> prBoundary 189/0 (interposer extent = Edge.Cuts, not copper)
+# ---------------------------------------------------------------------------
+
+def _outline_dbbox(gds_path):
+    """DBox of prBoundary 189/0 in the top cell, or None when absent."""
+    from klayout import db
+    layout = db.Layout()
+    layout.read(gds_path)
+    idx = layout.find_layer(*h.GDSGenerator.PRBOUNDARY_LAYER)
+    if idx is None:
+        return None
+    bb = layout.top_cell().dbbox(idx)
+    return None if bb.empty() else bb
+
+
+def test_parser_reads_board_perimeter(tmp_path):
+    """The {BOARD section's PERIMETER_SEGMENTs land in perimeter_segments."""
+    hyp = tmp_path / "p.hyp"
+    hyp.write_text(MIXED_HYP)
+    p = h.HYPParser(str(hyp))
+    p.parse()
+    assert len(p.perimeter_segments) == 4
+    s0 = p.perimeter_segments[0]
+    assert (s0.x1, s0.y1, s0.x2, s0.y2) == (0.0, 0.0, 0.002, 0.0)
+
+
+def test_convert_draws_outline_on_prboundary(tmp_path, monkeypatch):
+    """The board outline (2000x1000 um in MIXED_HYP) is drawn as a closed
+    polygon on prBoundary 189/0 of the generated interposer GDS."""
+    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
+    hyp = tmp_path / "o.hyp"
+    hyp.write_text(MIXED_HYP)
+    out = tmp_path / "o_interposer.gds"
+    ok = h.convert_hyp_to_gds(
+        hyp_path=str(hyp), output_path=str(out),
+        lyp_path=h._find_default_lyp())
+    assert ok is True
+    bb = _outline_dbbox(str(out))
+    assert bb is not None
+    assert (bb.left, bb.bottom, bb.right, bb.top) == (0.0, -1000.0, 2000.0, 0.0)
+
+
+def test_open_outline_warns_and_draws_nothing(tmp_path, monkeypatch, capsys):
+    """A perimeter that does not close draws no prBoundary (all-or-nothing:
+    a partial outline would understate the extent) and warns loudly."""
+    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
+    open_hyp = MIXED_HYP.replace(
+        "  (PERIMETER_SEGMENT X1=0.000000 Y1=-0.001000 "
+        "X2=0.000000 Y2=0.000000)\n", "")
+    assert open_hyp != MIXED_HYP  # the fixture line must exist
+    hyp = tmp_path / "open.hyp"
+    hyp.write_text(open_hyp)
+    out = tmp_path / "open_interposer.gds"
+    ok = h.convert_hyp_to_gds(
+        hyp_path=str(hyp), output_path=str(out),
+        lyp_path=h._find_default_lyp())
+    assert ok is True
+    assert "does not close" in capsys.readouterr().err
+    assert _outline_dbbox(str(out)) is None
+
+
+def test_offboard_geometry_warns(tmp_path, monkeypatch, capsys):
+    """Copper sticking out of the board outline is reported loudly (the
+    interposer keeps the outline size; the leak is a design error)."""
+    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
+    leaky = MIXED_HYP.replace("X2=0.001900", "X2=0.002500")
+    assert leaky != MIXED_HYP
+    hyp = tmp_path / "leak.hyp"
+    hyp.write_text(leaky)
+    out = tmp_path / "leak_interposer.gds"
+    ok = h.convert_hyp_to_gds(
+        hyp_path=str(hyp), output_path=str(out),
+        lyp_path=h._find_default_lyp())
+    assert ok is True
+    err = capsys.readouterr().err
+    assert "outside the board outline" in err
+    assert "right" in err
+
+
+def test_update_chiplet_prefers_outline_dims_keeps_full_bbox_position(
+        tmp_path):
+    """Dimensions come from the outline (the fab extent); position stays the
+    full-bbox center (anchor: bbox_center mesh contract). Distinguishable
+    only when copper leaks outside the outline."""
+    import yaml
+    from klayout import db
+    gds = tmp_path / "i.gds"
+    ly = db.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("TOP")
+    top.shapes(ly.layer(134, 0)).insert(db.DBox(0.0, 0.0, 3000.0, 1000.0))
+    top.shapes(ly.layer(*h.GDSGenerator.PRBOUNDARY_LAYER)).insert(
+        db.DBox(0.0, 0.0, 2000.0, 1000.0))
+    ly.write(str(gds))
+    p = tmp_path / "d.chiplet"
+    p.write_text(MIXED_CHIPLET)
+    assert h.update_chiplet_file(str(p), str(gds)) is True  # bbox from file
+    data = yaml.safe_load(p.read_text())
+    ip = next(c for c in data["components"] if c["id"] == "interposer")
+    assert ip["dimensions"]["width"] == 2000.0   # outline, not copper
+    assert ip["dimensions"]["height"] == 1000.0
+    assert ip["position"]["x"] == 1500.0         # full-bbox center
+    assert ip["position"]["y"] == 500.0
+    assert ip["anchor"] == "bbox_center"
+
+
+def test_update_chiplet_falls_back_to_full_bbox_without_outline(tmp_path):
+    """A GDS without prBoundary keeps the legacy drawn-geometry sizing."""
+    import yaml
+    from klayout import db
+    gds = tmp_path / "i.gds"
+    ly = db.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("TOP")
+    top.shapes(ly.layer(134, 0)).insert(db.DBox(0.0, 0.0, 3000.0, 1000.0))
+    ly.write(str(gds))
+    p = tmp_path / "d.chiplet"
+    p.write_text(MIXED_CHIPLET)
+    assert h.update_chiplet_file(str(p), str(gds)) is True
+    data = yaml.safe_load(p.read_text())
+    ip = next(c for c in data["components"] if c["id"] == "interposer")
+    assert ip["dimensions"]["width"] == 3000.0
+    assert ip["dimensions"]["height"] == 1000.0
+    assert ip["position"]["x"] == 1500.0
+    assert ip["position"]["y"] == 500.0
