@@ -517,11 +517,13 @@ class GDSGenerator:
         self._boundary_viz_layer = boundary_viz_layer
         self._pcells_available = self._check_pcells_available()
 
-    def _check_pcells_available(self) -> bool:
-        """Check if PDK PCells are available (running with klayout -zz -r)."""
+    # Subpath from $PDK_ROOT to the KLayout tech of the SG13G2 base PDK
+    # (where the SG13_dev via_stack PCell library lives).
+    _SG13G2_KLAYOUT_SUBPATH = ("ihp-sg13g2", "libs.tech", "klayout")
+
+    def _try_create_test_pcell(self) -> bool:
+        """Probe the SG13_dev via_stack PCell on this generator's layout."""
         try:
-            # Try to create a via_stack PCell - this will only work if
-            # KLAYOUT_PATH is set to include the PDK
             test_cell = self.layout.create_cell("via_stack", "SG13_dev", {
                 "b_layer": "Metal4",
                 "t_layer": "Metal5",
@@ -534,6 +536,67 @@ class GDSGenerator:
                 return True
         except Exception:
             pass
+        return False
+
+    def _bootstrap_sg13g2_pcells(self) -> bool:
+        """Register the SG13G2 PCell library in this Python process.
+
+        Replicates what the PDK's tech/pymacros/autorun.lym does inside a
+        KLayout session, so the PCell path also works under plain python
+        (the standalone klayout module loads no technologies or PCell
+        libraries on its own): extend sys.path with the PDK python dirs
+        and import sg13g2_pycell_lib -- the import registers the Library
+        'SG13_dev'. That library is technology-bound, so additionally
+        register the 'sg13g2' db.Technology and bind this generator's
+        layout to it; without the binding the create_cell lookup returns
+        None even with the library registered.
+
+        PDK discovery follows the ecosystem convention: $PDK_ROOT env
+        first, then a sibling IHP-Open-PDK checkout (_discover_path_var).
+        Returns False quietly when the PDK is absent -- the rectangle
+        fallback is the designed degradation. A found-but-broken PDK
+        (e.g. missing tkinter/psutil deps) reports the cause on stderr.
+        """
+        pdk_root = _discover_path_var("PDK_ROOT")
+        if not pdk_root:
+            return False
+        pdk_klayout = Path(pdk_root).joinpath(*self._SG13G2_KLAYOUT_SUBPATH)
+        if not pdk_klayout.is_dir():
+            return False
+        python_dir = pdk_klayout / "python"
+        cni_dir = python_dir / "pycell4klayout-api" / "source" / "python"
+        for entry in (str(python_dir), str(cni_dir)):
+            if entry not in sys.path:
+                sys.path.insert(0, entry)
+        try:
+            if "sg13g2" not in db.Technology.technology_names():
+                tech = db.Technology.create_technology("sg13g2")
+                lyt = pdk_klayout / "tech" / "sg13g2.lyt"
+                if lyt.is_file():
+                    tech.load(str(lyt))
+            if "SG13_dev" not in db.Library.library_names():
+                import sg13g2_pycell_lib  # noqa: F401  (registers SG13_dev)
+            self.layout.technology_name = "sg13g2"
+            return True
+        except (Exception, SystemExit) as exc:
+            # SystemExit too: sg13g2_pycell_lib sys.exit(1)s when a PCell
+            # module fails to load (e.g. psutil missing); a broken PDK
+            # install must degrade to the fallback, not kill the export.
+            print(f"Note: SG13G2 PCell bootstrap failed ({exc}); "
+                  f"falling back to simple via rectangles", file=sys.stderr)
+            return False
+
+    def _check_pcells_available(self) -> bool:
+        """Check if PDK PCells are available, bootstrapping if needed.
+
+        Inside a KLayout session with the PDK on KLAYOUT_PATH the first
+        probe may already succeed; otherwise self-register the library
+        from $PDK_ROOT (or a sibling IHP-Open-PDK checkout) and retry.
+        """
+        if self._try_create_test_pcell():
+            return True
+        if self._bootstrap_sg13g2_pcells():
+            return self._try_create_test_pcell()
         return False
 
     def _get_or_create_via_group(self, sorted_layers: List[str]) -> db.Cell:
@@ -933,8 +996,25 @@ class GDSGenerator:
             print(f"Warning: Could not create via PCell: {e}")
             return None
 
+    # Via layer name -> PDK_VIA_PARAMS key. 'Vn' covers the standard
+    # vias (Via1..Via4); the two top vias have their own geometry class.
+    _VIA_PARAM_KEY = {
+        'Via4': 'Vn',
+        'TopVia1': 'TV1',
+        'TopVia2': 'TV2',
+    }
+
     def _create_simple_via(self, via: Via, padstack: Padstack) -> bool:
-        """Create a simple via using rectangles (fallback when PCells not available)."""
+        """Create a via stack from plain rectangles (PCell fallback).
+
+        Geometry honors PDK_VIA_PARAMS (interposer_tech_default.json, or
+        the sg13g2 defaults): each via level gets an n x n array of
+        PDK-sized cuts -- same array formula as the PCell path, see
+        _calculate_via_array -- instead of one oversized rectangle, and
+        every metal level of the span gets a landing pad enclosing its
+        adjacent arrays by the PDK enclosure (cuts without a landing pad
+        would be floating enclosure violations).
+        """
         # Filter padstack layers to only include valid metal layers
         valid_layers = [layer for layer in padstack.layers if layer in self.METAL_LAYERS]
 
@@ -954,49 +1034,71 @@ class GDSGenerator:
         x_um = self._to_um(via.x)
         y_um = self._to_um_y(via.y)
 
-        # Standard via size (from PDK: typically 0.45um for Via4, larger for TopVias)
-        via_sizes = {
-            'Via4': 0.45,
-            'TopVia1': 1.2,
-            'TopVia2': 2.0,
-        }
-
-        # Metal enclosure around via
-        metal_enc = 0.5  # um
+        # Same target the PCell path aims for: the padstack pad size.
+        target_size_um = max(
+            self._to_um(padstack.pad_width),
+            self._to_um(padstack.pad_height),
+        )
 
         # Get via layers needed using sorted layers
         t_layer = sorted_layers[0]   # Top layer
         b_layer = sorted_layers[-1]  # Bottom layer
         via_layer_names = self._get_via_layers_between(t_layer, b_layer)
 
-        # Create metal pads on all valid metal layers in the stack
-        for metal_layer in valid_layers:
-            try:
-                # Determine via size based on adjacent via
-                size = 2.0  # Default size in um
-                for vl in via_layer_names:
-                    if vl in via_sizes:
-                        size = max(size, via_sizes[vl] + 2 * metal_enc)
-
-                half_size = size / 2
-                layer_idx = self._get_gds_layer(metal_layer)
-                box = db.DBox(x_um - half_size, y_um - half_size,
-                              x_um + half_size, y_um + half_size)
-                self.routing_cell.shapes(layer_idx).insert(box)
-            except KeyError:
-                pass  # Skip if layer not found
-
-        # Create via rectangles
+        # n x n arrays of PDK-sized cuts per via level.
+        # arrays: via layer -> (array extent, metal enclosure) for pads.
+        arrays: Dict[str, Tuple[float, float]] = {}
         for via_layer in via_layer_names:
+            param_key = self._VIA_PARAM_KEY.get(via_layer, 'Vn')
+            params = self.PDK_VIA_PARAMS.get(param_key)
+            if not params:
+                continue
+            size = params['size']
+            sep = params['sep']
+            n = self._calculate_via_array(target_size_um, param_key)
+            extent = n * size + (n - 1) * sep
+            arrays[via_layer] = (extent, params['enc'])
             try:
-                size = via_sizes.get(via_layer, 0.45)
-                half_size = size / 2
                 layer_idx = self._get_gds_layer(via_layer)
-                box = db.DBox(x_um - half_size, y_um - half_size,
-                              x_um + half_size, y_um + half_size)
-                self.routing_cell.shapes(layer_idx).insert(box)
             except KeyError:
-                pass  # Skip if layer not found
+                continue  # Skip if layer not found
+            origin = -extent / 2.0 + size / 2.0
+            pitch = size + sep
+            for row in range(n):
+                cy = y_um + origin + row * pitch
+                for col in range(n):
+                    cx = x_um + origin + col * pitch
+                    box = db.DBox(cx - size / 2.0, cy - size / 2.0,
+                                  cx + size / 2.0, cy + size / 2.0)
+                    self.routing_cell.shapes(layer_idx).insert(box)
+
+        # Landing pads on every metal of the span (the PCell draws the
+        # intermediate metals too, even when the padstack omits them).
+        try:
+            t_idx = self.METAL_LAYERS.index(t_layer)
+            b_idx = self.METAL_LAYERS.index(b_layer)
+        except ValueError:
+            return False
+        span_metals = self.METAL_LAYERS[min(b_idx, t_idx):max(b_idx, t_idx) + 1]
+        for metal_layer in span_metals:
+            side = 0.0
+            for pair, via_name in self.VIA_LAYERS.items():
+                if metal_layer in pair and via_name in arrays:
+                    extent, enc = arrays[via_name]
+                    side = max(side, extent + 2.0 * enc)
+            if side <= 0.0:
+                # No adjacent via geometry (e.g. pair outside VIA_LAYERS):
+                # keep a pad at the padstack size so the landing exists.
+                side = target_size_um
+            if side <= 0.0:
+                continue
+            half = side / 2.0
+            try:
+                layer_idx = self._get_gds_layer(metal_layer)
+            except KeyError:
+                continue  # Skip if layer not found
+            box = db.DBox(x_um - half, y_um - half, x_um + half, y_um + half)
+            self.routing_cell.shapes(layer_idx).insert(box)
 
         return True
 
@@ -1964,6 +2066,9 @@ _PATH_VAR_MARKERS = {
     "ADK_ROOT": (("adk", "ADK"), ("klayout", "drc")),
     "INTERCONNECT_PDK_ROOT": (("interconnect_pdk",
                                "IHP-Interconnect-IntM4TM2"), ("manifest",)),
+    # Base SG13G2 PDK (via_stack PCell library). Standard IHP convention:
+    # $PDK_ROOT/ihp-sg13g2/...
+    "PDK_ROOT": (("IHP-Open-PDK",), ("ihp-sg13g2", "libs.tech", "klayout")),
 }
 
 _PATH_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -2351,7 +2456,9 @@ def convert_hyp_to_gds(
         print("PDK PCells available - using via_stack PCell for vias")
     else:
         print("PDK PCells not available - using simple rectangles for vias")
-        print("  (Run with 'klayout -zz -r' and KLAYOUT_PATH set for PCell support)")
+        print("  (Set PDK_ROOT to an IHP-Open-PDK checkout for SG13G2 "
+              "via_stack PCells; the fallback honors "
+              "interposer_tech_default.json via parameters)")
 
     # Process segments and arcs as connected paths (smooth corners)
     num_paths = generator.add_segments_as_paths(parser.segments, parser.arcs)
