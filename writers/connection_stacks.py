@@ -36,7 +36,10 @@ def _manifest_reader():
         candidates.append(Path(env).joinpath(*py_subdir))
     here = Path(__file__).resolve()
     for base in here.parents:
-        candidates.append((base / "interconnect_pdk").joinpath(*py_subdir))
+        # Canonical directory name first, then the GitHub repo name a
+        # default clone produces (same alias order as hyp_to_gds).
+        for dirname in ("interconnect_pdk", "IHP-Interconnect-IntM4TM2"):
+            candidates.append((base / dirname).joinpath(*py_subdir))
 
     for cand in candidates:
         if (cand / "interconnect_manifest.py").is_file():
@@ -89,3 +92,47 @@ def emit_interconnect_block(adapter):
     if not adapter:
         return ""
     return 'interconnect:\n  adapter: "%s"\n\n' % adapter
+
+
+def validate_interconnect_ids(adapter=None, die_methods=None):
+    """Fail loudly on interconnect ids the manifest does not know.
+
+    Called at export time so a typo in the INTERCONNECT_ADAPTER text variable
+    or in a per-die CONNECTION field surfaces in the export run instead of
+    later in studio or the assembly DRC. When the interconnect PDK is not
+    discoverable the check degrades to a single stderr warning: the .chiplet
+    is machine-local and both downstream consumers re-validate loudly.
+
+    Raises:
+        ValueError naming the offending id(s) and the valid set.
+    """
+    wanted_adapter = adapter or None
+    wanted_methods = sorted({m for m in (die_methods or []) if m})
+    if not wanted_adapter and not wanted_methods:
+        return
+
+    try:
+        im = _manifest_reader()
+        methods = list(im.list_methods())
+        adapters = sorted({im.adapter_for(m) for m in methods} - {None, ""})
+    except Exception as exc:
+        sys.stderr.write(
+            "Warning: interconnect manifest not discoverable (%s); skipping "
+            "adapter/method validation -- studio and the assembly DRC "
+            "validate downstream.\n" % exc
+        )
+        return
+
+    if wanted_adapter and wanted_adapter not in adapters:
+        raise ValueError(
+            "unknown interconnect adapter '%s' (INTERCONNECT_ADAPTER text "
+            "variable); the interconnect PDK manifest knows: %s"
+            % (wanted_adapter, ", ".join(adapters))
+        )
+    unknown = [m for m in wanted_methods if m not in methods]
+    if unknown:
+        raise ValueError(
+            "unknown interconnect method(s) %s (per-die CONNECTION fields); "
+            "the interconnect PDK manifest knows: %s"
+            % (", ".join("'%s'" % m for m in unknown), ", ".join(methods))
+        )

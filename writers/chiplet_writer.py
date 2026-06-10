@@ -19,6 +19,7 @@ import pcbnew
 from .connection_stacks import (
     emit_connection_stacks_block,
     emit_interconnect_block,
+    validate_interconnect_ids,
 )
 
 
@@ -295,6 +296,13 @@ def write_chiplet(board, output_path):
             "Set it in Board Setup > Text Variables.\n"
         )
 
+    # Interconnect adapter (optional second axis), read from text var
+    # INTERCONNECT_ADAPTER. Validated against the interconnect PDK manifest
+    # before any output is written, so a typo fails the export here instead
+    # of surfacing later in studio or the assembly DRC.
+    interconnect_adapter = _lookup_property(board, "INTERCONNECT_ADAPTER")
+    validate_interconnect_ids(adapter=interconnect_adapter)
+
     component_techs = {}
     components = []
     io_pads = []
@@ -359,9 +367,8 @@ def write_chiplet(board, output_path):
         f.write('  adapter: "%s"\n' % interposer_adapter)
         f.write("\n")
 
-        # Interconnect adapter (optional second axis). Read from text var
-        # INTERCONNECT_ADAPTER; emitted only when set, mirroring interposer.
-        interconnect_adapter = _lookup_property(board, "INTERCONNECT_ADAPTER")
+        # Interconnect adapter (optional second axis); emitted only when
+        # set, mirroring interposer. Validated during data gathering.
         f.write(emit_interconnect_block(interconnect_adapter))
 
         # Technologies

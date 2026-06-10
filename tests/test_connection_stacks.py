@@ -1,23 +1,45 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """
-Host-side byte-exact test for writers/connection_stacks.py.
+Host-side tests for writers/connection_stacks.py (no pcbnew).
 
-The manifest-driven connection_stacks block must reproduce, byte for byte, the
-literal the writer used to hardcode (and that export_chiplet.cpp still emits).
-This guards the byte-exact writer-parity gate (47.7b) without needing pcbnew.
+Byte-exact: the manifest-driven connection_stacks block must reproduce the
+literal the writer used to hardcode (and that export_chiplet.cpp still
+emits) -- guards the byte-exact writer-parity gate (47.7b).
+
+Validation: interconnect ids (INTERCONNECT_ADAPTER text var, per-die
+CONNECTION fields) are checked against the manifest at export time.
 """
 
 import sys
 from pathlib import Path
+
+import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT.parent))
 
 from chiplet_kicad_plugin.writers.connection_stacks import (  # noqa: E402
+    _manifest_reader,
     emit_connection_stacks_block,
     emit_interconnect_block,
+    validate_interconnect_ids,
 )
+
+import chiplet_kicad_plugin.writers.connection_stacks as connection_stacks  # noqa: E402
+
+# Manifest-dependent tests need the interconnect PDK (env var or sibling
+# checkout). On a lone checkout (e.g. a bare CI runner) they skip; the
+# missing-manifest behavior itself is tested via monkeypatch below.
+try:
+    _manifest_reader()
+    _HAVE_MANIFEST = True
+except ImportError:
+    _HAVE_MANIFEST = False
+
+needs_manifest = pytest.mark.skipif(
+    not _HAVE_MANIFEST,
+    reason="interconnect_pdk manifest not discoverable on this checkout")
 
 
 # Transcribed verbatim from the pre-split literal (chiplet_writer.py:274-293
@@ -47,10 +69,12 @@ EXPECTED_BLOCK = (
 )
 
 
+@needs_manifest
 def test_connection_stacks_block_byte_exact():
     assert emit_connection_stacks_block() == EXPECTED_BLOCK
 
 
+@needs_manifest
 def test_vendorx_excluded_from_default_library():
     """The non-IHP demo method must not leak into the default emitted block."""
     block = emit_connection_stacks_block()
@@ -67,3 +91,49 @@ def test_interconnect_block_mirrors_interposer():
     assert emit_interconnect_block("ihp_cupillar") == (
         'interconnect:\n  adapter: "ihp_cupillar"\n\n'
     )
+
+
+# ---------------------------------------------------------------------------
+# Interconnect-id validation at export time
+# ---------------------------------------------------------------------------
+
+def test_validate_noop_when_nothing_requested():
+    """No adapter, no methods: never touches the manifest, never raises."""
+    validate_interconnect_ids()
+    validate_interconnect_ids(adapter="", die_methods=[])
+
+
+@needs_manifest
+def test_validate_known_ids_pass():
+    validate_interconnect_ids(adapter="vendorx_microbump",
+                              die_methods=["cupillar_opt2"])
+
+
+@needs_manifest
+def test_validate_unknown_adapter_fails_listing_valid():
+    with pytest.raises(ValueError) as exc:
+        validate_interconnect_ids(adapter="ihp_cupillar_typo")
+    msg = str(exc.value)
+    assert "ihp_cupillar_typo" in msg
+    assert "ihp_cupillar" in msg  # the valid set is listed
+
+
+@needs_manifest
+def test_validate_unknown_method_fails_listing_valid():
+    with pytest.raises(ValueError) as exc:
+        validate_interconnect_ids(die_methods=["cupillar_opt9"])
+    msg = str(exc.value)
+    assert "cupillar_opt9" in msg
+    assert "cupillar_opt1" in msg  # the valid set is listed
+
+
+def test_validate_warns_without_manifest(monkeypatch, capsys):
+    """Undiscoverable manifest degrades to one warning (machine-local
+    .chiplet; studio and the assembly DRC re-validate downstream)."""
+    def _raise():
+        raise ImportError("interconnect_pdk reader not found")
+
+    monkeypatch.setattr(connection_stacks, "_manifest_reader", _raise)
+    connection_stacks.validate_interconnect_ids(adapter="anything")
+    err = capsys.readouterr().err
+    assert "skipping adapter/method validation" in err
