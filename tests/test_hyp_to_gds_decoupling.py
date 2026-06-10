@@ -18,6 +18,20 @@ if str(PLUGIN_ROOT) not in sys.path:
 
 import hyp_to_gds as h  # noqa: E402
 
+# This module asserts real sibling-PDK content: interconnect manifest methods,
+# interposer canonical lyp paths, gds_to_kicad walk targets. On a lone
+# checkout (e.g. a bare CI runner) none of those roots resolve -- skip the
+# module instead of failing on missing ecosystem checkouts.
+_MISSING_ROOTS = [
+    var for var in ("INTERCONNECT_PDK_ROOT", "INTERPOSER_PDK_ROOT",
+                    "GDS_TO_KICAD_ROOT")
+    if h._discover_path_var(var) is None
+]
+pytestmark = pytest.mark.skipif(
+    bool(_MISSING_ROOTS),
+    reason="needs sibling ecosystem checkouts; unresolved: %s"
+           % ", ".join(_MISSING_ROOTS))
+
 
 def test_default_connection_stacks_byte_equal_to_literal():
     stacks = h.get_default_connection_stacks()
