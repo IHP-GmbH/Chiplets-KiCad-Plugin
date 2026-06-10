@@ -1580,6 +1580,8 @@ class GDSGenerator:
         """
         out = Path(output_path)
         manifest_path = out.with_name(out.stem + ".boundaries.json")
+        # Schema + version policy: adk/docs/boundary_manifest.md (the adk
+        # readers exact-match the version; bump producers and readers together).
         manifest = {
             "schema": "adk-boundary-manifest",
             "version": "1.0.0",
