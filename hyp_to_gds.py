@@ -421,6 +421,13 @@ class HYPParser:
             self.devices.append(device)
 
 
+# Fraction of trace elements on unmapped layers above which the conversion
+# fails instead of writing a near-empty GDS (board copper named with KiCad
+# defaults instead of the PDK metals is the classic cause). Below the
+# threshold stray layers are tolerated with an aggregate warning.
+UNMAPPED_FAIL_FRACTION = 0.5
+
+
 class GDSGenerator:
     """Generates GDS file from parsed HYP data using KLayout API."""
 
@@ -515,6 +522,11 @@ class GDSGenerator:
         # boundary_viz_layer; the contract lives in the manifest, not the GDS.
         self._annotate_boundaries = bool(annotate_boundaries)
         self._boundary_viz_layer = boundary_viz_layer
+        # Unmapped-layer accounting for the loud guard in convert_hyp_to_gds:
+        # trace elements whose board layer the LYP does not map, per layer,
+        # plus the count that did land on mapped layers.
+        self._unmapped_layers: Dict[str, int] = {}
+        self._mapped_trace_elements = 0
         self._pcells_available = self._check_pcells_available()
 
     # Subpath from $PDK_ROOT to the KLayout tech of the SG13G2 base PDK
@@ -821,6 +833,19 @@ class GDSGenerator:
 
         total_paths = 0
         for (layer, width), elements in groups.items():
+            # Probe the layer once per group. Elements on layers the LYP
+            # does not map are counted and skipped so the caller can fail
+            # loudly when the board copper names do not match the PDK
+            # metals (see the guard in convert_hyp_to_gds).
+            try:
+                self.layer_map.get_layer(layer)
+            except KeyError as e:
+                self._unmapped_layers[layer] = (
+                    self._unmapped_layers.get(layer, 0) + len(elements))
+                print(f"Warning: {e} - skipping {len(elements)} trace "
+                      f"element(s)")
+                continue
+            self._mapped_trace_elements += len(elements)
             width_um = self._to_um(width)
             paths = self._connect_traces_to_paths(elements)
 
@@ -2140,6 +2165,24 @@ def _find_default_lyp() -> str:
     return str(Path(__file__).parent / "intm4tm2.lyp")
 
 
+def _find_interposer_template() -> str:
+    """Best-effort path to the interposer KiCad template board.
+
+    Discovery mirrors _find_default_lyp: resolve INTERPOSER_PDK_ROOT
+    (environment -> sibling walk), then
+    ``libs.tech/kicad/interposer_template.kicad_pcb`` under it. Returns the
+    unexpanded ``${INTERPOSER_PDK_ROOT}`` form when no checkout resolves,
+    so error text still points somewhere actionable.
+    """
+    sub = ("libs.tech", "kicad", "interposer_template.kicad_pcb")
+    root = _discover_path_var("INTERPOSER_PDK_ROOT")
+    if root:
+        cand = Path(root).joinpath(*sub)
+        if cand.is_file():
+            return str(cand)
+    return "${INTERPOSER_PDK_ROOT}/" + "/".join(sub)
+
+
 def _read_gds_top_cell(gds_path: str) -> Optional[str]:
     """Read the top cell name from a GDS file.
 
@@ -2463,6 +2506,37 @@ def convert_hyp_to_gds(
     # Process segments and arcs as connected paths (smooth corners)
     num_paths = generator.add_segments_as_paths(parser.segments, parser.arcs)
     print(f"Created {num_paths} continuous paths from {len(parser.segments)} segments and {len(parser.arcs)} arcs")
+
+    # Loud guard: a board whose copper layers are not named after the PDK
+    # metals loses (nearly) all routing to unmapped layers. Refuse to write
+    # a GDS that would look fabricable while missing its traces.
+    skipped_elems = sum(generator._unmapped_layers.values())
+    if skipped_elems:
+        total_elems = generator._mapped_trace_elements + skipped_elems
+        skip_list = ", ".join(
+            "%s (%d)" % (name, count)
+            for name, count in sorted(generator._unmapped_layers.items()))
+        pdk_names = ", ".join(
+            sorted(k for k in layer_map.layers if ":" not in k))
+        if skipped_elems / float(total_elems) > UNMAPPED_FAIL_FRACTION:
+            print(
+                "\nERROR: %d of %d trace element(s) sit on board layers the "
+                "PDK does not map; the output GDS would be missing its "
+                "routing.\n"
+                "  Unmapped board layers: %s\n"
+                "  PDK drawing layers:    %s\n"
+                "  The interposer flow requires the board copper layers to "
+                "be NAMED after the PDK metals\n"
+                "  (KiCad: Board Setup > Physical Stackup, e.g. "
+                "F.Cu -> TopMetal2, In1.Cu -> TopMetal1, In2.Cu -> Metal5, "
+                "B.Cu -> Metal4),\n"
+                "  or start from the interposer template: %s"
+                % (skipped_elems, total_elems, skip_list, pdk_names,
+                   _find_interposer_template()),
+                file=sys.stderr)
+            return False
+        print("Warning: skipped %d of %d trace element(s) on unmapped "
+              "layer(s): %s" % (skipped_elems, total_elems, skip_list))
 
     # Process vias
     via_success = 0
