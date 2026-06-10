@@ -31,6 +31,16 @@ from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
     _read_component_connections,
 )
 
+# Sibling-dependent tests: the walk and the manifest listing assert against
+# real ecosystem checkouts on disk. On a lone checkout (e.g. a bare CI
+# runner) they skip; everything else here is tmp_path/monkeypatch based.
+needs_interconnect = pytest.mark.skipif(
+    not discover_dependency_root("INTERCONNECT_PDK_ROOT"),
+    reason="interconnect PDK not discoverable (env var or sibling checkout)")
+needs_all_siblings = pytest.mark.skipif(
+    not all(discover_dependency_root(v) for v in DEPENDENCY_ROOT_MARKERS),
+    reason="needs every ecosystem sibling checkout on disk")
+
 
 HYP_SCRIPT = "/plugin/hyp_to_gds.py"
 HYP_INPUT = "/tmp/board.hyp"
@@ -383,6 +393,7 @@ def test_build_adk_drc_argv_adds_interconnect_when_set():
     assert args[args.index("--interconnect-adapter") + 1] == "ihp_cupillar"
 
 
+@needs_interconnect
 def test_available_connection_types_from_manifest():
     types = available_connection_types()
     assert types[0] == ""  # always first: empty = no --connection-type flag
@@ -522,6 +533,7 @@ def _fake_pdk_tree(base, var_name, name_index=0):
     return root
 
 
+@needs_all_siblings
 def test_discover_dependency_root_walk_finds_real_siblings(monkeypatch):
     """With no env vars set, the sibling walk resolves every root of this
     workspace; each resolved path ends in one of the accepted dir names
@@ -534,6 +546,7 @@ def test_discover_dependency_root_walk_finds_real_siblings(monkeypatch):
         assert Path(root).joinpath(*marker).exists()
 
 
+@needs_interconnect
 def test_discover_dependency_root_env_wins_and_bogus_falls_through(
         tmp_path, monkeypatch):
     fake = _fake_pdk_tree(tmp_path, "INTERCONNECT_PDK_ROOT")
