@@ -27,6 +27,7 @@ from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
     build_adk_drc_argv, build_cli_args, build_worker_env,
     load_interposer_adapter, load_interconnect_adapter,
     available_connection_types, discover_dependency_root,
+    discover_interposer_lyp,
     derive_interconnect_methods, write_ixn_methods_sidecar,
     _read_component_connections,
 )
@@ -574,6 +575,72 @@ def test_discover_dependency_root_walk_accepts_repo_names(tmp_path,
     found = discover_dependency_root("INTERPOSER_PDK_ROOT",
                                      start=str(start))
     assert found == str(fake)
+
+
+# ---------------------------------------------------------------------------
+# Interposer LYP default (pre-fills the dialog's LYP picker)
+# ---------------------------------------------------------------------------
+
+class _FakeProject:
+    def __init__(self, text_vars):
+        self._vars = text_vars
+
+    def GetTextVars(self):
+        return self._vars
+
+
+class _FakeBoard:
+    def __init__(self, text_vars):
+        self._project = _FakeProject(text_vars)
+
+    def GetProject(self):
+        return self._project
+
+
+def test_discover_interposer_lyp_env_wins(tmp_path, monkeypatch):
+    lyp = tmp_path / "custom.lyp"
+    lyp.write_text("<layer-properties/>")
+    monkeypatch.setenv("INTERPOSER_LYP", str(lyp))
+    assert discover_interposer_lyp() == str(lyp)
+
+
+def test_discover_interposer_lyp_textvar_after_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("INTERPOSER_LYP", raising=False)
+    lyp = tmp_path / "board.lyp"
+    lyp.write_text("<layer-properties/>")
+    board = _FakeBoard({"INTERPOSER_LYP": str(lyp)})
+    assert discover_interposer_lyp(board=board) == str(lyp)
+
+
+def test_discover_interposer_lyp_unresolved_textvar_falls_to_pdk(
+        tmp_path, monkeypatch):
+    """A ${VAR}-form text variable is not a file on disk; the canonical
+    copy under the discovered PDK root wins instead."""
+    monkeypatch.delenv("INTERPOSER_LYP", raising=False)
+    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
+    pdk = _fake_pdk_tree(tmp_path / "ws", "INTERPOSER_PDK_ROOT")
+    tech = pdk / "libs.tech" / "klayout" / "tech"
+    tech.mkdir(parents=True, exist_ok=True)
+    canonical = tech / "intm4tm2.lyp"
+    canonical.write_text("<layer-properties/>")
+    start = tmp_path / "ws" / "plugin" / "pipeline" / "orchestrator.py"
+    start.parent.mkdir(parents=True)
+    board = _FakeBoard({
+        "INTERPOSER_LYP":
+            "${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp"})
+    found = discover_interposer_lyp(board=board, start=str(start))
+    assert found == str(canonical)
+
+
+def test_discover_interposer_lyp_bundled_fallback(tmp_path, monkeypatch):
+    """No env, no text var, no PDK checkout above the start: the copy
+    bundled with the plugin keeps the picker truthful."""
+    monkeypatch.delenv("INTERPOSER_LYP", raising=False)
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(tmp_path / "nope"))
+    start = tmp_path / "isolated" / "plugin" / "pipeline" / "orchestrator.py"
+    start.parent.mkdir(parents=True)
+    found = discover_interposer_lyp(start=str(start))
+    assert found == str(PLUGIN_ROOT / "intm4tm2.lyp")
 
 
 def test_available_connection_types_explicit_root(tmp_path):

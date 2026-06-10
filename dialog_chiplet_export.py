@@ -18,7 +18,7 @@ import wx
 
 from .pipeline.orchestrator import (
     ExportOptions, ExportResult, run_export, available_connection_types,
-    describe_assembly_drc, discover_dependency_root,
+    describe_assembly_drc, discover_dependency_root, discover_interposer_lyp,
 )
 
 
@@ -260,11 +260,16 @@ class ChipletExportDialog(wx.Dialog):
             panel,
             wildcard="Layer properties (*.lyp)|*.lyp|All files|*",
         )
+        default_lyp = discover_interposer_lyp(board=self._board)
+        if default_lyp:
+            self._lyp_ctrl.SetPath(default_lyp)
         self._lyp_ctrl.SetToolTip(
-            "Layer-properties (.lyp) of the interposer technology. Leave "
-            "blank to use the built-in IHP interposer LYP. Select one only "
-            "when the interposer uses a different technology / KiCad "
-            "project template.")
+            "Layer-properties (.lyp) of the INTERPOSER technology, "
+            "pre-filled with the discovered default. Do not point it at "
+            "the interconnect .lyp (bump layers only) -- that one is "
+            "consumed automatically via the .chiplet. Replace it only "
+            "when the interposer uses a different technology; blank "
+            "falls back to the built-in IHP interposer LYP.")
         grid.Add(self._lyp_ctrl, 1, wx.EXPAND)
 
         opts_box.Add(grid, 0, wx.EXPAND | wx.ALL, 4)

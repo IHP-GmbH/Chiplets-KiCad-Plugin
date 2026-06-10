@@ -87,6 +87,42 @@ def discover_dependency_root(var_name: str, board=None,
     return ""
 
 
+def discover_interposer_lyp(board=None, start: Optional[str] = None) -> str:
+    """Default interposer layer-properties file for the dialog's LYP field.
+
+    Chain (first existing file wins): INTERPOSER_LYP environment variable
+    -> INTERPOSER_LYP project text variable -> canonical
+    ``libs.tech/klayout/tech/intm4tm2.lyp`` under the discovered interposer
+    PDK root -> the copy bundled with the plugin. Mirrors the worker's own
+    default (hyp_to_gds._find_default_lyp) so the picker shows the file the
+    run will actually use instead of an empty field that invites pasting
+    the wrong .lyp (e.g. the interconnect one).
+    """
+    from .discovery import _lookup_text_var
+
+    def _existing(path) -> str:
+        try:
+            if path and Path(path).is_file():
+                return str(Path(path).absolute())
+        except OSError:
+            pass
+        return ""
+
+    found = _existing(os.environ.get("INTERPOSER_LYP", ""))
+    if found:
+        return found
+    found = _existing(_lookup_text_var(board, "INTERPOSER_LYP") or "")
+    if found:
+        return found
+    root = discover_dependency_root("INTERPOSER_PDK_ROOT", board, start)
+    if root:
+        found = _existing(Path(root).joinpath(
+            "libs.tech", "klayout", "tech", "intm4tm2.lyp"))
+        if found:
+            return found
+    return _existing(Path(__file__).resolve().parents[1] / "intm4tm2.lyp")
+
+
 @dataclass
 class ExportOptions:
     """User-visible options collected by the dialog."""
