@@ -570,6 +570,7 @@ def run_export(board, options, plugin_dir,
         write_chiplet, write_io_pads_json, write_die_pin_lists,
         read_die_connections,
     )
+    from ..writers.connection_stacks import validate_interconnect_ids
     from ..writers.hyperlynx_writer import write_hyperlynx
 
     def _log(line):
@@ -691,6 +692,10 @@ def run_export(board, options, plugin_dir,
                 _log("Per-die connections from board fields: %s"
                      % ", ".join("%s=%s" % (r, m) for r, m
                                  in sorted(effective_die_conns.items())))
+
+        # Unknown per-die method ids fail the export here (manifest is the
+        # source of truth) instead of degrading later in the worker or DRC.
+        validate_interconnect_ids(die_methods=effective_die_conns.values())
 
         effective_options = dataclasses.replace(
             options, io_pads_json=effective_io_pads,

@@ -119,5 +119,8 @@ def test_annotation_does_not_alter_manifest(tmp_path):
     manifest = json.loads(out.with_name("annot.boundaries.json").read_text())
     assert len(manifest["boundaries"]) == 2
     assert manifest["schema"] == "adk-boundary-manifest"
+    # Version pin: the adk readers validate this exact string (see
+    # adk/docs/boundary_manifest.md); bump both sides together.
+    assert manifest["version"] == "1.0.0"
     # The annotation layer must not leak into the contract metadata.
     assert "1000/0" not in json.dumps(manifest)

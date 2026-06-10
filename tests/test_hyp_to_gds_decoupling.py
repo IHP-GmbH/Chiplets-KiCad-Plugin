@@ -10,6 +10,8 @@ literals exactly, while the vendor demo method becomes selectable.
 import sys
 from pathlib import Path
 
+import pytest
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
@@ -163,6 +165,10 @@ def test_interposer_pdk_env_override_wins(tmp_path, monkeypatch):
     assert found is not None and found != fake  # walk found the real one
 
 
+@pytest.mark.skipif(
+    not any((c / "interconnect_manifest.py").is_file()
+            for c in h._interconnect_python_candidates()),
+    reason="interconnect_pdk checkout not discoverable (lone checkout)")
 def test_interconnect_pdk_resolves_live_not_fallback(monkeypatch):
     """The interconnect PDK probes resolve the real sibling checkout under
     its IHP layout (libs.tech/klayout/python). Guards against a silent
