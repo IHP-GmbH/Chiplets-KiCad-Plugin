@@ -2801,6 +2801,35 @@ def convert_hyp_to_gds(
         print(f"\nAdding I/O pads from {io_pads_json}...")
         placed_io_pads = generator.add_io_pads(io_pads_json)
         print(f"Total I/O pads placed: {len(placed_io_pads)}")
+    else:
+        # Loud guard: standalone components -- PIN refs whose designator is
+        # not one of the chiplet devices -- are external I/O pads (wire-bond,
+        # etc.). The .hyp carries them as position-only anchors with no
+        # geometry; their shapes reach the GDS only through the --io-pads
+        # sidecar. Run by hand without it, those pads vanish silently -- the
+        # classic "my J pads are missing from the GDS" report. The KiCad
+        # plugin export extracts and passes the sidecar automatically; a
+        # direct CLI run does not, so say so instead of writing a pad-less GDS.
+        device_refs = {dev.ref for dev in parser.devices}
+        standalone = sorted({pin.ref.split('.', 1)[0] for pin in parser.pins
+                             if pin.ref.split('.', 1)[0] not in device_refs})
+        if standalone:
+            shown = ", ".join(standalone[:12])
+            if len(standalone) > 12:
+                shown += ", ... (%d total)" % len(standalone)
+            print(
+                "\nWarning: %d standalone component(s) with pins but no chiplet "
+                "GDS were found and --io-pads was not given; their pads will "
+                "NOT be drawn in the GDS.\n"
+                "  Components: %s\n"
+                "  These look like external I/O pads (e.g. wire-bond). In the "
+                ".hyp they are position-only PINs -- the pad geometry comes "
+                "from the io_pads sidecar, not from the PINs.\n"
+                "  To render them, extract the pads from the board and pass "
+                "the sidecar (the KiCad plugin export does this for you):\n"
+                "    python kicad_pcb_to_iopads.py <board>.kicad_pcb -o io_pads.json\n"
+                "    python hyp_to_gds.py ... --io-pads io_pads.json"
+                % (len(standalone), shown), file=sys.stderr)
 
     # Write interposer GDS (routing + cu-pillars, without chiplet dies)
     generator.write(output_path)
