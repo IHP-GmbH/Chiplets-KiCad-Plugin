@@ -1,30 +1,32 @@
 # Chiplet KiCad Plugin
 
-KiCad pcbnew action plugin for chiplet-aware EDA flows. Drives the
-HYP → GDS → canonical `.chiplet` pipeline in one click.
+A pcbnew action plugin for chiplet-aware EDA flows. It drives the
+HYP -> GDS -> canonical `.chiplet` pipeline in one click, replacing a
+manual two-step workflow:
 
-Replaces the manual two-step workflow:
+1. `File > Export > Chiplet...` to get an intermediate `.chiplet`.
+2. `python3 hyp_to_gds.py board.hyp --update-chiplet-file board.chiplet`
+   to render the interposer GDS and finalize the file.
 
-1. `File > Export > Chiplet...` (intermediate `.chiplet`)
-2. `python3 hyp_to_gds.py --hyp board.hyp --update-chiplet-file board.chiplet`
-
-with a single dialog under `Tools > External Plugins > Chiplet Export`.
+Both steps now live behind a single dialog under
+`Tools > External Plugins > Chiplet Export`. The plugin is consumed by
+adk-tools as a submodule.
 
 ## Status
 
-The plugin is the sole entry point for chiplet export. The legacy
-C++ menu actions (`File > Export > Chiplet...` and
-`File > Export > Hyperlynx...`) have been removed from the kicad fork.
+The plugin is the sole entry point for chiplet export. The legacy C++
+menu actions (`File > Export > Chiplet...` and
+`File > Export > Hyperlynx...`) have been removed from the KiCad fork.
 The headless C++ functions (`ExportBoardToChipletFile`,
-`ExportBoardToHyperlynxFile`) remain available via SWIG for the
+`ExportBoardToHyperlynxFile`) remain available via SWIG and back the
 plugin's byte-exact regression tests.
 
 Verification coverage:
 
 - Byte-exact writer parity against the C++ exporters
   (`tests/test_byte_exact_writers.py`).
-- Round-trip regression vs the wire-bond demo .chiplet
-  (`tests/regenerate_wirebond_demo.py` + chiplet-studio
+- Round-trip regression vs the wire-bond demo `.chiplet`
+  (`tests/regenerate_wirebond_demo.py` plus chiplet-studio
   `CoordFrameContract*` gtests).
 - Live pcbnew smoke (interf_u demo) and chiplet-studio visual smoke.
 
@@ -42,8 +44,8 @@ GPL-2.0-or-later. See `LICENSE`. The Hyperlynx writer
 
 ### 1. Make the plugin discoverable by pcbnew
 
-Symlink (recommended for development) or copy this directory into
-the KiCad scripting plugins folder. Linux + KiCad 9.0:
+Symlink (recommended for development) or copy this directory into the
+KiCad scripting plugins folder. Linux plus KiCad 9.0:
 
 ```bash
 ln -s /path/to/chiplet_kicad_plugin \
@@ -52,8 +54,8 @@ ln -s /path/to/chiplet_kicad_plugin \
 
 ### 2. Set up the worker venv
 
-`hyp_to_gds.py` requires `klayout` and `PyYAML`, neither of which is
-part of the Python bundled with KiCad. Use a separate venv:
+`hyp_to_gds.py` needs `klayout>=0.28` and `PyYAML>=6.0`, neither of which
+ships with KiCad's bundled Python. Install them into a separate venv:
 
 ```bash
 python3 -m venv /path/to/chiplet_kicad_plugin/.venv
@@ -62,8 +64,8 @@ python3 -m venv /path/to/chiplet_kicad_plugin/.venv
 ```
 
 The plugin auto-detects `.venv/bin/python3` next to itself. To use a
-different interpreter, set `KICAD_CHIPLET_PYTHON` to its absolute
-path before launching KiCad.
+different interpreter, set `KICAD_CHIPLET_PYTHON` to its absolute path
+before launching KiCad, or define it as a project text variable.
 
 ### 3. Restart pcbnew
 
@@ -73,47 +75,92 @@ The action appears as `Tools > External Plugins > Chiplet Export`.
 
 1. Open the chiplet design in pcbnew.
 2. `Tools > External Plugins > Chiplet Export`.
-3. In the dialog:
-   - **Output directory**: where the canonical artifacts land
-     (defaults to the directory holding the loaded `.kicad_pcb`).
-   - **Outputs**: tick what you want produced.
-     - *Canonical .chiplet* (default ON): GDS-bbox-corner-anchored
-       assembly file consumed by chiplet-studio.
-     - *Interposer GDS* (default ON): the interposer-only layout.
-     - *Complete assembly GDS* (default OFF): interposer plus all
-       chiplet instances flattened into a single GDS.
-     - *Keep intermediate .hyp* (default OFF): copy the metric
-       Hyperlynx file used to drive the pipeline.
-   - **PDK roots**: the interposer PDK, interconnect PDK and ADK
-     checkouts the pipeline will use. Pre-filled by the discovery
-     chain (environment variable, project text variable, sibling
-     checkout) so the provenance of every dependency is visible;
-     edit a path to export against a different checkout -- e.g. a
-     vendor's interconnect PDK or a pinned release. Changing the
-     interconnect PDK re-reads the connection-stack list from that
-     PDK's manifest. Overrides reach the worker as the matching
-     environment variables (`INTERPOSER_PDK_ROOT`,
-     `INTERCONNECT_PDK_ROOT`, `ADK_ROOT`).
-   - **Pipeline options**:
-     - *Top cell* (default `TOP`): the top-level cell name written
-       into the interposer GDS.
-     - *Connection stack* (optional): the methods declared by the
-       selected interconnect PDK's manifest (e.g. `cupillar_opt1/2/3`,
-       `sbump_sac305`, vendor methods). Empty means the writer keeps
-       the dies' existing connection field untouched.
-     - *LYP override* (optional): use a custom KLayout layer
-       properties file instead of the built-in `intm4tm2.lyp`.
-     - *I/O pads JSON* (optional): sidecar JSON from
-       `kicad_pcb_to_iopads.py`; pads are rendered in the
-       interposer GDS and injected under the interposer component.
-     - *Cu-pillar GDS* (optional): pre-generated cu-pillar layout
-       (typically produced by `bump_mirror.py`) merged into the
-       interposer GDS so the chiplet-studio Detailed render shows
-       the pillar caps under each flip-chip die.
-   - **Worker Python override** (optional): bypass the discovery
-     chain by pointing at a specific interpreter.
-4. **Run**. Log lines stream into the dialog. **Cancel** terminates
-   the worker subprocess.
+3. Fill in the dialog (sections below), then click **Run**. Log lines
+   stream into the dialog as the worker runs; **Cancel** terminates the
+   worker subprocess.
+
+### Output directory
+
+Where the canonical artifacts land. Defaults to the directory holding
+the loaded `.kicad_pcb`.
+
+### Outputs
+
+Tick what you want produced:
+
+- *Canonical .chiplet* (default ON): the GDS-bbox-corner-anchored
+  assembly file consumed by chiplet-studio.
+- *Interposer GDS* (default ON): the interposer-only layout.
+- *Complete assembly GDS* (default OFF): interposer plus all chiplet
+  instances flattened into one GDS.
+- *Keep intermediate .hyp* (default OFF): copy the metric Hyperlynx file
+  used to drive the pipeline.
+- *Annotate chiplet boundaries (viewer-only layer)* (default OFF): paint
+  each chiplet boundary and instance label onto annotation layer
+  `1000/0` for eyeball inspection in KLayout. No DRC rule reads this
+  layer; the assembly contract stays in the `.boundaries.json` manifest.
+
+### PDK roots
+
+The interposer PDK, interconnect PDK and ADK checkouts the pipeline
+will use. Each field is pre-filled by the discovery chain (environment
+variable, project text variable, sibling checkout) so the provenance of
+every dependency is visible. Edit a path to export against a different
+checkout, for example a vendor's interconnect PDK or a pinned release.
+Changing the interconnect PDK re-reads the connection-stack list from
+that PDK's manifest. Overrides reach the worker as the matching
+environment variables: `INTERPOSER_PDK_ROOT`, `INTERCONNECT_PDK_ROOT`,
+`ADK_ROOT`.
+
+### Pipeline options
+
+- *Top cell* (default `INTERPOSER`): the top-level cell name written
+  into the interposer GDS.
+- *Connection stack (default)* (optional): the methods declared by the
+  selected interconnect PDK's manifest (for example `cupillar_opt1/2/3`,
+  `sbump_sac305`, vendor methods). Empty means the writer keeps the
+  dies' existing connection field untouched. This is the assembly-wide
+  default; per-die rows below override it.
+- *Interposer technology LYP* (optional): the KLayout layer-properties
+  file of the interposer technology. Pre-filled with the discovered
+  default via `discover_interposer_lyp()`, which follows the
+  `INTERPOSER_LYP` env var, then the `INTERPOSER_LYP` project text
+  variable, then the PDK's canonical
+  `libs.tech/klayout/tech/intm4tm2.lyp`, then the bundled copy. Replace
+  it only when the interposer uses a different technology. Do not point
+  it at the interconnect `.lyp` (bump layers only); that one is consumed
+  automatically via the `.chiplet`. Blank falls back to the built-in IHP
+  interposer LYP.
+- *I/O pads JSON* (optional): sidecar JSON from `kicad_pcb_to_iopads.py`.
+  Pads are rendered in the interposer GDS and injected under the
+  interposer component.
+- *Cu-pillar GDS* (optional): pre-generated cu-pillar layout (typically
+  from `bump_mirror.py`) merged into the interposer GDS so the
+  chiplet-studio Detailed render shows the pillar caps under each
+  flip-chip die.
+
+### Per-die connection
+
+One choice per die footprint, shown only when the board has die
+footprints. Each row is initialized from that footprint's `CONNECTION`
+field and written back to it on Run, so the board stays the source of
+truth for per-die method selection. A die left on the default follows
+the assembly-wide *Connection stack* above; an explicit selection gives
+that die its own connection stack, 3D bodies and DRC numbers.
+
+### Worker Python override
+
+Optional. Bypass the discovery chain by pointing at a specific
+interpreter.
+
+### Assembly DRC
+
+When *Complete assembly GDS* is enabled, the export runs the ADK's
+`run_drc.py` (under the ADK root) over the complete GDS after
+`hyp_to_gds.py` finishes. The verdict, `assembly DRC: PASSED / FAILED /
+NOT RUN`, plus the report path is appended to the dialog log. A DRC
+failure does not invalidate the exported artifacts: the export exit code
+stays 0 and the status line flags the failed deck separately.
 
 ## Troubleshooting
 
@@ -121,9 +168,9 @@ The action appears as `Tools > External Plugins > Chiplet Export`.
 
 The plugin tried every discovery step and none worked. Fix one of:
 
-- Create the recommended `.venv` (see [Install §2](#2-set-up-the-worker-venv)).
-- Set `KICAD_CHIPLET_PYTHON=/absolute/path/to/python` in the shell
-  that launches KiCad.
+- Create the recommended `.venv` (see [Install section 2](#2-set-up-the-worker-venv)).
+- Set `KICAD_CHIPLET_PYTHON=/absolute/path/to/python` in the shell that
+  launches KiCad.
 - Set `KICAD_CHIPLET_PYTHON` as a project text variable in
   *Board Setup > Text Variables*.
 
@@ -134,35 +181,34 @@ A previous run is still in flight. Click **Cancel** to terminate it.
 **Output directory is empty / no chiplet appears**
 
 Re-check the dialog status line. Exit codes other than 0 indicate
-`hyp_to_gds.py` failed; the live log preserves stderr under
-`[stderr]` prefix.
+`hyp_to_gds.py` failed; the live log preserves stderr under a `[stderr]`
+prefix.
 
 **Plugin not visible under External Plugins**
 
-KiCad scans `~/.config/kicad/9.0/scripting/plugins/` at startup.
-Verify the symlink, then in pcbnew use
-*Tools > External Plugins > Refresh Plugins*. If registration
-failed, KiCad's stdout logs the import error.
+KiCad scans `~/.config/kicad/9.0/scripting/plugins/` at startup. Verify
+the symlink, then in pcbnew use
+*Tools > External Plugins > Refresh Plugins*. If registration failed,
+KiCad's stdout logs the import error.
 
 **"Hyperlynx writer aborted (most commonly: the board has no closed
 Edge.Cuts outline)"**
 
-The Hyperlynx writer needs a closed board outline to derive units
-and bounding box. Add an Edge.Cuts polygon enclosing the design and
-retry.
+The Hyperlynx writer needs a closed board outline to derive units and
+bounding box. Add an Edge.Cuts polygon enclosing the design and retry.
 
 **Cu-pillars missing in the chiplet-studio Detailed render**
 
-The interposer GDS the plugin produces only contains routing layers
+The interposer GDS the plugin produces carries only routing layers
 unless you also supply the cu-pillar GDS. Generate it once with
 `bump_mirror.py` (or your project equivalent) and select it in the
 dialog's *Cu-pillar GDS* picker before clicking Run.
 
 **Run hangs with no log output / dialog freezes**
 
-Open *Tools > External Plugins > Refresh Plugins*; the Python
-traceback of the failed worker prints to KiCad's stdout. The dialog
-also streams traceback lines into the log control on writer crashes.
+Open *Tools > External Plugins > Refresh Plugins*; the Python traceback
+of the failed worker prints to KiCad's stdout. The dialog also streams
+traceback lines into the log control on writer crashes.
 
 ## Repository layout
 
@@ -173,14 +219,19 @@ chiplet_kicad_plugin/
 ├── dialog_chiplet_export.py   wxPython dialog (options + log)
 ├── writers/
 │   ├── chiplet_writer.py      Python port of export_chiplet.cpp
+│   ├── connection_stacks.py   Connection-stack ids + interconnect validation
 │   └── hyperlynx_writer.py    Python port of export_hyperlynx.cpp
 ├── pipeline/
 │   ├── discovery.py           Locate worker Python + hyp_to_gds.py
 │   ├── orchestrator.py        ExportOptions, build_cli_args, run_export
 │   └── runner.py              Async subprocess wrapper
-├── hyp_to_gds.py              GDS pipeline worker (verbatim copy of
-│                              the hyp_to_gds worker from
-│                              kicad_designs/kicad_interposer_hyperlynx_to_gds)
+├── hyp_to_gds.py              GDS pipeline worker (vendored from
+│                              kicad_designs/kicad_interposer_hyperlynx_to_gds
+│                              and extended with plugin-specific flags:
+│                              --annotate-boundaries, --die-connections,
+│                              manifest-sourced --connection-type, the
+│                              .boundaries.json scheme)
+├── intm4tm2.lyp               Bundled fallback interposer layer properties
 ├── tests/                     pytest suite (see tests/README.md)
 ├── requirements.txt           Worker venv deps
 └── LICENSE
@@ -188,7 +239,7 @@ chiplet_kicad_plugin/
 
 ## Headless usage
 
-The pipeline is available without the dialog through
+The pipeline runs without the dialog through
 `pipeline.orchestrator.run_export(board, options, plugin_dir)`:
 
 ```python
@@ -203,7 +254,7 @@ options = ExportOptions(
     emit_chiplet=True,
     emit_interposer_gds=True,
     emit_complete_gds=True,
-    top_cell="TOP",
+    top_cell="INTERPOSER",
     lyp_override="/path/to/intm4tm2.lyp",
     io_pads_json="",
     cupillar_gds="/path/to/cu_pillars.gds",
@@ -220,8 +271,8 @@ assert result.exit_code == 0 and not result.error
 
 ## References
 
-- `chiplet-studio/docs/coord_frame_contract.md` — canonical
-  coordinate frame the writers honour (GDS-bbox-corner, y-up, µm)
-  and the `_metadata.finalize_required` intermediate-frame marker.
-- `tests/README.md` — test layout, byte-exact parity, round-trip
+- `chiplet-studio/docs/coord_frame_contract.md`: the canonical
+  coordinate frame the writers honour (GDS-bbox-corner, y-up, um) and
+  the `_metadata.finalize_required` intermediate-frame marker.
+- `tests/README.md`: test layout, byte-exact parity, round-trip
   regression.
