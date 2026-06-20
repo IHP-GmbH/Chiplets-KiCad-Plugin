@@ -140,6 +140,14 @@ class ChipletExportDialog(wx.Dialog):
                             else str(Path(__file__).resolve().parent))
         self._cancel_event = threading.Event()
         self._worker_thread = None
+        # Set when the dialog is closing so a late wx.CallAfter from the worker
+        # thread no-ops instead of touching a window that is being destroyed.
+        self._closing = False
+        # Debounce timer for the connection-choices refresh (F40): created
+        # before _build_ui so the interconnect field's on_change can use it.
+        self._conn_refresh_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_conn_refresh_timer,
+                  self._conn_refresh_timer)
 
         self._build_ui()
         self.CentreOnParent()
@@ -209,7 +217,7 @@ class ChipletExportDialog(wx.Dialog):
         self._interconnect_root_ctrl = _DirField(
             panel,
             path=discover_dependency_root("INTERCONNECT_PDK_ROOT", self._board),
-            on_change=self._refresh_connection_choices)
+            on_change=self._schedule_connection_refresh)
         self._interconnect_root_ctrl.SetToolTip(
             "Interconnect PDK checkout. Its manifest defines the connection "
             "stacks below (changing this re-reads the list) plus the 3D "
@@ -410,6 +418,21 @@ class ChipletExportDialog(wx.Dialog):
     # Options collection
     # ------------------------------------------------------------------
 
+    _CONN_REFRESH_DEBOUNCE_MS = 400
+
+    def _schedule_connection_refresh(self, _event=None):
+        """Debounce the connection-choices refresh.
+
+        A manifest re-read plus a filesystem walk on every keystroke stutters
+        the GUI; restart a one-shot timer so the refresh fires once typing
+        pauses (or the path is browsed).
+        """
+        self._conn_refresh_timer.Start(self._CONN_REFRESH_DEBOUNCE_MS,
+                                       oneShot=True)
+
+    def _on_conn_refresh_timer(self, _event):
+        self._refresh_connection_choices()
+
     def _refresh_connection_choices(self, _event=None):
         """Re-read the connection stacks from the selected interconnect PDK.
 
@@ -537,11 +560,18 @@ class ChipletExportDialog(wx.Dialog):
         self._cancel_btn.Disable()
 
     def _on_close(self, _event):
+        # Mark closing first so any in-flight wx.CallAfter from the worker
+        # (streamed log lines, _on_done) becomes a no-op instead of touching a
+        # window EndModal/Destroy is about to free.
+        self._closing = True
+        self._conn_refresh_timer.Stop()
         if self._worker_thread is not None and self._worker_thread.is_alive():
             self._cancel_event.set()
         self.EndModal(wx.ID_CLOSE)
 
     def _on_done(self, result):
+        if self._closing:
+            return  # dialog is closing; the window may already be gone
         self._set_running(False)
         if result.error:
             self._append_log("ERROR: " + result.error)
@@ -576,6 +606,8 @@ class ChipletExportDialog(wx.Dialog):
         wx.CallAfter(self._append_log, line)
 
     def _append_log(self, line):
+        if self._closing:
+            return  # dialog is closing; the log control may already be gone
         self._log_ctrl.AppendText(line + "\n")
 
     def _set_status(self, text):

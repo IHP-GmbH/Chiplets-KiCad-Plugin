@@ -837,6 +837,7 @@ def run_export(board, options, plugin_dir,
         # did not opt out via emit_assembly_drc=False.
         assembly_drc_exit = -1
         assembly_drc_report = ""
+        drc_cancelled = False
         complete_gds_abs = os.path.join(
             options.output_dir, "%s_complete.gds" % board_name,
         )
@@ -927,13 +928,18 @@ def run_export(board, options, plugin_dir,
                     cancel_event=cancel_event,
                     env=worker_env,
                 )
-                assembly_drc_exit = adk_run.exit_code
-                if os.path.exists(assembly_drc_report_target):
-                    assembly_drc_report = assembly_drc_report_target
+                if adk_run.cancelled:
+                    # A cancel during the DRC must not be reported as a DRC
+                    # failure: leave it NOT RUN (-1) and surface the cancel.
+                    drc_cancelled = True
+                else:
+                    assembly_drc_exit = adk_run.exit_code
+                    if os.path.exists(assembly_drc_report_target):
+                        assembly_drc_report = assembly_drc_report_target
 
         return ExportResult(
             exit_code=run.exit_code,
-            cancelled=run.cancelled,
+            cancelled=run.cancelled or drc_cancelled,
             hyp_path=hyp_kept,
             chiplet_path=(chiplet_final if options.emit_chiplet else ""),
             interposer_gds_path=(
