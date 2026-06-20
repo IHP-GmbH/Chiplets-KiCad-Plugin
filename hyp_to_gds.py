@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
 """
 HYP to GDS Converter
 
@@ -906,55 +907,6 @@ class GDSGenerator:
         # n = ceil((target - 2*enc + sep) / (size + sep))
         n = math.ceil((target_size_um - 2 * enc + sep) / (size + sep))
         return max(1, n)  # Minimum 1 via
-
-    def add_segment(self, segment: TraceSegment) -> bool:
-        """
-        Convert a trace segment to a polygon and add to layout.
-        ...
-        """
-        # Debug: Print first segment coordinates
-        if not hasattr(self, "_debug_first_seg"):
-            print(f"DEBUG: First Segment Processing")
-            print(f"  Raw HYP: ({segment.x1}, {segment.y1}) to ({segment.x2}, {segment.y2})")
-            print(f"  Conv UM: ({self._to_um(segment.x1):.2f}, {self._to_um_y(segment.y1):.2f})")
-            self._debug_first_seg = True
-
-        # Convert to micrometers (negate Y to mirror from HYP to GDS)
-        x1 = self._to_um(segment.x1)
-        y1 = self._to_um_y(segment.y1)
-        x2 = self._to_um(segment.x2)
-        y2 = self._to_um_y(segment.y2)
-        half_width = self._to_um(segment.width) / 2
-
-        # Calculate direction vector
-        dx = x2 - x1
-        dy = y2 - y1
-        length = math.sqrt(dx * dx + dy * dy)
-
-        if length < 1e-9:  # Degenerate segment (zero length)
-            print(f"Warning: Skipping zero-length segment in {segment.net_name}")
-            return False
-
-        # Perpendicular unit vector
-        px = -dy / length
-        py = dx / length
-
-        # Create 4 corners of the polygon
-        points = [
-            db.DPoint(x1 + px * half_width, y1 + py * half_width),
-            db.DPoint(x1 - px * half_width, y1 - py * half_width),
-            db.DPoint(x2 - px * half_width, y2 - py * half_width),
-            db.DPoint(x2 + px * half_width, y2 + py * half_width),
-        ]
-
-        try:
-            polygon = db.DPolygon(points)
-            layer_idx = self._get_gds_layer(segment.layer)
-            self.routing_cell.shapes(layer_idx).insert(polygon)
-            return True
-        except KeyError as e:
-            print(f"Warning: {e} - skipping segment on layer {segment.layer}")
-            return False
 
     def _get_via_layers_between(self, top_layer: str, bottom_layer: str) -> List[str]:
         """Get list of via layers needed between two metal layers."""
@@ -2523,8 +2475,10 @@ def convert_hyp_to_gds(
         complete_output_path: Path for complete GDS with chiplets
         chiplet_file_path: Path to .chiplet file to update with interposer GDS path
         tech_json_path: Path to interposer_tech_default.json for PDK via parameters
-        pad_locations: Dict mapping device ref to pin_list JSON path
-                       (deprecated -- use cupillar_gds_path instead)
+        pad_locations: Dict mapping device ref to pin_list JSON path; the
+                       cu-pillar generator places DRC-validated pillars at
+                       these pads (an alternative to a pre-generated
+                       cupillar_gds_path)
         connection_type: Connection stack ID for chiplet file update (e.g. "cupillar_opt1")
         cupillar_gds_path: Path to pre-generated cu-pillar GDS (from bump_mirror.py)
         annotate_boundaries: If True, also paint each chiplet boundary onto a
@@ -3023,9 +2977,10 @@ Examples:
         "--pad-locations",
         type=str,
         metavar="REF=FILE[,REF=FILE,...]",
-        help="(Deprecated: use bump_mirror.py + --cupillar-gds instead) "
-             "Pin list JSON files per device for cu-pillar pad generation "
-             "(e.g., U1=pins_interposer.json,U2=pins_diffamp.json)"
+        help="Pin list JSON files per device; the cu-pillar generator places "
+             "DRC-validated pillars at these pads (an alternative to a "
+             "pre-generated --cupillar-gds). "
+             "E.g. U1=pins_interposer.json,U2=pins_diffamp.json"
     )
     parser.add_argument(
         "--cupillar-gds",

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Tests for the opt-in, viewer-only boundary annotation layer in hyp_to_gds.
 
 The annotation layer restores eyeball inspection of chiplet boundaries (lost
