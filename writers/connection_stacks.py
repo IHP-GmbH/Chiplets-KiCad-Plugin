@@ -113,15 +113,20 @@ def validate_interconnect_ids(adapter=None, die_methods=None):
 
     try:
         im = _manifest_reader()
-        methods = list(im.list_methods())
-        adapters = sorted({im.adapter_for(m) for m in methods} - {None, ""})
-    except Exception as exc:
+    except ImportError as exc:
+        # The interconnect PDK is genuinely absent: degrade to a warning (the
+        # .chiplet is machine-local and both downstream consumers re-validate).
         sys.stderr.write(
             "Warning: interconnect manifest not discoverable (%s); skipping "
             "adapter/method validation -- studio and the assembly DRC "
             "validate downstream.\n" % exc
         )
         return
+    # A present-but-malformed manifest must surface a real error here rather
+    # than be swallowed into a skipped validation, so build the lists outside
+    # the catch above.
+    methods = list(im.list_methods())
+    adapters = sorted({im.adapter_for(m) for m in methods} - {None, ""})
 
     if wanted_adapter and wanted_adapter not in adapters:
         raise ValueError(

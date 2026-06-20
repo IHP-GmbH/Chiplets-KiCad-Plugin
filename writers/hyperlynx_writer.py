@@ -451,6 +451,11 @@ class _HyperlynxExporter:
 
     def _write_zone(self, zone):
         for layer in zone.GetLayerSet().Seq():
+            # Intentional deviation from export_hyperlynx.cpp, which calls
+            # GetFilledPolysList unconditionally (and would throw on a layer
+            # with no fill). Skipping unfilled layers is safe -- they carry no
+            # geometry -- and avoids that crash; byte-exact parity is
+            # unaffected on boards whose zones are fully filled.
             if not zone.HasFilledPolysForLayer(layer):
                 continue
             layer_name = self.board.GetLayerName(layer)
