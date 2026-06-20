@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
 """
 check_complete_gds_alignment.py - KLayout-independent geometric check
 for the cu-pillar / die alignment in *_complete.gds files.

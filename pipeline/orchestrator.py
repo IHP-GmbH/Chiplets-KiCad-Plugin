@@ -204,6 +204,24 @@ def describe_assembly_drc(result: ExportResult) -> str:
     return "assembly DRC: FAILED (exit %d)" % result.assembly_drc_exit_code
 
 
+def _strip_inline_comment(line: str) -> str:
+    """Strip a trailing ``#`` comment, ignoring ``#`` inside a quoted scalar.
+
+    The .chiplet mini-parsers must not truncate an adapter/connection id that
+    legitimately contains ``#`` inside quotes (e.g. ``adapter: "a#b"``).
+    """
+    in_quote = None
+    for i, ch in enumerate(line):
+        if in_quote:
+            if ch == in_quote:
+                in_quote = None
+        elif ch in ("'", '"'):
+            in_quote = ch
+        elif ch == "#":
+            return line[:i].rstrip()
+    return line
+
+
 def _read_adapter_from_block(chiplet_path: str, block_name: str,
                              default: str) -> str:
     """Read ``<block_name>:\\n  adapter: <value>`` from a ``.chiplet`` YAML.
@@ -223,8 +241,7 @@ def _read_adapter_from_block(chiplet_path: str, block_name: str,
     in_block = False
     for raw in lines:
         line = raw.rstrip("\n")
-        if "#" in line:
-            line = line[: line.index("#")].rstrip()
+        line = _strip_inline_comment(line)
         if not line.strip():
             continue
         stripped = line.lstrip()
@@ -309,8 +326,7 @@ def _read_component_connections(chiplet_path: str) -> List[tuple]:
     item_indent = None
     for raw in lines:
         line = raw.rstrip("\n")
-        if "#" in line:
-            line = line[: line.index("#")].rstrip()
+        line = _strip_inline_comment(line)
         if not line.strip():
             continue
         stripped = line.lstrip()
@@ -558,6 +574,18 @@ def build_adk_drc_argv(adk_runner_path: str,
     return args
 
 
+def _reject_delimiter_chars(mapping: Dict[str, str], what: str) -> None:
+    """Raise if any key/value contains ',' or '=', which the REF=VALUE,...
+    CLI encoding (split on ',' then '=') cannot represent unambiguously."""
+    for key, value in mapping.items():
+        for token, role in ((key, "ref"), (str(value), "value")):
+            if "," in token or "=" in token:
+                raise ValueError(
+                    "%s %s %r contains ',' or '=', which would corrupt the "
+                    "REF=VALUE,... encoding passed to hyp_to_gds."
+                    % (what, role, token))
+
+
 def build_cli_args(hyp_to_gds_path: str,
                    hyp_path: str,
                    board_name: str,
@@ -602,6 +630,7 @@ def build_cli_args(hyp_to_gds_path: str,
         args += ["--connection-type", options.connection_type]
 
     if options.die_connections:
+        _reject_delimiter_chars(options.die_connections, "die connection")
         spec = ",".join("%s=%s" % (ref, m)
                         for ref, m in sorted(options.die_connections.items()))
         args += ["--die-connections", spec]
@@ -613,6 +642,7 @@ def build_cli_args(hyp_to_gds_path: str,
         args += ["--cupillar-gds", options.cupillar_gds]
 
     if options.pad_locations:
+        _reject_delimiter_chars(options.pad_locations, "pad location")
         spec = ",".join("%s=%s" % (ref, p)
                         for ref, p in sorted(options.pad_locations.items()))
         args += ["--pad-locations", spec]

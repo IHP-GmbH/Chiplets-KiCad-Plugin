@@ -131,13 +131,14 @@ environment variables: `INTERPOSER_PDK_ROOT`, `INTERCONNECT_PDK_ROOT`,
   it at the interconnect `.lyp` (bump layers only); that one is consumed
   automatically via the `.chiplet`. Blank falls back to the built-in IHP
   interposer LYP.
-- *I/O pads JSON* (optional): sidecar JSON from `kicad_pcb_to_iopads.py`.
-  Pads are rendered in the interposer GDS and injected under the
-  interposer component.
-- *Cu-pillar GDS* (optional): pre-generated cu-pillar layout (typically
-  from `bump_mirror.py`) merged into the interposer GDS so the
-  chiplet-studio Detailed render shows the pillar caps under each
-  flip-chip die.
+- *I/O pads*: auto-extracted from the loaded board's IO_CLASS footprints,
+  rendered in the interposer GDS and injected under the interposer
+  component. An explicit sidecar JSON from `kicad_pcb_to_iopads.py` can be
+  supplied through the headless `ExportOptions.io_pads_json`.
+- *Cu-pillars*: auto-generated from each flip-chip die's footprint pads when
+  the die's connection is a cu-pillar stack. A pre-generated cu-pillar GDS,
+  typically from `bump_mirror.py`, can be supplied through the headless
+  `ExportOptions.cupillar_gds`.
 
 ### Per-die connection
 
@@ -199,10 +200,11 @@ bounding box. Add an Edge.Cuts polygon enclosing the design and retry.
 
 **Cu-pillars missing in the chiplet-studio Detailed render**
 
-The interposer GDS the plugin produces carries only routing layers
-unless you also supply the cu-pillar GDS. Generate it once with
-`bump_mirror.py` (or your project equivalent) and select it in the
-dialog's *Cu-pillar GDS* picker before clicking Run.
+Cu-pillars are generated only when a die's connection is a cu-pillar stack
+(set via the per-die *Connection* row or the assembly-wide *Connection
+stack*). Confirm the die has a cu-pillar method selected, then re-run. A
+pre-generated cu-pillar GDS can instead be supplied through the headless
+`ExportOptions.cupillar_gds`.
 
 **Run hangs with no log output / dialog freezes**
 
