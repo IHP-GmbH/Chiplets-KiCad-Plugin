@@ -2776,12 +2776,18 @@ def convert_hyp_to_gds(
     # Update chiplet file if requested
     if chiplet_file_path:
         bbox = generator.get_top_cell_bbox()
-        update_chiplet_file(chiplet_file_path, output_path, bbox,
+        # A finalize failure must surface: an un-finalized .chiplet still
+        # carries _metadata.finalize_required and ChipletFormat::load refuses
+        # it, so reporting exit 0 here would hand studio an unusable file.
+        if not update_chiplet_file(chiplet_file_path, output_path, bbox,
                            connection_type=connection_type,
                            io_pads=placed_io_pads,
                            devices=parser.devices,
                            die_connections=die_connections,
-                           outline_bbox=outline_bbox)
+                           outline_bbox=outline_bbox):
+            print(f"ERROR: failed to finalize chiplet file "
+                  f"'{chiplet_file_path}'.", file=sys.stderr)
+            return False
 
     # Generate complete GDS with chiplets if requested
     if with_chiplets and parser.devices:
@@ -2810,6 +2816,12 @@ def convert_hyp_to_gds(
                     print(f"  {device.ref}: placed with mirror-X (flip-chip)")
 
         print(f"Successfully added {device_success}/{len(parser.devices)} devices")
+
+        if device_success == 0:
+            print(f"ERROR: --with-chiplets requested but 0 of "
+                  f"{len(parser.devices)} device GDS file(s) loaded; refusing "
+                  f"to emit a die-less complete GDS.", file=sys.stderr)
+            return False
 
         # Drop the imported chiplet templates (left orphan by
         # _place_die_flipped) so the GDS has a single top-level TOP
