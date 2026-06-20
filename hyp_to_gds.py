@@ -271,11 +271,15 @@ class HYPParser:
         # Device positions now come directly from HYP file (no centroid calculation needed)
 
     def _parse_units(self, content: str) -> None:
-        """Parse units declaration."""
-        if "UNITS=ENGLISH" in content:
-            self.units = "ENGLISH"  # inches
-        elif "UNITS=METRIC" in content:
-            self.units = "METRIC"  # mm
+        """Parse the {UNITS=...} header declaration.
+
+        Anchored to the section-header token so an ENGLISH/METRIC substring
+        elsewhere in the file cannot flip the units (an ENGLISH false match on
+        a METRIC board scales every coordinate by 25400x).
+        """
+        m = re.search(r'\{UNITS=(ENGLISH|METRIC)\b', content)
+        if m:
+            self.units = m.group(1)  # ENGLISH = inches, METRIC = metres
 
     def _parse_stackup(self, content: str) -> None:
         """Parse STACKUP section to get layer order (top to bottom)."""
@@ -649,6 +653,12 @@ class GDSGenerator:
         """
         Discretize an arc into a list of points in micrometers.
         Returns points from (x1,y1) to (x2,y2) along the arc.
+
+        LIMITATION: the .hyp ARC record carries no sweep direction, so this
+        always draws the minor (<=180 degree) arc between the endpoints. A
+        KiCad arc with a sweep greater than 180 degrees is rendered as its
+        complement. Interposer routing is overwhelmingly orthogonal, so this
+        is rare; a warning is emitted at the ambiguous semicircle.
         """
         x1 = self._to_um(arc.x1)
         y1 = self._to_um_y(arc.y1)
@@ -662,12 +672,18 @@ class GDSGenerator:
         angle1 = math.atan2(y1 - yc, x1 - xc)
         angle2 = math.atan2(y2 - yc, x2 - xc)
 
-        # Determine arc direction (shortest path)
+        # Determine arc direction (shortest path -> minor arc).
         diff = angle2 - angle1
         if diff > math.pi:
             diff -= 2 * math.pi
         elif diff < -math.pi:
             diff += 2 * math.pi
+        # At ~180 degrees the minor/major choice is ambiguous from endpoints
+        # alone; flag it so a mis-rendered curved trace is not silent.
+        if abs(abs(diff) - math.pi) < math.radians(2.0):
+            print(f"Warning: arc on {arc.layer} spans ~180 degrees; the .hyp "
+                  f"carries no sweep direction, so the minor arc is drawn and "
+                  f"may not match the source.", file=sys.stderr)
 
         # Generate points along the arc
         points = []
@@ -680,19 +696,24 @@ class GDSGenerator:
 
         return points
 
-    def _build_trace_elements(self, segments: List[TraceSegment], arcs: List[TraceArc]) -> Dict[Tuple[str, float], List]:
+    def _build_trace_elements(self, segments: List[TraceSegment], arcs: List[TraceArc]) -> Dict[Tuple[str, str, float], List]:
         """
-        Group segments and arcs by (layer, width).
-        Returns dict mapping (layer, width) -> list of (type, element) tuples.
+        Group segments and arcs by (net, layer, width).
+        Returns dict mapping (net, layer, width) -> list of (type, element) tuples.
+
+        Net is part of the key so path-stitching (_connect_traces_to_paths)
+        only chains elements of the same net. Without it, two distinct nets
+        that happen to share an endpoint -- or merely touch at a T-junction --
+        would be welded into one path, corrupting the drawn copper topology.
         """
-        groups: Dict[Tuple[str, float], List] = {}
+        groups: Dict[Tuple[str, str, float], List] = {}
 
         for seg in segments:
-            key = (seg.layer, seg.width)
+            key = (seg.net_name, seg.layer, seg.width)
             groups.setdefault(key, []).append(('seg', seg))
 
         for arc in arcs:
-            key = (arc.layer, arc.width)
+            key = (arc.net_name, arc.layer, arc.width)
             groups.setdefault(key, []).append(('arc', arc))
 
         return groups
@@ -832,7 +853,7 @@ class GDSGenerator:
         groups = self._build_trace_elements(segments, arcs)
 
         total_paths = 0
-        for (layer, width), elements in groups.items():
+        for (_net, layer, width), elements in groups.items():
             # Probe the layer once per group. Elements on layers the LYP
             # does not map are counted and skipped so the caller can fail
             # loudly when the board copper names do not match the PDK
@@ -1069,6 +1090,14 @@ class GDSGenerator:
         t_layer = sorted_layers[0]   # Top layer
         b_layer = sorted_layers[-1]  # Bottom layer
         via_layer_names = self._get_via_layers_between(t_layer, b_layer)
+        if t_layer != b_layer and not via_layer_names:
+            # A real metal transition that no VIA_LAYERS pair covers (a PDK
+            # ladder gap). Drawing the landing pads anyway leaves them
+            # electrically floating with no cuts, so refuse loudly instead.
+            print(f"Warning: no via layers map the {t_layer} <-> {b_layer} "
+                  f"transition (PDK ladder gap); skipping this via rather than "
+                  f"drawing floating landing pads.", file=sys.stderr)
+            return False
 
         # n x n arrays of PDK-sized cuts per via level.
         # arrays: via layer -> (array extent, metal enclosure) for pads.
@@ -1201,7 +1230,10 @@ class GDSGenerator:
             # HYP now exports Y consistently for both wires and devices
             # (KiCad exporter bug fixed: Y is negated for all elements)
             x_um = self._to_um(device.x)
-            y_um = self._to_um(device.y)
+            # _to_um_y (not _to_um) so the device Y reflection matches the
+            # traces/vias; a no-op in METRIC (the only mode the writer emits),
+            # correct in ENGLISH where the die would otherwise be mirrored.
+            y_um = self._to_um_y(device.y)
 
             # Get expected cell name from GDS filename (without extension)
             expected_cell_name = gds_path.stem
@@ -1422,6 +1454,11 @@ class GDSGenerator:
 
         Passiv opening and dfpad recognition are deferred to the follow-up
         PR that introduces the I/O pad DRC rule deck.
+
+        The layer is the shared TopMetal2 *fab* entry from CUPILLAR_FAB_LAYERS
+        (134/0), deliberately NOT routed through the trace LayerMap: the I/O pad
+        must land on the same fab layer as the cu-pillars, which is not
+        necessarily the TopMetal2 *routing* layer the LYP maps for traces.
         """
         cell_name = f"WB_PAD_{size_x_um:g}x{size_y_um:g}"
         cell = self.layout.create_cell(cell_name)
@@ -1716,7 +1753,8 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                         devices: Optional[List['Device']] = None,
                         die_connections: Optional[Dict[str, str]] = None,
                         outline_bbox: Optional[Tuple[float, float, float,
-                                                     float]] = None) -> bool:
+                                                     float]] = None,
+                        to_um=None, to_um_y=None) -> bool:
     """
     Update .chiplet file with interposer GDS absolute path, dimensions, position,
     correct z-values for dies, and top_cell names from GDS files.
@@ -2039,8 +2077,16 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                 ref = component.get('id', '')
                 dev = device_map.get(ref)
                 if dev is not None:
-                    abs_x_um = dev.x * 1e6  # HYP is meters
-                    abs_y_um = dev.y * 1e6
+                    # Use the same converters add_device uses to place the die
+                    # (to_um for X, to_um_y for Y) so the .chiplet position
+                    # matches the GDS exactly. Fall back to the METRIC
+                    # (HYP-metres) factor when a caller omits them.
+                    if to_um is not None and to_um_y is not None:
+                        abs_x_um = to_um(dev.x)
+                        abs_y_um = to_um_y(dev.y)
+                    else:
+                        abs_x_um = dev.x * 1e6
+                        abs_y_um = dev.y * 1e6
                     new_x = abs_x_um - gds_left
                     new_y = abs_y_um - gds_bottom
                     old = component.get('position', {})
@@ -2784,7 +2830,9 @@ def convert_hyp_to_gds(
                            io_pads=placed_io_pads,
                            devices=parser.devices,
                            die_connections=die_connections,
-                           outline_bbox=outline_bbox):
+                           outline_bbox=outline_bbox,
+                           to_um=generator._to_um,
+                           to_um_y=generator._to_um_y):
             print(f"ERROR: failed to finalize chiplet file "
                   f"'{chiplet_file_path}'.", file=sys.stderr)
             return False
