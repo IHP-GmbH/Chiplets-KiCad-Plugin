@@ -119,7 +119,11 @@ def find_worker_python(plugin_dir, board=None):
             override.
 
     Returns:
-        Absolute path (str) of the worker interpreter.
+        Absolute path (str) of the worker interpreter. The ``KICAD_CHIPLET_PYTHON``
+        env var and project text variable are explicit overrides: returned
+        as-is when executable (trusted, NOT import-probed). Only the
+        auto-discovered PATH ``python3`` candidate is probed for a klayout +
+        PyYAML import.
 
     Raises:
         WorkerPythonNotFoundError if no candidate succeeds. The error
@@ -160,7 +164,9 @@ def find_worker_python(plugin_dir, board=None):
             return str(Path(which).absolute())
 
     raise WorkerPythonNotFoundError(
-        "Could not locate a Python interpreter with klayout + PyYAML.\n"
+        "Could not locate a usable worker Python (env/project overrides are "
+        "used as-is when executable; the .venv and PATH legs additionally "
+        "require a klayout + PyYAML import).\n"
         "Tried:\n  - "
         + "\n  - ".join("%s: %s" % c for c in tried)
         + "\n\nTo create the recommended worker venv:\n\n"

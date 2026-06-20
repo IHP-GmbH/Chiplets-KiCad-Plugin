@@ -262,12 +262,17 @@ class HYPParser:
             print(f"Error: Could not find {self.hyp_path}", file=sys.stderr)
             sys.exit(1)
 
-        self._parse_units(content)
-        self._parse_stackup(content)
-        self._parse_board_perimeter(content)
-        self._parse_padstacks(content)
-        self._parse_devices(content)
-        self._parse_segments_and_vias(content)
+        try:
+            self._parse_units(content)
+            self._parse_stackup(content)
+            self._parse_board_perimeter(content)
+            self._parse_padstacks(content)
+            self._parse_devices(content)
+            self._parse_segments_and_vias(content)
+        except (ValueError, IndexError) as exc:
+            print(f"Error: malformed HYP data in {self.hyp_path}: {exc}",
+                  file=sys.stderr)
+            sys.exit(1)
         # Device positions now come directly from HYP file (no centroid calculation needed)
 
     def _parse_units(self, content: str) -> None:
@@ -1516,8 +1521,17 @@ class GDSGenerator:
                   file=sys.stderr)
             return []
 
-        with open(pads_path, 'r') as f:
-            data = json.load(f)
+        try:
+            with open(pads_path, 'r') as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"Warning: could not read I/O pads file {io_pads_json}: "
+                  f"{exc}", file=sys.stderr)
+            return []
+        if not isinstance(data, dict):
+            print(f"Warning: I/O pads file {io_pads_json} is not a JSON "
+                  f"object; ignoring.", file=sys.stderr)
+            return []
 
         pads = data.get('io_pads', [])
         if not pads:
@@ -1529,9 +1543,18 @@ class GDSGenerator:
         counts: Dict[str, int] = {}
 
         for p in pads:
+            if not isinstance(p, dict):
+                print(f"  Warning: skipping non-object io_pad entry: {p!r}",
+                      file=sys.stderr)
+                continue
             io_class = p.get('io_class', 'wire_bond')
-            sx = float(p.get('size_x_um', 0.0))
-            sy = float(p.get('size_y_um', 0.0))
+            try:
+                sx = float(p.get('size_x_um', 0.0))
+                sy = float(p.get('size_y_um', 0.0))
+            except (TypeError, ValueError):
+                print(f"  Warning: skipping pad {p.get('ref', '?')} with "
+                      f"non-numeric size", file=sys.stderr)
+                continue
             if sx <= 0 or sy <= 0:
                 print(f"  Warning: skipping pad {p.get('ref', '?')} "
                       f"with invalid size: {sx}x{sy}", file=sys.stderr)
@@ -1550,8 +1573,13 @@ class GDSGenerator:
                     db.DCellInstArray(group_cells[io_class], db.DTrans()))
                 counts[io_class] = 0
 
-            x = float(p.get('x_um', 0.0))
-            y = float(p.get('y_um', 0.0))
+            try:
+                x = float(p.get('x_um', 0.0))
+                y = float(p.get('y_um', 0.0))
+            except (TypeError, ValueError):
+                print(f"  Warning: skipping pad {p.get('ref', '?')} with "
+                      f"non-numeric position", file=sys.stderr)
+                continue
             group_cells[io_class].insert(
                 db.DCellInstArray(pad_cell, db.DTrans(db.DVector(x, y))))
             counts[io_class] += 1
@@ -1702,7 +1730,12 @@ def get_default_connection_stacks() -> dict:
             "interconnect_pdk not found. Set INTERCONNECT_PDK_ROOT, or install "
             "interconnect_pdk as a sibling repo of the plugin."
         )
-    lib = im.get_connection_library()
+    try:
+        lib = im.get_connection_library()
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "interconnect_pdk manifest data is missing (%s); the "
+            "INTERCONNECT_PDK_ROOT checkout looks incomplete." % exc)
     return {
         mid: {
             "description": stack["description"],
@@ -1725,8 +1758,8 @@ def _connection_stack_from_manifest(method_id: str):
         return None
     try:
         stack = im.get_connection_stack(method_id)
-    except KeyError:
-        return None
+    except (KeyError, FileNotFoundError):
+        return None  # unknown method, or a partial PDK install
     return {
         "description": stack["description"],
         "layers": [dict(layer) for layer in stack["layers"]],
@@ -2155,12 +2188,14 @@ def _discover_path_var(name: str) -> Optional[str]:
     Returns the root as a string, or None when unresolvable.
     """
     marker = _PATH_VAR_MARKERS.get(name)
-    env = os.environ.get(name)
-    if env:
-        if marker is None or Path(env).joinpath(*marker[1]).is_dir():
-            return env
     if marker is None:
+        # Only the known ecosystem-root variables are expandable. An unknown
+        # ${NAME} is a typo/misuse, not a licence to expand an arbitrary
+        # environment variable; return None so _expand_path_vars fails loudly.
         return None
+    env = os.environ.get(name)
+    if env and Path(env).joinpath(*marker[1]).is_dir():
+        return env
     dirnames, sub = marker
     here = Path(__file__).resolve()
     for base in here.parents:
@@ -2194,7 +2229,15 @@ def _expand_path_vars(path: Optional[str]) -> Optional[str]:
                 "adk/docs/integration.md)." % (name, path, name))
         return value
 
-    return _PATH_VAR_RE.sub(_repl, path)
+    result = _PATH_VAR_RE.sub(_repl, path)
+    if "${" in result:
+        # A malformed reference (e.g. unterminated ${, or an invalid name) the
+        # regex could not match survived: fail loud rather than letting a
+        # literal ${...} component silently "not exist" downstream.
+        sys.exit(
+            "ERROR: malformed variable reference in path '%s'. Use ${NAME} "
+            "with an ecosystem-root name (see adk/docs/integration.md)." % path)
+    return result
 
 
 def _find_default_lyp() -> str:
@@ -2273,15 +2316,19 @@ def _import_interconnect_manifest():
     Located via $INTERCONNECT_PDK_ROOT or a sibling-repo search, mirroring
     _import_bump_mirror. The interconnect PDK owns the bump-method registry.
     """
-    try:
-        for cand in _interconnect_python_candidates():
-            if (cand / "interconnect_manifest.py").is_file():
-                if str(cand) not in sys.path:
-                    sys.path.insert(0, str(cand))
+    for cand in _interconnect_python_candidates():
+        if (cand / "interconnect_manifest.py").is_file():
+            if str(cand) not in sys.path:
+                sys.path.insert(0, str(cand))
+            try:
                 import interconnect_manifest
                 return interconnect_manifest
-    except Exception:
-        pass
+            except Exception as exc:
+                # The file exists but does not import: surface the real error
+                # instead of letting callers report a misleading "not found".
+                print(f"Warning: found interconnect_manifest.py in {cand} but "
+                      f"could not import it: {exc}", file=sys.stderr)
+                return None
     return None
 
 
@@ -2298,8 +2345,8 @@ def _connection_to_body_diameter(connection_type):
         return None
     try:
         method = im.get_method(connection_type)
-    except KeyError:
-        return None
+    except (KeyError, FileNotFoundError):
+        return None  # unknown method, or a partial PDK install
     layers = method.get("connection_stack", {}).get("layers", [])
     if any("Ball" in layer.get("name", "") for layer in layers):
         return None
@@ -2320,8 +2367,8 @@ def _connection_to_adapter(connection_type):
         return None
     try:
         method = im.get_method(connection_type)
-    except KeyError:
-        return None
+    except (KeyError, FileNotFoundError):
+        return None  # unknown method, or a partial PDK install
     return method.get("adapter")
 
 
@@ -2649,12 +2696,14 @@ def convert_hyp_to_gds(
             # A connection stack was requested: a GDS without its pillars
             # would look fabricable while missing the attachment structures,
             # and no downstream DRC can flag absent geometry. Fail loud.
-            sys.exit(
+            print(
                 "ERROR: Cu-pillar generation requested (connection=%s) but "
                 "bump_mirror is unavailable. Set INTERPOSER_PDK_ROOT to the "
                 "interposer PDK checkout (libs.tech/klayout/python/"
                 "bump_mirror.py) and retry. Refusing to emit a complete GDS "
-                "without its pillars." % ", ".join(methods_in_use))
+                "without its pillars." % ", ".join(methods_in_use),
+                file=sys.stderr)
+            return False
         elif methods_in_use:
             # One generator + parameter set per method: the 3D body layers
             # (e.g. a vendor's 510/511 vs IHP's 500/501) and the fab
@@ -3091,6 +3140,20 @@ Examples:
         print(f"Error: Invalid --boundary-viz-layer '{args.boundary_viz_layer}'. "
               "Use LAYER/DATATYPE, e.g. 1000/0.", file=sys.stderr)
         return 1
+
+    # Refuse an annotation layer that collides with a fabrication layer: the
+    # painter clear()s the layer first, so aliasing prBoundary (189/0), the
+    # legacy exchange0 (190/0), or a cu-pillar fab layer would silently wipe
+    # real geometry (and break the "never aliases a fab layer" contract).
+    if args.annotate_boundaries:
+        _fab_layers = set(GDSGenerator.CUPILLAR_FAB_LAYERS.values()) | {
+            (189, 0), (190, 0)}
+        if boundary_viz_layer in _fab_layers:
+            print(f"Error: --boundary-viz-layer {boundary_viz_layer[0]}/"
+                  f"{boundary_viz_layer[1]} collides with a fabrication layer; "
+                  f"choose one outside the fab range (default 1000/0).",
+                  file=sys.stderr)
+            return 1
 
     # Run conversion
     success = convert_hyp_to_gds(
