@@ -439,8 +439,8 @@ class ChipletExportDialog(wx.Dialog):
         Preserves the current selection when the new manifest still offers
         it; otherwise resets to "" (no --connection-type).
         """
-        if not hasattr(self, "_conn_ctrl"):
-            return  # dialog still under construction
+        if self._closing or not hasattr(self, "_conn_ctrl"):
+            return  # dialog closing/destroyed, or still under construction
         current = ""
         idx = self._conn_ctrl.GetSelection()
         if idx is not None and 0 <= idx < len(self._conn_choices):

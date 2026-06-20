@@ -1511,6 +1511,15 @@ class GDSGenerator:
                 print(f"  Warning: skipping pad {p.get('ref', '?')} "
                       f"with invalid size: {sx}x{sy}", file=sys.stderr)
                 continue
+            # Parse the position before creating any cell, so a bad position
+            # cannot leave an empty IO_PADS_<class> group cell behind.
+            try:
+                x = float(p.get('x_um', 0.0))
+                y = float(p.get('y_um', 0.0))
+            except (TypeError, ValueError):
+                print(f"  Warning: skipping pad {p.get('ref', '?')} with "
+                      f"non-numeric position", file=sys.stderr)
+                continue
             try:
                 pad_cell = self._get_or_create_io_pad_cell(io_class, sx, sy)
             except (NotImplementedError, ValueError) as e:
@@ -1525,13 +1534,6 @@ class GDSGenerator:
                     db.DCellInstArray(group_cells[io_class], db.DTrans()))
                 counts[io_class] = 0
 
-            try:
-                x = float(p.get('x_um', 0.0))
-                y = float(p.get('y_um', 0.0))
-            except (TypeError, ValueError):
-                print(f"  Warning: skipping pad {p.get('ref', '?')} with "
-                      f"non-numeric position", file=sys.stderr)
-                continue
             group_cells[io_class].insert(
                 db.DCellInstArray(pad_cell, db.DTrans(db.DVector(x, y))))
             counts[io_class] += 1

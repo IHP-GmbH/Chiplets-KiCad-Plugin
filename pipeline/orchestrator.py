@@ -466,9 +466,10 @@ def _intersect_methods_with_manifest(methods: Dict[str, dict],
     )
     try:
         with open(manifest_path, "r", encoding="utf-8") as fh:
-            boundaries = json.load(fh).get("boundaries")
+            data = json.load(fh)
     except (OSError, ValueError):
         return methods
+    boundaries = data.get("boundaries") if isinstance(data, dict) else None
     if not isinstance(boundaries, list):
         return methods
     instances = {b.get("instance") for b in boundaries
@@ -574,11 +575,21 @@ def build_adk_drc_argv(adk_runner_path: str,
     return args
 
 
-def _reject_delimiter_chars(mapping: Dict[str, str], what: str) -> None:
-    """Raise if any key/value contains ',' or '=', which the REF=VALUE,...
-    CLI encoding (split on ',' then '=') cannot represent unambiguously."""
+def _reject_delimiter_chars(mapping: Dict[str, str], what: str,
+                            check_values: bool = True) -> None:
+    """Raise if a key (or value, when ``check_values``) contains ',' or '=',
+    which the REF=VALUE,... CLI encoding (split on ',' then '=') cannot
+    represent unambiguously.
+
+    ``check_values`` is False for pad_locations, whose values are
+    plugin-generated file paths rooted at $TMPDIR that may legitimately
+    contain those characters; only the ref keys are validated there.
+    """
     for key, value in mapping.items():
-        for token, role in ((key, "ref"), (str(value), "value")):
+        tokens = [(key, "ref")]
+        if check_values:
+            tokens.append((str(value), "value"))
+        for token, role in tokens:
             if "," in token or "=" in token:
                 raise ValueError(
                     "%s %s %r contains ',' or '=', which would corrupt the "
@@ -642,7 +653,8 @@ def build_cli_args(hyp_to_gds_path: str,
         args += ["--cupillar-gds", options.cupillar_gds]
 
     if options.pad_locations:
-        _reject_delimiter_chars(options.pad_locations, "pad location")
+        _reject_delimiter_chars(options.pad_locations, "pad location",
+                                check_values=False)
         spec = ",".join("%s=%s" % (ref, p)
                         for ref, p in sorted(options.pad_locations.items()))
         args += ["--pad-locations", spec]
