@@ -181,3 +181,71 @@ def test_hyperlynx_byte_exact(tmp_path, hyperlynx_board_path):
         "Python hyperlynx writer returned False"
 
     _assert_byte_exact("hyperlynx", cpp_path, py_path)
+
+
+# ---------------------------------------------------------------------------
+# Latent-divergence guards. The shipping single-PDK / 2-layer fixtures cannot
+# exercise the technologies-block ordering or the inner-copper PADSTACK
+# ordering, so each test synthesizes the triggering geometry on top of a real
+# fixture board. Both diverged before the parity fix (sorted std::map / .Seq).
+# ---------------------------------------------------------------------------
+
+def _add_die_footprint(board, ref, lyp, gds, x_mm, y_mm):
+    """Add a bare die footprint carrying LYP_FILE + GDS_FILE fields."""
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference(ref)
+    fp.SetField("LYP_FILE", lyp)
+    fp.SetField("GDS_FILE", gds)
+    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x_mm), pcbnew.FromMM(y_mm)))
+    board.Add(fp)
+    return fp
+
+
+def test_chiplet_byte_exact_multi_tech(tmp_path, chiplet_board_path):
+    """Multi-PDK technologies block stays byte-identical to the C++ exporter.
+
+    The C++ techMap is a std::map (sorted iteration); a Python dict emits in
+    insertion order. Two extra dies are added with LYP ids whose insertion
+    order ('zzz' then 'aaa') is NOT sorted, so an insertion-order regression
+    diverges here even though the single-tech demo cannot trigger it.
+    """
+    cpp_path = tmp_path / "cpp_multi.chiplet"
+    py_path = tmp_path / "py_multi.chiplet"
+
+    def prep():
+        board = pcbnew.LoadBoard(chiplet_board_path)
+        _add_die_footprint(board, "ZZZ1", "zzz_tech.lyp", "ZZZ1.gds", 1.0, 1.0)
+        _add_die_footprint(board, "AAA1", "aaa_tech.lyp", "AAA1.gds", 2.0, 2.0)
+        return board
+
+    assert pcbnew.ExportBoardToChipletFile(prep(), str(cpp_path)) is True
+    assert write_chiplet(prep(), str(py_path)) is True
+    _assert_byte_exact("chiplet multi-tech", cpp_path, py_path)
+
+
+def test_hyperlynx_byte_exact_inner_copper(tmp_path, hyperlynx_board_path):
+    """Inner-copper PADSTACK ordering stays byte-identical to the C++ exporter.
+
+    A through via on a 4-layer board makes the C++ WritePadStack emit its
+    copper layers in raw-bit (.Seq) order -- top, bottom, In1, In2 -- where a
+    .CuStack()-ordered Python writer would interleave the inner layers. The
+    2-layer interf_u fixture cannot trigger it.
+    """
+    cpp_path = tmp_path / "cpp_inner.hyp"
+    py_path = tmp_path / "py_inner.hyp"
+
+    def prep():
+        board = pcbnew.LoadBoard(hyperlynx_board_path)
+        board.SetCopperLayerCount(4)
+        via = pcbnew.PCB_VIA(board)
+        via.SetViaType(pcbnew.VIATYPE_THROUGH)
+        via.SetPosition(board.GetBoardEdgesBoundingBox().GetCenter())
+        via.SetWidth(pcbnew.FromMM(0.6))
+        via.SetDrill(pcbnew.FromMM(0.3))
+        via.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+        board.Add(via)
+        return board
+
+    assert pcbnew.ExportBoardToHyperlynxFile(prep(), str(cpp_path)) is True
+    assert write_hyperlynx(prep(), str(py_path)) is True
+    _assert_byte_exact("hyperlynx inner-copper", cpp_path, py_path)

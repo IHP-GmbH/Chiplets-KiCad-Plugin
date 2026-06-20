@@ -76,6 +76,37 @@ def _lookup_property(board, name):
     return ""
 
 
+def _lookup_text_var(board, name):
+    """Look `name` up in PROJECT.GetTextVars() ONLY (never BOARD.GetProperties()).
+
+    The C++ exporter reads INTERPOSER_ADAPTER / INTERCONNECT_ADAPTER from the
+    project text variables only; _lookup_property's GetProperties-first lookup
+    would let a board property shadow the text variable and diverge from
+    byte-exact parity. Returns "" when absent (caller applies any default).
+    """
+    project = board.GetProject()
+    if project is None or not hasattr(project, "GetTextVars"):
+        return ""
+    try:
+        text_vars = project.GetTextVars()
+    except Exception:
+        return ""
+    if text_vars is None:
+        return ""
+    try:
+        if name in text_vars:
+            return str(text_vars[name])
+    except (TypeError, KeyError):
+        pass
+    if hasattr(text_vars, "count") and hasattr(text_vars, "at"):
+        try:
+            if text_vars.count(name):
+                return str(text_vars.at(name))
+        except Exception:
+            pass
+    return ""
+
+
 def write_io_pads_json(board, output_path):
     """Extract IO_CLASS footprints from `board` into an io_pads.json sidecar.
 
@@ -300,7 +331,9 @@ def write_chiplet(board, output_path):
     # INTERCONNECT_ADAPTER. Validated against the interconnect PDK manifest
     # before any output is written, so a typo fails the export here instead
     # of surfacing later in studio or the assembly DRC.
-    interconnect_adapter = _lookup_property(board, "INTERCONNECT_ADAPTER")
+    # Text-vars only, mirroring export_chiplet.cpp (GetTextVars()); a board
+    # property must not shadow this or byte-exact parity breaks.
+    interconnect_adapter = _lookup_text_var(board, "INTERCONNECT_ADAPTER")
     validate_interconnect_ids(adapter=interconnect_adapter)
 
     component_techs = {}
@@ -359,8 +392,9 @@ def write_chiplet(board, output_path):
         # Interposer adapter. Declares which ADK PDK adapter the assembly
         # DRC should resolve when this design is checked. Override via
         # Board Setup > Text Variables > INTERPOSER_ADAPTER.
+        # Text-vars only, mirroring export_chiplet.cpp (GetTextVars()).
         interposer_adapter = (
-            _lookup_property(board, "INTERPOSER_ADAPTER")
+            _lookup_text_var(board, "INTERPOSER_ADAPTER")
             or "intm4tm2"
         )
         f.write("interposer:\n")
@@ -371,9 +405,11 @@ def write_chiplet(board, output_path):
         # set, mirroring interposer. Validated during data gathering.
         f.write(emit_interconnect_block(interconnect_adapter))
 
-        # Technologies
+        # Technologies. Sorted by id to match the C++ exporter, whose techMap
+        # is a std::map (sorted iteration); a plain dict here would emit in
+        # insertion order and break byte-exact parity for multi-PDK assemblies.
         f.write("technologies:\n")
-        for tech_id, lyp_path in tech_map.items():
+        for tech_id, lyp_path in sorted(tech_map.items()):
             f.write("  %s:\n" % tech_id)
             f.write('    description: "Imported from KiCad"\n')
             f.write('    layer_properties: "%s"\n' % lyp_path)

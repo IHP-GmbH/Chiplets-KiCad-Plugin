@@ -320,7 +320,10 @@ class _HyperlynxExporter:
     def _write_single_pad_stack(self, stack):
         cu_count = self.board.GetCopperLayerCount()
         allowed_cu = pcbnew.LSET.AllCuMask(cu_count)
-        out_layers = [l for l in stack.layers.CuStack()
+        # Raw-bit (.Seq) order to match the C++ exporter's outLayers.Seq();
+        # .CuStack() reorders inner copper and breaks byte-exact parity on
+        # boards with inner layers (F.Cu/B.Cu-only boards are unaffected).
+        out_layers = [l for l in stack.layers.Seq()
                       if allowed_cu.Contains(l)]
         if not out_layers:
             return
