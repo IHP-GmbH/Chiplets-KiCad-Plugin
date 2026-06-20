@@ -2793,18 +2793,30 @@ def convert_hyp_to_gds(
     if with_chiplets and parser.devices:
         print(f"\nGenerating complete GDS with chiplets...")
 
-        # Determine flip-chip dies from chiplet file
+        # Determine flip-chip dies. Primary signal: a die attached by a
+        # body-bearing (cu-pillar) connection method -- resolved from the
+        # in-scope per-die map, or the assembly default for dies without one --
+        # so orientation does not depend on the .chiplet sidecar (which is
+        # absent when --update-chiplet-file is not passed). Solder-bump-only
+        # dies still need the sidecar; the normal emit_chiplet path carries it.
         flip_chip_refs = set()
+        for device in parser.devices:
+            method = (die_connections or {}).get(device.ref) or connection_type
+            if method and _connection_to_body_diameter(method) is not None:
+                flip_chip_refs.add(device.ref)
+
+        # Union with the .chiplet sidecar's explicit declarations when present.
         if chiplet_file_path:
+            import yaml
             try:
-                import yaml
                 with open(chiplet_file_path) as f:
-                    chiplet_data = yaml.safe_load(f)
+                    chiplet_data = yaml.safe_load(f) or {}
                 for comp in chiplet_data.get('components', []):
                     if comp.get('connection') or comp.get('orientation') == 'flip_chip':
                         flip_chip_refs.add(comp.get('id', ''))
-            except Exception:
-                pass
+            except (OSError, yaml.YAMLError) as exc:
+                print(f"Warning: could not read flip-chip orientation from "
+                      f"'{chiplet_file_path}': {exc}", file=sys.stderr)
 
         # Add devices to the layout
         device_success = 0

@@ -378,14 +378,22 @@ def derive_interconnect_methods(chiplet_path: str,
         if not method:
             continue
         try:
-            entry = derived.setdefault(connection, {
-                "dies": [],
-                "IXN_spacing": float(method["pitch_rules"]["IXN_spacing"]),
-                "IXN_pitch": float(method["pitch_rules"]["IXN_pitch"]),
-                "IXN_pad_size": float(method["fab_params"]["passiv_opening_um"]),
-            })
+            spacing = float(method["pitch_rules"]["IXN_spacing"])
+            pitch = float(method["pitch_rules"]["IXN_pitch"])
+            pad_size = float(method["fab_params"]["passiv_opening_um"])
         except (KeyError, TypeError, ValueError):
             continue  # malformed manifest entry: leave it to the adapter
+        if not (spacing > 0 and pitch > 0 and pad_size > 0):
+            # The ixn_methods schema requires exclusiveMinimum 0; a non-positive
+            # value would make run_drc reject the whole sidecar. Skip it -- the
+            # assembly-global adapter still covers this method.
+            continue
+        entry = derived.setdefault(connection, {
+            "dies": [],
+            "IXN_spacing": spacing,
+            "IXN_pitch": pitch,
+            "IXN_pad_size": pad_size,
+        })
         if component_id not in entry["dies"]:
             entry["dies"].append(component_id)
     return derived
@@ -419,6 +427,43 @@ def write_ixn_methods_sidecar(methods: Dict[str, dict], gds_path: str,
         json.dump(payload, fh, indent=1)
         fh.write("\n")
     return sidecar
+
+
+def _intersect_methods_with_manifest(methods: Dict[str, dict],
+                                     gds_path: str) -> Dict[str, dict]:
+    """Drop derived dies absent from the GDS's boundary manifest.
+
+    The assembly DRC deck hard-raises when an ixn_methods entry names a die
+    instance the ``<gds-stem>.boundaries.json`` manifest does not declare. Keep
+    only dies present in that manifest, and drop a method whose dies all
+    disappear (the schema requires ``dies`` minItems 1; the assembly-global
+    adapter still covers it). When the manifest is missing/unreadable the
+    methods are returned unchanged (best-effort, matching prior behaviour).
+    """
+    import json
+
+    if not methods:
+        return methods
+    manifest_path = os.path.join(
+        os.path.dirname(gds_path) or ".",
+        Path(gds_path).stem + ".boundaries.json",
+    )
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            boundaries = json.load(fh).get("boundaries")
+    except (OSError, ValueError):
+        return methods
+    if not isinstance(boundaries, list):
+        return methods
+    instances = {b.get("instance") for b in boundaries
+                 if isinstance(b, dict) and b.get("instance")}
+
+    filtered: Dict[str, dict] = {}
+    for mid, entry in methods.items():
+        dies = [d for d in entry.get("dies", []) if d in instances]
+        if dies:
+            filtered[mid] = {**entry, "dies": dies}
+    return filtered
 
 
 def available_connection_types(interconnect_root: str = "",
@@ -681,8 +726,9 @@ def run_export(board, options, plugin_dir,
 
         chiplet_final = os.path.join(options.output_dir,
                                      "%s.chiplet" % board_name)
-        if options.emit_chiplet:
-            shutil.copy2(chiplet_intermediate, chiplet_final)
+        # Staged into the output dir only AFTER validate_interconnect_ids
+        # passes (below), so a validation failure never leaves a stale,
+        # non-re-anchored .chiplet behind.
 
         # Auto-extract io_pads from the board so hyp_to_gds renders the pad
         # geometry (and the interposer GDS bbox includes them). A non-empty
@@ -732,6 +778,13 @@ def run_export(board, options, plugin_dir,
         # Unknown per-die method ids fail the export here (manifest is the
         # source of truth) instead of degrading later in the worker or DRC.
         validate_interconnect_ids(die_methods=effective_die_conns.values())
+
+        # All pre-worker validation passed: stage the intermediate into the
+        # output dir now (hyp_to_gds --update-chiplet-file rewrites it in
+        # place). Deferred from above so a validation failure leaves no
+        # partial artifact.
+        if options.emit_chiplet:
+            shutil.copy2(chiplet_intermediate, chiplet_final)
 
         effective_options = dataclasses.replace(
             options, io_pads_json=effective_io_pads,
@@ -802,13 +855,24 @@ def run_export(board, options, plugin_dir,
                 _log("Assembly DRC skipped: %s" % exc)
                 adk_runner = ""
             if adk_runner:
+                # The DRC's interposer/interconnect adapters and per-method IXN
+                # scoping come from the .chiplet's declared fields. chiplet_final
+                # exists only when emit_chiplet is set; otherwise read the
+                # intermediate (still in tmpdir, carrying the same adapters and
+                # per-die connections) so the DRC honours the design's real
+                # adapters instead of silently defaulting to intm4tm2.
+                chiplet_for_drc = (
+                    chiplet_final
+                    if options.emit_chiplet and os.path.exists(chiplet_final)
+                    else chiplet_intermediate
+                )
                 effective_adapter = (
                     options.interposer_adapter
-                    or load_interposer_adapter(chiplet_final)
+                    or load_interposer_adapter(chiplet_for_drc)
                 )
                 effective_interconnect = (
                     options.interconnect_adapter
-                    or load_interconnect_adapter(chiplet_final)
+                    or load_interconnect_adapter(chiplet_for_drc)
                 )
                 # Per-method IXN refinement: derive {method -> dies} from the
                 # .chiplet's per-die connections + the interconnect PDK
@@ -818,12 +882,16 @@ def run_export(board, options, plugin_dir,
                 ixn_methods_sidecar = ""
                 try:
                     derived_methods = derive_interconnect_methods(
-                        chiplet_final,
+                        chiplet_for_drc,
                         interconnect_root=options.interconnect_pdk_root,
                         board=board,
                     )
+                    # Drop dies the boundary manifest does not declare, or the
+                    # assembly DRC deck hard-raises on the sidecar.
+                    derived_methods = _intersect_methods_with_manifest(
+                        derived_methods, complete_gds_abs)
                     ixn_methods_sidecar = write_ixn_methods_sidecar(
-                        derived_methods, complete_gds_abs, chiplet_final,
+                        derived_methods, complete_gds_abs, chiplet_for_drc,
                     )
                     if ixn_methods_sidecar:
                         _log("Interconnect methods sidecar: %s (%s)" % (
