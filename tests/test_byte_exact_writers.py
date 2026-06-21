@@ -254,6 +254,34 @@ def test_chiplet_byte_exact_hostile_names(tmp_path, chiplet_board_path):
     assert die["layout"] == hostile_gds, "hostile GDS path did not round-trip"
 
 
+@pytest.mark.parametrize("boundary_ref", ["U1\n", "on", "-x"])
+def test_chiplet_byte_exact_bare_boundary(tmp_path, chiplet_board_path,
+                                          boundary_ref):
+    """The bare-vs-quoted classifier must agree on both producers at the
+    boundary, where the two escapers are most likely to diverge.
+
+    A reference ending in a newline previously diverged: the Python `$` regex
+    emitted it bare (with a raw newline) while the C++ byte loop quoted it.
+    Reserved words ('on') and a leading non-bare char ('-x') exercise the rest.
+    """
+    yaml = pytest.importorskip("yaml")
+    cpp_path = tmp_path / "cpp_bnd.chiplet"
+    py_path = tmp_path / "py_bnd.chiplet"
+
+    def prep():
+        board = pcbnew.LoadBoard(chiplet_board_path)
+        _add_die_footprint(board, boundary_ref, "sg13g2.lyp", "x.gds", 1.0, 1.0)
+        return board
+
+    assert pcbnew.ExportBoardToChipletFile(prep(), str(cpp_path)) is True
+    assert write_chiplet(prep(), str(py_path)) is True
+    _assert_byte_exact("chiplet bare-boundary %r" % boundary_ref,
+                       cpp_path, py_path)
+    doc = yaml.safe_load(py_path.read_text(encoding="utf-8"))
+    assert any(c.get("id") == boundary_ref for c in doc["components"]), \
+        "boundary ref %r did not round-trip" % boundary_ref
+
+
 def test_hyperlynx_byte_exact_inner_copper(tmp_path, hyperlynx_board_path):
     """Inner-copper PADSTACK ordering stays byte-identical to the C++ exporter.
 

@@ -14,8 +14,13 @@ byte-identical (tests/test_byte_exact_writers.py), so keep both ends in sync.
 import re
 
 # A value safe to emit as a bare (unquoted) YAML scalar: a plain token whose
-# first char is alnum/underscore, that is not a reserved word.
-_BARE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./+-]*$")
+# first char is alnum/underscore, that is not a reserved word. The end anchor
+# is \Z, not $: Python's $ also matches just before a trailing newline, which
+# would let a value ending in '\n' slip through bare (a raw newline injected
+# into the YAML) and diverge from the C++ isSafeBareScalar byte loop, which
+# rejects the newline. \Z matches only the true end of string, keeping the two
+# producers byte-identical.
+_BARE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./+-]*\Z")
 _RESERVED = {"true", "false", "yes", "no", "on", "off",
              "null", "none", "y", "n", "~"}
 
