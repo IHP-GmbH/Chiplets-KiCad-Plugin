@@ -57,16 +57,12 @@ def _candidate_chiplet_boards():
     project_root = PLUGIN_ROOT.parent
     candidates = [
         os.environ.get("CHIPLET_WRITER_BOARD"),
-        # adk-tools image / meta-repo layout (examples/ ships the demo)
+        # adk-tools image / meta-repo layout: the demo ships under
+        # examples/ split into a kicad/ source dir and an outputs/ dir.
         str(project_root / "examples"
             / "interposer_wire_bonding_demo"
+            / "kicad"
             / "interposer_wire_bonding_demo.kicad_pcb"),
-        str(project_root / "kicad_designs"
-            / "interposer_wire_bonding_demo"
-            / "interposer_wire_bonding_demo.kicad_pcb"),
-        str(project_root / "kicad_designs"
-            / "kicad_interposer_hyperlynx_to_gds"
-            / "chiplet_demo.kicad_pcb"),
     ]
     return [c for c in candidates if c]
 

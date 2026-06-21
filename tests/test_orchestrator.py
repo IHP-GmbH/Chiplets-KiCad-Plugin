@@ -29,7 +29,7 @@ from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
     available_connection_types, discover_dependency_root,
     discover_interposer_lyp,
     derive_interconnect_methods, write_ixn_methods_sidecar,
-    _read_component_connections,
+    _read_component_connections, _open_run_log,
 )
 
 # Sibling-dependent tests: the walk and the manifest listing assert against
@@ -680,3 +680,63 @@ def test_build_worker_env_does_not_mutate_os_environ():
     env = build_worker_env(opts)
     assert env["INTERPOSER_PDK_ROOT"] == "/z/interposer"
     assert dict(os.environ) == before
+
+
+# ---------------------------------------------------------------------------
+# Per-run log file (run_export tees every log line here; the end-to-end
+# suites exercise the tee, these cover the pure file-opening helper)
+# ---------------------------------------------------------------------------
+
+def test_open_run_log_creates_timestamped_file(tmp_path):
+    out = tmp_path / "outputs"
+    out.mkdir()
+    fh, path = _open_run_log(str(out), "demo_board")
+    try:
+        assert fh is not None
+        assert path
+        p = Path(path)
+        # Lands in <output_dir>/logs/ as <YYYYmmdd_HHMMSS>_<board>.log
+        assert p.parent == out / "logs"
+        assert p.name.endswith("_demo_board.log")
+        stamp = p.name[: -len("_demo_board.log")]
+        assert len(stamp) == len("YYYYmmdd_HHMMSS")
+        assert stamp[8] == "_" and stamp.replace("_", "").isdigit()
+        # The handle is writable and flushes to the file on disk.
+        fh.write("hello\n")
+        fh.flush()
+        assert "hello" in p.read_text(encoding="utf-8")
+    finally:
+        if fh is not None:
+            fh.close()
+
+
+def test_open_run_log_best_effort_when_dir_unusable(tmp_path):
+    # output_dir is a regular file, so logs/ cannot be created; the helper
+    # degrades to (None, "") instead of raising (export must not abort).
+    bad = tmp_path / "a_file"
+    bad.write_text("x", encoding="utf-8")
+    fh, path = _open_run_log(str(bad), "demo")
+    assert fh is None
+    assert path == ""
+
+
+def test_open_run_log_no_clobber_same_second(tmp_path):
+    # Two back-to-back runs of the same board (same wall-clock second) must
+    # land in distinct files; neither truncates the other's record.
+    out = tmp_path / "outputs"
+    out.mkdir()
+    fh1, p1 = _open_run_log(str(out), "demo")
+    fh2, p2 = _open_run_log(str(out), "demo")
+    try:
+        assert fh1 is not None and fh2 is not None
+        assert p1 != p2
+        fh1.write("first\n")
+        fh1.flush()
+        fh2.write("second\n")
+        fh2.flush()
+        assert Path(p1).read_text(encoding="utf-8") == "first\n"
+        assert Path(p2).read_text(encoding="utf-8") == "second\n"
+    finally:
+        for fh in (fh1, fh2):
+            if fh is not None:
+                fh.close()

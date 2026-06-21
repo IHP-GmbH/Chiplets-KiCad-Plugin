@@ -17,6 +17,7 @@ Public surface:
                     lazily so the test suite never reaches them.
 """
 
+import datetime
 import os
 import shutil
 import tempfile
@@ -662,6 +663,39 @@ def build_cli_args(hyp_to_gds_path: str,
     return args
 
 
+def _open_run_log(output_dir, board_name):
+    """Open a timestamped, per-run log file under ``<output_dir>/logs/``.
+
+    Returns ``(file_handle, path)`` on success, or ``(None, "")`` if the
+    directory or file cannot be created. The caller tees every export log
+    line into the handle so each run leaves a permanent record next to its
+    products (the dialog's log widget is cleared on every run). Best-effort
+    by contract: a log-file failure must never abort the export.
+
+    Two runs of the same board within the same second never clobber each
+    other: the file is opened exclusively and a ``_1``, ``_2`` ... counter
+    is appended on collision (the common no-collision case keeps the clean
+    ``<timestamp>_<board>.log`` name).
+    """
+    try:
+        logs_dir = os.path.join(output_dir, "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = "%s_%s" % (stamp, board_name)
+        for suffix in [""] + ["_%d" % i for i in range(1, 100)]:
+            path = os.path.join(logs_dir, "%s%s.log" % (base, suffix))
+            try:
+                return open(path, "x", encoding="utf-8"), path
+            except FileExistsError:
+                continue
+        # Pathological: 100 same-second collisions. Fall back to a
+        # truncating open rather than failing the export's logging.
+        path = os.path.join(logs_dir, "%s.log" % base)
+        return open(path, "w", encoding="utf-8"), path
+    except OSError:
+        return None, ""
+
+
 def run_export(board, options, plugin_dir,
                on_log=None, cancel_event=None) -> ExportResult:
     """End-to-end export driven by the dialog's Run button.
@@ -696,13 +730,6 @@ def run_export(board, options, plugin_dir,
     from ..writers.connection_stacks import validate_interconnect_ids
     from ..writers.hyperlynx_writer import write_hyperlynx
 
-    def _log(line):
-        if on_log is not None:
-            try:
-                on_log(line)
-            except Exception:
-                pass
-
     if not options.output_dir:
         return ExportResult(error="Output directory is empty.")
     try:
@@ -728,9 +755,29 @@ def run_export(board, options, plugin_dir,
     except HypToGdsNotFoundError as exc:
         return ExportResult(error=str(exc))
 
+    log_fh = None
+    log_path = ""
+
+    def _log(line):
+        # Tee to the per-run log file (best-effort) and the dialog callback.
+        if log_fh is not None:
+            try:
+                log_fh.write(line + "\n")
+                log_fh.flush()
+            except Exception:
+                pass
+        if on_log is not None:
+            try:
+                on_log(line)
+            except Exception:
+                pass
+
     tmpdir = tempfile.mkdtemp(prefix="chiplet_export_")
-    _log("Workspace: %s" % tmpdir)
     try:
+        log_fh, log_path = _open_run_log(options.output_dir, board_name)
+        if log_path:
+            _log("Run log: %s" % log_path)
+        _log("Workspace: %s" % tmpdir)
         hyp_path = os.path.join(tmpdir, "%s.hyp" % board_name)
         chiplet_intermediate = os.path.join(tmpdir, "%s.chiplet" % board_name)
 
@@ -998,3 +1045,8 @@ def run_export(board, options, plugin_dir,
         )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+        if log_fh is not None:
+            try:
+                log_fh.close()
+            except Exception:
+                pass
