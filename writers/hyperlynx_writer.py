@@ -49,6 +49,25 @@ def _iu_to_hyp(iu):
     return iu / (pcbnew.PCB_IU_PER_MM * 1000.0)
 
 
+def _sanitize_hyp_token(value):
+    """Neutralize characters that would break a single-line, double-quote
+    delimited HyperLynx token built from third-party data (a footprint
+    reference, a renamed layer, or the GDS_FILE field).
+
+    An embedded double-quote terminates the field early -- the consumer regex
+    GDS_FILE="([^"]+)" would then silently drop the whole device -- and a
+    newline splits the record. Mirrors sanitizeHypToken() in the C++ exporter
+    (export_hyperlynx.cpp); keep both in sync.
+    """
+    return (
+        str(value)
+        .replace('"', "'")
+        .replace("\n", " ")
+        .replace("\r", " ")
+        .replace("\t", " ")
+    )
+
+
 class _PadStack:
     """Pad/via shape descriptor with equality semantics for dedup.
 
@@ -292,14 +311,19 @@ class _HyperlynxExporter:
                     1,
                     '(? REF="%s" L="%s" X=%.9f Y=%.9f R=%.2f '
                     'GDS_FILE="%s")\n' % (
-                        ref, layer_name, x, y, rot, gds_path,
+                        _sanitize_hyp_token(ref),
+                        _sanitize_hyp_token(layer_name),
+                        x, y, rot,
+                        _sanitize_hyp_token(gds_path),
                     ),
                 )
             else:
                 self._print(
                     1,
                     '(? REF="%s" L="%s" X=%.9f Y=%.9f R=%.2f)\n' % (
-                        ref, layer_name, x, y, rot,
+                        _sanitize_hyp_token(ref),
+                        _sanitize_hyp_token(layer_name),
+                        x, y, rot,
                     ),
                 )
         self._print(0, "}\n\n")
