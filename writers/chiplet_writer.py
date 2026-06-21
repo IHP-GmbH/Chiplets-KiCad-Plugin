@@ -373,6 +373,15 @@ def write_chiplet(board, output_path):
         if lyp_file:
             tech_id = os.path.splitext(os.path.basename(lyp_file))[0]
             tech_id = tech_id.replace(" ", "_").replace(".", "_")
+            # A die LYP whose basename collides with the interposer's hardcoded
+            # technology id ('intm4tm2') but points at a different file would
+            # silently clobber the interposer entry. Disambiguate the die with
+            # its reference so the interposer keeps its own layer_properties.
+            # (Two dies that share a basename keep dedup'ing to one entry.)
+            if (tech_id == interposer_tech_id
+                    and interposer_tech_id in tech_map
+                    and tech_map[interposer_tech_id] != lyp_file):
+                tech_id = tech_id + "_" + footprint.GetReference()
             tech_map[tech_id] = lyp_file
             component_techs[id(footprint)] = tech_id
 
@@ -382,6 +391,12 @@ def write_chiplet(board, output_path):
 
     board_filename = board.GetFileName()
     board_name = os.path.splitext(os.path.basename(board_filename))[0]
+    if not board_name:
+        # Unsaved / in-memory board: fall back to the output basename, then a
+        # literal, so the reader's non-empty assembly.name rule is satisfied.
+        board_name = os.path.splitext(os.path.basename(output_path))[0]
+    if not board_name:
+        board_name = "assembly"
 
     with open(output_path, "w", encoding="utf-8") as f:
         # Header
