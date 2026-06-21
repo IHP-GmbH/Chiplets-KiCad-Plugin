@@ -358,7 +358,19 @@ class ChipletExportDialog(wx.Dialog):
             try:
                 board_file = self._board.GetFileName()
                 if board_file:
-                    return str(Path(board_file).parent)
+                    board_dir = Path(board_file).parent
+                    # Project-template layout: a board under a kicad/ source
+                    # dir that has a sibling outputs/ dir (the adk-new-project
+                    # scaffold always creates both) defaults its export to
+                    # that outputs/, so the split works with no manual path
+                    # edit. Requiring the sibling outputs/ to exist keeps a
+                    # coincidentally-named kicad/ folder on the historic
+                    # behavior (write next to the board); the name match is
+                    # case-insensitive for hand-placed projects.
+                    outputs_dir = board_dir.parent / "outputs"
+                    if board_dir.name.lower() == "kicad" and outputs_dir.is_dir():
+                        return str(outputs_dir)
+                    return str(board_dir)
             except Exception:
                 pass
         return str(Path.home())

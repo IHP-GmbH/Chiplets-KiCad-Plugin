@@ -111,8 +111,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--board",
-        default=str(PLUGIN_ROOT.parent / "kicad_designs"
+        default=str(PLUGIN_ROOT.parent / "examples"
                     / "interposer_wire_bonding_demo"
+                    / "kicad"
                     / "interposer_wire_bonding_demo.kicad_pcb"),
         help="Path to the wire-bond demo .kicad_pcb",
     )

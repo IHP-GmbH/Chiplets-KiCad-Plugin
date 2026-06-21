@@ -227,8 +227,8 @@ chiplet_kicad_plugin/
 │   ├── discovery.py           Locate worker Python + hyp_to_gds.py
 │   ├── orchestrator.py        ExportOptions, build_cli_args, run_export
 │   └── runner.py              Async subprocess wrapper
-├── hyp_to_gds.py              GDS pipeline worker (vendored from
-│                              kicad_designs/kicad_interposer_hyperlynx_to_gds
+├── hyp_to_gds.py              GDS pipeline worker (vendored from the
+│                              kicad_interposer_hyperlynx_to_gds project
 │                              and extended with plugin-specific flags:
 │                              --annotate-boundaries, --die-connections,
 │                              manifest-sourced --connection-type, the

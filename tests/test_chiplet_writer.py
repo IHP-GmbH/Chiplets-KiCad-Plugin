@@ -43,16 +43,12 @@ def _candidate_boards():
         str(project_root / "interposer_wire_bonding_demo" / "test.kicad_pcb"),
         str(project_root / "interposer_wire_bonding_demo"
             / "interposer_wire_bonding_demo.kicad_pcb"),
-        # adk-tools image / meta-repo layout (examples/ ships the demo)
+        # adk-tools image / meta-repo layout: the demo ships under
+        # examples/ split into a kicad/ source dir and an outputs/ dir.
         str(project_root / "examples"
             / "interposer_wire_bonding_demo"
+            / "kicad"
             / "interposer_wire_bonding_demo.kicad_pcb"),
-        str(project_root / "kicad_designs"
-            / "interposer_wire_bonding_demo"
-            / "interposer_wire_bonding_demo.kicad_pcb"),
-        str(project_root / "kicad_designs"
-            / "kicad_interposer_hyperlynx_to_gds"
-            / "chiplet_demo.kicad_pcb"),
     ])
     return [c for c in candidates if c]
 

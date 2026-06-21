@@ -111,11 +111,14 @@ Round-trip regression net (driver script + chiplet-studio gtests):
 ```bash
 # 1. Regenerate the wire-bond demo .chiplet via the Python pipeline.
 #    Reuse the same LD_LIBRARY_PATH / PYTHONPATH as the full-suite block above.
+#    The demo board ships a closed Edge.Cuts outline, so the full end-to-end
+#    path (Hyperlynx writer -> hyp_to_gds.py) runs directly; --use-existing-hyp
+#    stays available for boards still authored without an outline.
 docker run --rm -v $ROOT:$ROOT -e LD_LIBRARY_PATH=... -e PYTHONPATH=... \
   kicad-builder \
   $ROOT/chiplet_kicad_plugin/.venv/bin/python \
   $ROOT/chiplet_kicad_plugin/tests/regenerate_wirebond_demo.py \
-      --use-existing-hyp $ROOT/kicad_designs/interposer_wire_bonding_demo/interposer_wire_bonding_demo.hyp \
+      --board $ROOT/adk-tools/examples/interposer_wire_bonding_demo/kicad/interposer_wire_bonding_demo.kicad_pcb \
       --connection cupillar_opt1 \
       --output-dir $ROOT/_tmp_regen
 
@@ -124,9 +127,10 @@ cd $ROOT/chiplet-studio/build && ./tests/chiplet_tests \
     --gtest_filter='CoordFrameContract*'
 ```
 
-`regenerate_wirebond_demo.py` defaults `--board` to the
-`kicad_designs/interposer_wire_bonding_demo` board and also accepts
-`--lyp`, `--io-pads`, `--connection`, and `--require-drc`.
+`regenerate_wirebond_demo.py` defaults `--board` to the bundled
+`examples/interposer_wire_bonding_demo/kicad/` board (resolved next to the
+plugin) and also accepts `--lyp`, `--io-pads`, `--connection`, and
+`--require-drc`.
 
 Optional fixture override (point at any board, e.g. a chiplet
 project under development):
