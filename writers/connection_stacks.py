@@ -17,6 +17,8 @@ import os
 import sys
 from pathlib import Path
 
+from ._yaml import escape_yaml_dq
+
 
 def _manifest_reader():
     """Import and return the interconnect_pdk manifest reader module.
@@ -91,7 +93,7 @@ def emit_interconnect_block(adapter):
     """
     if not adapter:
         return ""
-    return 'interconnect:\n  adapter: "%s"\n\n' % adapter
+    return 'interconnect:\n  adapter: "%s"\n\n' % escape_yaml_dq(adapter)
 
 
 def validate_interconnect_ids(adapter=None, die_methods=None):

@@ -21,6 +21,7 @@ from .connection_stacks import (
     emit_interconnect_block,
     validate_interconnect_ids,
 )
+from ._yaml import escape_yaml_dq, yaml_scalar
 
 
 def _iu_to_um(iu):
@@ -346,6 +347,17 @@ def write_chiplet(board, output_path):
 
         io_class = _field_text(footprint, "IO_CLASS")
         if io_class:
+            # The reader only accepts these classes (IOPad.cpp
+            # string_to_io_class throws otherwise) and the finalizer does not
+            # normalize them on the no-sidecar path, so a typo would ship a
+            # .chiplet that fails at load. Fail loudly at export, mirroring the
+            # C++ exporter.
+            if io_class not in ("wire_bond", "flipped_bump", "tsv_bump"):
+                raise ValueError(
+                    "Footprint %s has an unrecognized IO_CLASS '%s'; expected "
+                    "wire_bond, flipped_bump, or tsv_bump."
+                    % (footprint.GetReference(), io_class)
+                )
             io_pads.append(footprint)
             continue
 
@@ -385,7 +397,7 @@ def write_chiplet(board, output_path):
 
         # Assembly
         f.write("assembly:\n")
-        f.write('  name: "%s"\n' % board_name)
+        f.write('  name: "%s"\n' % escape_yaml_dq(board_name))
         f.write('  units: "um"\n')
         f.write("\n")
 
@@ -398,7 +410,7 @@ def write_chiplet(board, output_path):
             or "intm4tm2"
         )
         f.write("interposer:\n")
-        f.write('  adapter: "%s"\n' % interposer_adapter)
+        f.write('  adapter: "%s"\n' % escape_yaml_dq(interposer_adapter))
         f.write("\n")
 
         # Interconnect adapter (optional second axis); emitted only when
@@ -410,9 +422,9 @@ def write_chiplet(board, output_path):
         # insertion order and break byte-exact parity for multi-PDK assemblies.
         f.write("technologies:\n")
         for tech_id, lyp_path in sorted(tech_map.items()):
-            f.write("  %s:\n" % tech_id)
+            f.write("  %s:\n" % yaml_scalar(tech_id))
             f.write('    description: "Imported from KiCad"\n')
-            f.write('    layer_properties: "%s"\n' % lyp_path)
+            f.write('    layer_properties: "%s"\n' % escape_yaml_dq(lyp_path))
             f.write("    dbu: 0.001\n")
             f.write("\n")
 
@@ -448,10 +460,10 @@ def write_chiplet(board, output_path):
         # See coord_frame_contract.md section 2.
         f.write("    anchor: bbox_center\n")
         if interposer_tech_id in tech_map:
-            f.write("    technology: %s\n" % interposer_tech_id)
+            f.write("    technology: %s\n" % yaml_scalar(interposer_tech_id))
 
         gds_name = "%s.gds" % board_name
-        f.write('    layout: "%s"\n' % gds_name)
+        f.write('    layout: "%s"\n' % escape_yaml_dq(gds_name))
         f.write('    top_cell: "INTERPOSER"\n')
         f.write("    dimensions:\n")
         f.write("      width: %.6f\n" % width_um)
@@ -498,9 +510,9 @@ def write_chiplet(board, output_path):
                 x_um = _iu_to_um(pos.x - interposer_x_min)
                 y_um = _iu_to_um(interposer_y_max - pos.y)
 
-                f.write("      - id: %s\n" % ref)
-                f.write("        io_class: %s\n" % io_class)
-                f.write('        net: "%s"\n' % net_name)
+                f.write("      - id: %s\n" % yaml_scalar(ref))
+                f.write("        io_class: %s\n" % yaml_scalar(io_class))
+                f.write('        net: "%s"\n' % escape_yaml_dq(net_name))
                 f.write(
                     "        position: { x: %.6f, y: %.6f }\n"
                     % (x_um, y_um)
@@ -519,20 +531,20 @@ def write_chiplet(board, output_path):
             orient = _field_text(footprint, "ORIENTATION")
             is_flip_chip = (orient == "flip_chip")
 
-            f.write("  - id: %s\n" % ref)
+            f.write("  - id: %s\n" % yaml_scalar(ref))
             f.write("    type: die\n")
             # See coord_frame_contract.md sections 2 and 4.4: dies use
             # gds_origin as the mesh anchor.
             f.write("    anchor: gds_origin\n")
 
             if id(footprint) in component_techs:
-                f.write("    technology: %s\n" % component_techs[id(footprint)])
+                f.write("    technology: %s\n" % yaml_scalar(component_techs[id(footprint)]))
 
             if is_flip_chip:
                 f.write("    connection: cupillar_opt2\n")
 
             if gds:
-                f.write('    layout: "%s"\n' % gds)
+                f.write('    layout: "%s"\n' % escape_yaml_dq(gds))
 
             if is_flip_chip:
                 f.write("    orientation: flip_chip\n")
