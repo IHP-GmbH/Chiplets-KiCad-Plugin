@@ -223,6 +223,37 @@ def test_chiplet_byte_exact_multi_tech(tmp_path, chiplet_board_path):
     _assert_byte_exact("chiplet multi-tech", cpp_path, py_path)
 
 
+def test_chiplet_byte_exact_hostile_names(tmp_path, chiplet_board_path):
+    """Hostile footprint names/fields are escaped identically by both writers.
+
+    Reference designators and field text (GDS_FILE/LYP_FILE/net) are
+    third-party data and can carry YAML metacharacters. A die is added whose
+    reference and GDS_FILE contain a double-quote, a colon and a backslash;
+    both writers must (a) stay byte-identical and (b) emit valid YAML that
+    round-trips the hostile strings, instead of a broken/injectable file.
+    """
+    yaml = pytest.importorskip("yaml")
+    cpp_path = tmp_path / "cpp_hostile.chiplet"
+    py_path = tmp_path / "py_hostile.chiplet"
+
+    hostile_ref = 'U"X: 1'
+    hostile_gds = 'C:\\pdk\\a"b.gds'
+
+    def prep():
+        board = pcbnew.LoadBoard(chiplet_board_path)
+        _add_die_footprint(board, hostile_ref, "sg13g2.lyp", hostile_gds,
+                           1.0, 1.0)
+        return board
+
+    assert pcbnew.ExportBoardToChipletFile(prep(), str(cpp_path)) is True
+    assert write_chiplet(prep(), str(py_path)) is True
+    _assert_byte_exact("chiplet hostile names", cpp_path, py_path)
+
+    doc = yaml.safe_load(py_path.read_text(encoding="utf-8"))
+    die = next(c for c in doc["components"] if c.get("id") == hostile_ref)
+    assert die["layout"] == hostile_gds, "hostile GDS path did not round-trip"
+
+
 def test_hyperlynx_byte_exact_inner_copper(tmp_path, hyperlynx_board_path):
     """Inner-copper PADSTACK ordering stays byte-identical to the C++ exporter.
 
