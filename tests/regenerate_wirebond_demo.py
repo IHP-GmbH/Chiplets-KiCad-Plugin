@@ -39,7 +39,7 @@ from chiplet_kicad_plugin.pipeline.discovery import (  # noqa: E402
     find_worker_python, find_hyp_to_gds,
 )
 from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
-    ExportOptions, run_export, describe_assembly_drc,
+    ExportOptions, run_export, describe_assembly_drc, layout_dir, layout_path,
 )
 from chiplet_kicad_plugin.writers.chiplet_writer import (  # noqa: E402
     write_chiplet,
@@ -58,12 +58,12 @@ def _run_with_existing_hyp(board_path, hyp_path, lyp_path,
     board_name = Path(board_path).stem
     output_dir = str(Path(output_dir).absolute())
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    # GDS layouts go under layout/; the .chiplet stays at the output-dir root.
+    Path(layout_dir(output_dir)).mkdir(parents=True, exist_ok=True)
 
     chiplet_path = os.path.join(output_dir, "%s.chiplet" % board_name)
-    interposer_gds = os.path.join(
-        output_dir, "%s_interposer.gds" % board_name,
-    )
-    complete_gds = os.path.join(output_dir, "%s_complete.gds" % board_name)
+    interposer_gds = layout_path(output_dir, "%s_interposer.gds" % board_name)
+    complete_gds = layout_path(output_dir, "%s_complete.gds" % board_name)
     work_hyp = os.path.join(output_dir, "%s.hyp" % board_name)
 
     print("Stage 1: write intermediate .chiplet (Python writer)")
