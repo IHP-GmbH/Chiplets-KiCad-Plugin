@@ -598,6 +598,28 @@ def _reject_delimiter_chars(mapping: Dict[str, str], what: str,
                     % (what, role, token))
 
 
+# The GDS layouts and their derived sidecars (the .boundaries.json the worker
+# writes next to each GDS, the .ixn_methods.json the assembly DRC reads, and the
+# cu-pillar DRC json the worker drops next to the interposer GDS) live in a
+# `layout/` subdir of the output directory. The .chiplet stays at the output-dir
+# root and references the interposer GDS by a `layout/<file>` relative path:
+# hyp_to_gds --update-chiplet-file emits it automatically via relative_to(), and
+# Chiplet Studio's loader resolves it against the .chiplet's own directory.
+# Routing both the writer argv and the DRC input through the same helper keeps
+# those two paths identical so they can never drift.
+LAYOUT_SUBDIR = "layout"
+
+
+def layout_dir(output_dir: str) -> str:
+    """Subdir of ``output_dir`` holding the GDS layouts and their sidecars."""
+    return os.path.join(output_dir, LAYOUT_SUBDIR)
+
+
+def layout_path(output_dir: str, filename: str) -> str:
+    """Path to ``filename`` inside the output dir's ``layout/`` subdir."""
+    return os.path.join(layout_dir(output_dir), filename)
+
+
 def build_cli_args(hyp_to_gds_path: str,
                    hyp_path: str,
                    board_name: str,
@@ -605,14 +627,15 @@ def build_cli_args(hyp_to_gds_path: str,
     """Construct argv for the hyp_to_gds.py subprocess.
 
     The list starts with the script path and the positional hyp input,
-    then appends flags driven by `options`. Output paths are absolute
-    (rooted at ``options.output_dir``).
+    then appends flags driven by `options`. Output paths are absolute: the
+    GDS layouts go under ``options.output_dir``'s ``layout/`` subdir, the
+    .chiplet stays at the output-dir root.
     """
     out_dir = options.output_dir
     args: List[str] = [hyp_to_gds_path, hyp_path]
 
     if options.emit_interposer_gds:
-        args += ["-o", os.path.join(out_dir, "%s_interposer.gds" % board_name)]
+        args += ["-o", layout_path(out_dir, "%s_interposer.gds" % board_name)]
 
     if options.top_cell:
         args += ["-c", options.top_cell]
@@ -624,7 +647,7 @@ def build_cli_args(hyp_to_gds_path: str,
         args += [
             "--with-chiplets",
             "--complete-output",
-            os.path.join(out_dir, "%s_complete.gds" % board_name),
+            layout_path(out_dir, "%s_complete.gds" % board_name),
         ]
 
     # Viewer-only boundary annotation (no DRC rule reads the layer). Harmless
@@ -700,26 +723,29 @@ def _write_outputs_manifest(output_dir, board_name):
     """Write a human-readable MANIFEST.md describing the export products.
 
     Best-effort: a manifest write failure must never affect the export. The
-    layout cluster (.chiplet + GDS + boundaries sidecars) resolves by sibling
-    filename within this directory and must stay flat; the DRC reports live
-    under reports/. Each entry is tagged present/absent against what this run
-    actually produced.
+    .chiplet sits at the output-dir root; the GDS layouts and their sidecars
+    live under layout/ (the .chiplet references the interposer GDS by a
+    ``layout/<file>`` path, and the assembly DRC discovers each sidecar next
+    to its GDS); the DRC reports live under reports/. Each entry is tagged
+    present/absent against what this run actually produced.
     """
     def present(rel):
         return os.path.exists(os.path.join(output_dir, rel))
 
-    cluster = [
+    root = [
         ("%s.chiplet" % board_name,
          "assembly description; open this in Chiplet Studio"),
-        ("%s_interposer.gds" % board_name,
-         "interposer layout (referenced by the .chiplet by bare filename)"),
-        ("%s_interposer.boundaries.json" % board_name,
+    ]
+    layout = [
+        ("layout/%s_interposer.gds" % board_name,
+         "interposer layout (referenced by the .chiplet)"),
+        ("layout/%s_interposer.boundaries.json" % board_name,
          "chiplet-boundary manifest for the interposer GDS"),
-        ("%s_complete.gds" % board_name,
+        ("layout/%s_complete.gds" % board_name,
          "full assembly layout (interposer + dies)"),
-        ("%s_complete.boundaries.json" % board_name,
+        ("layout/%s_complete.boundaries.json" % board_name,
          "chiplet-boundary manifest for the complete GDS"),
-        ("%s_complete.ixn_methods.json" % board_name,
+        ("layout/%s_complete.ixn_methods.json" % board_name,
          "per-method interconnect scoping sidecar for the assembly DRC"),
     ]
     reports = [
@@ -728,21 +754,27 @@ def _write_outputs_manifest(output_dir, board_name):
         ("reports/%s_cupillar_drc.json" % board_name,
          "cu-pillar connection DRC summary"),
     ]
+
+    def section(items):
+        return ["- [%s] `%s` - %s"
+                % ("x" if present(rel) else " ", rel, role)
+                for rel, role in items]
+
     lines = ["# Output products", ""]
     lines.append("Generated by the Chiplet Studio export pipeline for "
                  "`%s`." % board_name)
-    lines += ["", "## Layout cluster (keep together in this directory)", ""]
-    lines.append("These files reference each other by bare filename; Chiplet "
-                 "Studio and the assembly DRC resolve them as siblings, so do "
-                 "not move them into subfolders.")
+    lines += ["", "## Root", ""]
+    lines += section(root)
+    lines += ["", "## layout/ (GDS layouts and their sidecars)", ""]
+    lines.append("The .chiplet references the interposer GDS by a "
+                 "`layout/<file>` path, resolved against the .chiplet's own "
+                 "directory. The boundary and interconnect-method sidecars "
+                 "travel with their GDS so the assembly DRC finds them as "
+                 "siblings.")
     lines.append("")
-    for rel, role in cluster:
-        lines.append("- [%s] `%s` - %s"
-                     % ("x" if present(rel) else " ", rel, role))
+    lines += section(layout)
     lines += ["", "## reports/ (DRC output; safe to archive or delete)", ""]
-    for rel, role in reports:
-        lines.append("- [%s] `%s` - %s"
-                     % ("x" if present(rel) else " ", rel, role))
+    lines += section(reports)
     lines += ["", "## logs/", "", "Per-run export logs (git-ignored)."]
     try:
         with open(os.path.join(output_dir, "MANIFEST.md"), "w",
@@ -790,6 +822,11 @@ def run_export(board, options, plugin_dir,
         return ExportResult(error="Output directory is empty.")
     try:
         Path(options.output_dir).mkdir(parents=True, exist_ok=True)
+        # The worker (KLayout layout.write + the boundaries sidecar) does not
+        # create parent dirs, so the layout/ subdir must exist before it runs.
+        if options.emit_interposer_gds or options.emit_complete_gds:
+            Path(layout_dir(options.output_dir)).mkdir(
+                parents=True, exist_ok=True)
     except OSError as exc:
         return ExportResult(error="Cannot create output directory: %s" % exc)
 
@@ -968,13 +1005,13 @@ def run_export(board, options, plugin_dir,
                 hyp_kept = ""
 
         # The worker writes <board>_cupillar_drc.json next to the interposer
-        # GDS when a cupillar stack drives pillar generation. Surface it only
-        # if it was actually produced this run, and tuck it under reports/ so
-        # the output-dir root keeps just the layout cluster (.chiplet + GDS +
-        # boundaries sidecars, which resolve each other by sibling filename).
+        # GDS (now under layout/) when a cupillar stack drives pillar
+        # generation. Surface it only if it was actually produced this run,
+        # and tuck it under reports/ so the output-dir root keeps just the
+        # .chiplet and the MANIFEST.
         drc_report = ""
-        cupillar_flat = os.path.join(options.output_dir,
-                                     "%s_cupillar_drc.json" % board_name)
+        cupillar_flat = layout_path(options.output_dir,
+                                    "%s_cupillar_drc.json" % board_name)
         if os.path.exists(cupillar_flat):
             reports_dir = os.path.join(options.output_dir, "reports")
             os.makedirs(reports_dir, exist_ok=True)
@@ -996,7 +1033,7 @@ def run_export(board, options, plugin_dir,
         assembly_drc_exit = -1
         assembly_drc_report = ""
         drc_cancelled = False
-        complete_gds_abs = os.path.join(
+        complete_gds_abs = layout_path(
             options.output_dir, "%s_complete.gds" % board_name,
         )
         should_run_drc = (
@@ -1061,7 +1098,7 @@ def run_export(board, options, plugin_dir,
                     _log("Warning: per-method interconnect derivation "
                          "failed: %s" % exc)
                 # DRC report + its scratch run dir live under reports/ so they
-                # do not clutter the layout cluster at the output-dir root. The
+                # stay out of the layout/ subdir and the output-dir root. The
                 # report's parent must exist before KLayout writes it (run_drc
                 # only mkdirs its own run_dir), so create reports/ here.
                 reports_dir = os.path.join(options.output_dir, "reports")
@@ -1106,8 +1143,8 @@ def run_export(board, options, plugin_dir,
             hyp_path=hyp_kept,
             chiplet_path=(chiplet_final if options.emit_chiplet else ""),
             interposer_gds_path=(
-                os.path.join(options.output_dir,
-                             "%s_interposer.gds" % board_name)
+                layout_path(options.output_dir,
+                            "%s_interposer.gds" % board_name)
                 if options.emit_interposer_gds else ""
             ),
             complete_gds_path=(

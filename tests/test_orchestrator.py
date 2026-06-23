@@ -57,9 +57,10 @@ def test_defaults_emit_canonical_chiplet_and_interposer(tmp_path):
     assert args[0] == HYP_SCRIPT
     assert args[1] == HYP_INPUT
 
-    interposer = os.path.join(str(tmp_path), "demo_interposer.gds")
+    interposer = os.path.join(str(tmp_path), "layout", "demo_interposer.gds")
     assert "-o" in args and args[args.index("-o") + 1] == interposer
 
+    # The .chiplet stays at the output-dir root (not under layout/).
     chiplet = os.path.join(str(tmp_path), "demo.chiplet")
     upd = args.index("--update-chiplet-file")
     assert args[upd + 1] == chiplet
@@ -81,7 +82,7 @@ def test_complete_gds_toggle(tmp_path):
     opts.emit_complete_gds = True
     args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
     assert "--with-chiplets" in args
-    complete = os.path.join(str(tmp_path), "demo_complete.gds")
+    complete = os.path.join(str(tmp_path), "layout", "demo_complete.gds")
     assert args[args.index("--complete-output") + 1] == complete
 
 
