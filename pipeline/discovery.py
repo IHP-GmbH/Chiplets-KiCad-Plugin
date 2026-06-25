@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 Locate the worker Python interpreter and the vendored hyp_to_gds.py.
 

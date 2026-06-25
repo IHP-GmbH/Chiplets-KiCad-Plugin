@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Test bootstrap: make ``chiplet_kicad_plugin.*`` imports resolve no matter
 what the checkout directory is called.
 

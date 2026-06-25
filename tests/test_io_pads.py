@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Tests for the I/O pad support added to hyp_to_gds.GDSGenerator."""
 import json
 import sys

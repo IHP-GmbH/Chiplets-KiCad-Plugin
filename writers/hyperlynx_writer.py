@@ -1,9 +1,10 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Derivative work of kicad/pcbnew/exporters/export_hyperlynx.cpp,
 # Copyright (C) 2019 CERN and Copyright The KiCad Developers
-# (see AUTHORS.txt in upstream KiCad). Distributed under the GNU
-# General Public License version 2 or later.
+# (see AUTHORS.txt in upstream KiCad), originally licensed GNU GPL
+# version 2 or later. This derivative is redistributed under
+# GPL-3.0-or-later, as permitted by that "or later" clause.
 """
 Hyperlynx .hyp writer (metric / METERS variant).
 
