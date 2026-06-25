@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later
 """
 Host-side tests for hyp_to_gds connection-stack decoupling from the interconnect
 PDK manifest. hyp_to_gds has no pcbnew/wx dependency, so these run on host.

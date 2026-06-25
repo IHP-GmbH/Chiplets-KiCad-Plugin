@@ -35,10 +35,11 @@ coordinate frame the writers must honour.
 
 ## License
 
-GPL-2.0-or-later. See `LICENSE`. The Hyperlynx writer
+GPL-3.0-or-later. See `LICENSE`. The Hyperlynx writer
 (`writers/hyperlynx_writer.py`) is a derivative work of KiCad's
-`pcbnew/exporters/export_hyperlynx.cpp`, also GPL-2.0-or-later
-(Copyright (C) 2019 CERN and KiCad Developers).
+`pcbnew/exporters/export_hyperlynx.cpp` (Copyright (C) 2019 CERN and
+KiCad Developers), originally GPL-2.0-or-later and redistributed here
+under GPL-3.0-or-later per that license's "or later" clause.
 
 ## Install
 
