@@ -277,7 +277,9 @@ class ChipletExportDialog(wx.Dialog):
             "the interconnect .lyp (bump layers only) -- that one is "
             "consumed automatically via the .chiplet. Replace it only "
             "when the interposer uses a different technology; blank "
-            "falls back to the built-in IHP interposer LYP.")
+            "means it is resolved from the interposer PDK "
+            "(INTERPOSER_PDK_ROOT) at export, or the export errors asking "
+            "you to set it.")
         grid.Add(self._lyp_ctrl, 1, wx.EXPAND)
 
         opts_box.Add(grid, 0, wx.EXPAND | wx.ALL, 4)

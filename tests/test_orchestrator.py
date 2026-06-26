@@ -633,15 +633,16 @@ def test_discover_interposer_lyp_unresolved_textvar_falls_to_pdk(
     assert found == str(canonical)
 
 
-def test_discover_interposer_lyp_bundled_fallback(tmp_path, monkeypatch):
-    """No env, no text var, no PDK checkout above the start: the copy
-    bundled with the plugin keeps the picker truthful."""
+def test_discover_interposer_lyp_no_source_returns_empty(tmp_path, monkeypatch):
+    """No env, no text var, no PDK checkout above the start: the .lyp belongs
+    to the interposer PDK, so there is no bundled fallback; discovery returns
+    "" and the dialog leaves the picker empty for the user to fill in."""
     monkeypatch.delenv("INTERPOSER_LYP", raising=False)
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(tmp_path / "nope"))
     start = tmp_path / "isolated" / "plugin" / "pipeline" / "orchestrator.py"
     start.parent.mkdir(parents=True)
     found = discover_interposer_lyp(start=str(start))
-    assert found == str(PLUGIN_ROOT / "intm4tm2.lyp")
+    assert found == ""
 
 
 def test_available_connection_types_explicit_root(tmp_path):
