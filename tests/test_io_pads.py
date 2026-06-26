@@ -12,10 +12,11 @@ sys.path.insert(0, str(REPO))
 
 from hyp_to_gds import GDSGenerator, LayerMap, update_chiplet_file  # noqa: E402
 
-# Interposer LYP via the ecosystem discovery convention (env -> walk ->
-# bundled fallback); INTERPOSER_LYP still overrides. The old fixed
-# ../interposer path silently skipped this whole module on hosts and in
-# the adk-tools image, letting the io_pads frame assertions rot.
+# Interposer LYP via the ecosystem discovery convention (env -> PDK
+# env/walk); the .lyp belongs to the interposer PDK, not the plugin.
+# INTERPOSER_LYP still overrides. The old fixed ../interposer path silently
+# skipped this whole module on hosts and in the adk-tools image, letting the
+# io_pads frame assertions rot.
 import os  # noqa: E402
 import hyp_to_gds as _h  # noqa: E402
 LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", _h._find_default_lyp()))

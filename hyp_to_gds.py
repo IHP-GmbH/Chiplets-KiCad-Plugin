@@ -2197,17 +2197,20 @@ def _expand_path_vars(path: Optional[str]) -> Optional[str]:
 def _find_default_lyp() -> str:
     """Default layer-properties file for the interposer GDS.
 
-    Prefers the interposer PDK's canonical
-    ``libs.tech/klayout/tech/intm4tm2.lyp`` (env/walk discovery), falling
-    back to the copy bundled with the plugin so a standalone install
-    keeps working without the PDK checkout.
+    Resolves the interposer PDK's canonical
+    ``libs.tech/klayout/tech/intm4tm2.lyp`` via env/walk discovery. The
+    file belongs to the interposer PDK, not the plugin, so there is no
+    vendored copy: when no checkout resolves, return the unexpanded
+    ``${INTERPOSER_PDK_ROOT}`` form (mirrors _find_interposer_template) so
+    the error text points somewhere actionable instead of silently using a
+    stale bundled .lyp.
     """
     python_dir = _find_interposer_pdk_python()
     if python_dir is not None:
         cand = python_dir.parent / "tech" / "intm4tm2.lyp"
         if cand.is_file():
             return str(cand)
-    return str(Path(__file__).parent / "intm4tm2.lyp")
+    return "${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp"
 
 
 def _find_interposer_template() -> str:
@@ -2943,8 +2946,9 @@ Examples:
         "-l", "--lyp",
         default=None,
         help="KLayout LYP layer properties file (default: the interposer "
-             "PDK's canonical intm4tm2.lyp via env/walk discovery, falling "
-             "back to the bundled copy)"
+             "PDK's canonical intm4tm2.lyp via env/walk discovery; the .lyp "
+             "belongs to the PDK, so set INTERPOSER_PDK_ROOT or pass this "
+             "explicitly when no checkout resolves)"
     )
     parser.add_argument(
         "-c", "--cell",
@@ -3040,7 +3044,8 @@ Examples:
     )
     args = parser.parse_args()
 
-    # Default lyp: canonical interposer PDK copy, bundled fallback.
+    # Default lyp: the interposer PDK's canonical copy (env/walk); no
+    # plugin-local fallback, the .lyp belongs to the PDK.
     if args.lyp is None:
         args.lyp = _find_default_lyp()
 

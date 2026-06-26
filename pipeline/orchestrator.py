@@ -94,10 +94,11 @@ def discover_interposer_lyp(board=None, start: Optional[str] = None) -> str:
     Chain (first existing file wins): INTERPOSER_LYP environment variable
     -> INTERPOSER_LYP project text variable -> canonical
     ``libs.tech/klayout/tech/intm4tm2.lyp`` under the discovered interposer
-    PDK root -> the copy bundled with the plugin. Mirrors the worker's own
-    default (hyp_to_gds._find_default_lyp) so the picker shows the file the
-    run will actually use instead of an empty field that invites pasting
-    the wrong .lyp (e.g. the interconnect one).
+    PDK root. The .lyp belongs to the interposer PDK, not the plugin, so
+    there is no bundled fallback: when nothing resolves this returns ""
+    (the dialog leaves the picker empty for the user, and the worker errors
+    pointing at INTERPOSER_PDK_ROOT). Mirrors the worker's own default
+    (hyp_to_gds._find_default_lyp).
     """
     from .discovery import _lookup_text_var
 
@@ -121,7 +122,7 @@ def discover_interposer_lyp(board=None, start: Optional[str] = None) -> str:
             "libs.tech", "klayout", "tech", "intm4tm2.lyp"))
         if found:
             return found
-    return _existing(Path(__file__).resolve().parents[1] / "intm4tm2.lyp")
+    return ""
 
 
 @dataclass

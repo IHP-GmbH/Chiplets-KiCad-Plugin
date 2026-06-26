@@ -257,7 +257,7 @@ def test_expand_path_vars_unknown_var_is_loud(monkeypatch):
 
 def test_default_lyp_resolves_canonical(monkeypatch):
     """With the monorepo present, the default lyp is the interposer PDK's
-    canonical copy, not the bundled fallback."""
+    canonical copy (the .lyp belongs to the PDK; the plugin keeps no copy)."""
     monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
     got = h._find_default_lyp()
     assert got.endswith("libs.tech/klayout/tech/intm4tm2.lyp")

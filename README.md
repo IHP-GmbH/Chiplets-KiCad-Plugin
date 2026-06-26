@@ -127,11 +127,13 @@ environment variables: `INTERPOSER_PDK_ROOT`, `INTERCONNECT_PDK_ROOT`,
   default via `discover_interposer_lyp()`, which follows the
   `INTERPOSER_LYP` env var, then the `INTERPOSER_LYP` project text
   variable, then the PDK's canonical
-  `libs.tech/klayout/tech/intm4tm2.lyp`, then the bundled copy. Replace
-  it only when the interposer uses a different technology. Do not point
-  it at the interconnect `.lyp` (bump layers only); that one is consumed
-  automatically via the `.chiplet`. Blank falls back to the built-in IHP
-  interposer LYP.
+  `libs.tech/klayout/tech/intm4tm2.lyp`. The `.lyp` belongs to the
+  interposer PDK, not the plugin, so there is no bundled copy: when none
+  resolves the field is left blank and the export errors asking you to set
+  `INTERPOSER_PDK_ROOT` or pick a file. Replace it only when the interposer
+  uses a different technology. Do not point it at the interconnect `.lyp`
+  (bump layers only); that one is consumed automatically via the
+  `.chiplet`.
 - *I/O pads*: auto-extracted from the loaded board's IO_CLASS footprints,
   rendered in the interposer GDS and injected under the interposer
   component. An explicit sidecar JSON from `kicad_pcb_to_iopads.py` can be
@@ -234,7 +236,6 @@ chiplet_kicad_plugin/
 │                              --annotate-boundaries, --die-connections,
 │                              manifest-sourced --connection-type, the
 │                              .boundaries.json scheme)
-├── intm4tm2.lyp               Bundled fallback interposer layer properties
 ├── tests/                     pytest suite (see tests/README.md)
 ├── requirements.txt           Worker venv deps
 └── LICENSE
