@@ -3,8 +3,8 @@
 Chiplet Export plugin for KiCad pcbnew.
 
 Single-action workflow: produces canonical .chiplet, interposer GDS,
-optionally a complete-assembly GDS, and intermediate .hyp from a
-loaded board, by wrapping the hyp_to_gds.py pipeline.
+the driving Hyperlynx .hyp, and optionally a complete-assembly GDS from
+a loaded board, by wrapping the hyp_to_gds.py pipeline.
 
 Registered automatically when pcbnew scans the scripting/plugins
 directory.

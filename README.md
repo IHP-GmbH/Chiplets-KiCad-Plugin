@@ -94,12 +94,14 @@ Tick what you want produced:
 - *Interposer GDS* (default ON): the interposer-only layout.
 - *Complete assembly GDS* (default OFF): interposer plus all chiplet
   instances flattened into one GDS.
-- *Keep intermediate .hyp* (default OFF): copy the metric Hyperlynx file
-  used to drive the pipeline.
 - *Annotate chiplet boundaries (viewer-only layer)* (default OFF): paint
   each chiplet boundary and instance label onto annotation layer
   `1000/0` for eyeball inspection in KLayout. No DRC rule reads this
   layer; the assembly contract stays in the `.boundaries.json` manifest.
+
+The Hyperlynx `.hyp` that drives the pipeline is always written to the
+output directory (next to the `.chiplet`), so other tools can consume the
+exact netlist the layout was generated from.
 
 ### PDK roots
 
