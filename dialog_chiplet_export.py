@@ -174,8 +174,6 @@ class ChipletExportDialog(wx.Dialog):
         self._cb_interposer.SetValue(True)
         self._cb_complete = wx.CheckBox(
             panel, label="Complete assembly GDS (with chiplet instances)")
-        self._cb_keep_hyp = wx.CheckBox(
-            panel, label="Keep intermediate .hyp in output directory")
         self._cb_annotate = wx.CheckBox(
             panel, label="Annotate chiplet boundaries (viewer-only layer)")
         self._cb_annotate.SetToolTip(
@@ -184,7 +182,7 @@ class ChipletExportDialog(wx.Dialog):
             "KLayout. No DRC rule reads it; the assembly contract stays in the "
             "boundary manifest. Off by default.")
         for cb in (self._cb_chiplet, self._cb_interposer,
-                   self._cb_complete, self._cb_keep_hyp, self._cb_annotate):
+                   self._cb_complete, self._cb_annotate):
             outs_box.Add(cb, 0, wx.ALL, 2)
         outer.Add(outs_box, 0, wx.EXPAND | wx.ALL, 8)
 
@@ -486,7 +484,6 @@ class ChipletExportDialog(wx.Dialog):
             emit_chiplet=self._cb_chiplet.GetValue(),
             emit_interposer_gds=self._cb_interposer.GetValue(),
             emit_complete_gds=self._cb_complete.GetValue(),
-            keep_intermediate_hyp=self._cb_keep_hyp.GetValue(),
             annotate_boundaries=self._cb_annotate.GetValue(),
             top_cell=self._top_cell_ctrl.GetValue() or "INTERPOSER",
             connection_type=conn,
@@ -597,7 +594,7 @@ class ChipletExportDialog(wx.Dialog):
                                 ("interposer GDS", result.interposer_gds_path),
                                 ("complete GDS", result.complete_gds_path),
                                 ("cu-pillar DRC report", result.cupillar_drc_path),
-                                ("intermediate hyp", result.hyp_path)):
+                                ("Hyperlynx (.hyp)", result.hyp_path)):
                 if path:
                     self._append_log("Wrote %s: %s" % (label, path))
             verdict = describe_assembly_drc(result)

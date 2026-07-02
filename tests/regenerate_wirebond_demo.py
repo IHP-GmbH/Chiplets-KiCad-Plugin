@@ -183,7 +183,6 @@ def main():
         emit_chiplet=True,
         emit_interposer_gds=True,
         emit_complete_gds=True,
-        keep_intermediate_hyp=True,
         top_cell="INTERPOSER",
         connection_type=args.connection,
         lyp_override=args.lyp,

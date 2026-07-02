@@ -179,7 +179,6 @@ def test_all_options_at_once(tmp_path):
         emit_chiplet=True,
         emit_interposer_gds=True,
         emit_complete_gds=True,
-        keep_intermediate_hyp=False,
         top_cell="ASSEMBLY_TOP",
         connection_type="sbump_sac305",
         lyp_override="/etc/x.lyp",

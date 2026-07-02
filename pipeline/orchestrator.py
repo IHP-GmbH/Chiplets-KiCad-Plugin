@@ -133,7 +133,6 @@ class ExportOptions:
     emit_chiplet: bool = True
     emit_interposer_gds: bool = True
     emit_complete_gds: bool = False
-    keep_intermediate_hyp: bool = False
     # Viewer-only: paint each chiplet boundary onto an annotation GDS layer
     # (no DRC rule reads it). Drives hyp_to_gds --annotate-boundaries. Off by
     # default so the production GDS carries no synthetic geometry.
@@ -793,12 +792,13 @@ def run_export(board, options, plugin_dir,
       1. Resolve worker python and hyp_to_gds.py (early failure).
       2. Create a workspace tmpdir.
       3. Write Hyperlynx and intermediate .chiplet via the Python ports.
-      4. Stage the intermediate .chiplet into ``options.output_dir``
-         so ``--update-chiplet-file`` can rewrite it in place.
+      4. Stage the intermediate .chiplet and the driving .hyp into
+         ``options.output_dir`` (the .hyp is a first-class output that
+         downstream tools consume), so ``--update-chiplet-file`` can
+         rewrite the .chiplet in place.
       5. Invoke hyp_to_gds.py via the async runner; stream log lines
          to ``on_log``.
-      6. Optionally copy the intermediate .hyp to the output directory.
-      7. Always remove the tmpdir.
+      6. Always remove the tmpdir.
 
     Returns:
         ExportResult.  If ``error`` is non-empty the call failed before
@@ -969,6 +969,19 @@ def run_export(board, options, plugin_dir,
         if options.emit_chiplet:
             shutil.copy2(chiplet_intermediate, chiplet_final)
 
+        # The Hyperlynx netlist that drives hyp_to_gds is a first-class
+        # output: stage it next to the .chiplet so downstream tools can
+        # consume the exact .hyp the layout was generated from. Staged here,
+        # after validation, so a validation failure leaves no partial
+        # artifact (matching the .chiplet above).
+        hyp_final = os.path.join(options.output_dir, "%s.hyp" % board_name)
+        try:
+            shutil.copy2(hyp_path, hyp_final)
+            _log("Wrote Hyperlynx: %s" % hyp_final)
+        except OSError as exc:
+            _log("Warning: could not copy .hyp to output: %s" % exc)
+            hyp_final = ""
+
         effective_options = dataclasses.replace(
             options, io_pads_json=effective_io_pads,
             pad_locations=effective_pad_locs,
@@ -994,16 +1007,6 @@ def run_export(board, options, plugin_dir,
             cancel_event=cancel_event,
             env=worker_env,
         )
-
-        hyp_kept = ""
-        if options.keep_intermediate_hyp:
-            hyp_kept = os.path.join(options.output_dir, "%s.hyp" % board_name)
-            try:
-                shutil.copy2(hyp_path, hyp_kept)
-                _log("Kept intermediate .hyp at %s" % hyp_kept)
-            except OSError as exc:
-                _log("Warning: could not copy intermediate .hyp: %s" % exc)
-                hyp_kept = ""
 
         # The worker writes <board>_cupillar_drc.json next to the interposer
         # GDS (now under layout/) when a cupillar stack drives pillar
@@ -1141,7 +1144,7 @@ def run_export(board, options, plugin_dir,
         return ExportResult(
             exit_code=run.exit_code,
             cancelled=run.cancelled or drc_cancelled,
-            hyp_path=hyp_kept,
+            hyp_path=hyp_final,
             chiplet_path=(chiplet_final if options.emit_chiplet else ""),
             interposer_gds_path=(
                 layout_path(options.output_dir,
