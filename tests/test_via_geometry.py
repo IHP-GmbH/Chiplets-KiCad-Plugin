@@ -38,6 +38,15 @@ UM = 1e-6
 LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", h._find_default_lyp()))
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _require_lyp():
+    # The via-geometry tests build a LayerMap from the interposer .lyp; skip
+    # when no PDK resolves (bare CI runner) instead of exiting 1 inside the
+    # worker. The adk-tools gate has the PDK baked and runs them for real.
+    if not LYP_PATH.exists():
+        pytest.skip(f"interposer LYP not found: {LYP_PATH}")
+
+
 def _make_generator(tech_json_path=None):
     return h.GDSGenerator(h.LayerMap(str(LYP_PATH)), "TOP", "METRIC", [],
                           tech_json_path)

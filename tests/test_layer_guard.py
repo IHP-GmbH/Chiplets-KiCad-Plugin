@@ -11,14 +11,30 @@ tolerates stray layers below the threshold with one aggregate warning.
 No pcbnew/wx dependency: runs on host.
 """
 
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
 import hyp_to_gds as h  # noqa: E402
+
+# Interposer LYP via the ecosystem discovery convention (env -> PDK
+# env/walk); the .lyp belongs to the interposer PDK, not the plugin, so
+# there is no bundled copy. INTERPOSER_LYP still overrides. Skip the whole
+# module when no PDK resolves (bare CI runner) instead of exiting 1 inside
+# the worker; the adk-tools gate has the PDK baked and runs it for real.
+LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", h._find_default_lyp()))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _require_lyp():
+    if not LYP_PATH.exists():
+        pytest.skip(f"interposer LYP not found: {LYP_PATH}")
 
 
 def _write_hyp(path, layer_segments):
@@ -65,7 +81,7 @@ def test_all_segments_unmapped_fails_loudly(tmp_path, capsys):
 
     ok = h.convert_hyp_to_gds(
         hyp_path=str(hyp), output_path=str(out),
-        lyp_path=h._find_default_lyp())
+        lyp_path=str(LYP_PATH))
 
     assert ok is False
     assert not out.exists()
@@ -84,7 +100,7 @@ def test_minor_unmapped_layer_warns_but_succeeds(tmp_path, capsys):
 
     ok = h.convert_hyp_to_gds(
         hyp_path=str(hyp), output_path=str(out),
-        lyp_path=h._find_default_lyp())
+        lyp_path=str(LYP_PATH))
 
     assert ok is True
     assert out.exists()
@@ -100,7 +116,7 @@ def test_fully_mapped_no_aggregate_warning(tmp_path, capsys):
 
     ok = h.convert_hyp_to_gds(
         hyp_path=str(hyp), output_path=str(out),
-        lyp_path=h._find_default_lyp())
+        lyp_path=str(LYP_PATH))
 
     assert ok is True
     assert out.exists()
