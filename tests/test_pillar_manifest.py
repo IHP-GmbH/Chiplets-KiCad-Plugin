@@ -1,0 +1,225 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""
+Tests for the <stem>.pillars.json pillar manifest emitted by hyp_to_gds.
+
+The manifest carries the as-drawn Cu-pillar/bump centers (assembly GDS
+top-cell global frame, y-up, micrometers, post collision auto-resolve) so
+manifest-level checks can align against exactly what the GDS holds. Pinned
+contract:
+  * written next to the assembly GDS whenever the bump-generation path runs,
+  * a bump-path run placing zero bumps still writes an empty pillars array,
+  * runs that never enter the bump path write nothing,
+  * positions match the instances add_device_bumps drew — including bumps
+    shifted by collision auto-resolve (flagged moved_by_auto_resolve),
+  * schema/version strings are exact-match pinned, output is deterministic
+    (sorted by device_ref then pin_name, trailing newline).
+"""
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+if str(PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_ROOT))
+if str(PLUGIN_ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_ROOT.parent))
+
+import hyp_to_gds as h  # noqa: E402
+from chiplet_kicad_plugin.tests.test_hyp_to_gds_decoupling import (  # noqa: E402
+    MIXED_HYP, _write_pin_list)
+
+# Bump generation asserts real sibling-PDK content (bump_mirror in the
+# interposer PDK, method geometry in the interconnect manifest). On a lone
+# checkout none of those roots resolve -- skip the module.
+_MISSING_ROOTS = [
+    var for var in ("INTERCONNECT_PDK_ROOT", "INTERPOSER_PDK_ROOT",
+                    "GDS_TO_KICAD_ROOT")
+    if h._discover_path_var(var) is None
+]
+pytestmark = pytest.mark.skipif(
+    bool(_MISSING_ROOTS),
+    reason="needs sibling ecosystem checkouts; unresolved: %s"
+           % ", ".join(_MISSING_ROOTS))
+
+
+def _write_pins(tmp_path, ref, coords_um):
+    """Pin-list sidecar with explicit pad centers (um), one pin per center."""
+    pins = []
+    for i, (x_um, y_um) in enumerate(coords_um):
+        pins.append({
+            "name": "p%d" % i, "type": "passive", "pad_index": i,
+            "center_x_dbu": x_um * 1000.0, "center_y_dbu": y_um * 1000.0,
+            "width_dbu": 60000.0, "height_dbu": 60000.0,
+        })
+    p = tmp_path / ("%s_pins.json" % ref)
+    p.write_text(json.dumps(
+        {"version": 1, "chiplet_name": ref, "dbu_um": 0.001, "pins": pins}))
+    return str(p)
+
+
+def _convert(tmp_path, monkeypatch, pad_locations, name="mixed", **kwargs):
+    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
+    monkeypatch.delenv("INTERCONNECT_PDK_ROOT", raising=False)
+    hyp = tmp_path / ("%s.hyp" % name)
+    hyp.write_text(MIXED_HYP)
+    out = tmp_path / ("%s_interposer.gds" % name)
+    ok = h.convert_hyp_to_gds(
+        hyp_path=str(hyp), output_path=str(out),
+        lyp_path=h._find_default_lyp(),
+        pad_locations=pad_locations, **kwargs)
+    assert ok is True
+    return out
+
+
+def _manifest(out):
+    return json.loads(out.with_name(out.stem + ".pillars.json").read_text())
+
+
+def _drawn_centers(gds_path, ref):
+    """Sorted (x_um, y_um) of every pillar instance under CUPILLARS_<ref>."""
+    from klayout import db
+    layout = db.Layout()
+    layout.read(str(gds_path))
+    cell = None
+    for ci in range(layout.cells()):
+        if layout.cell(ci).name == "CUPILLARS_%s" % ref:
+            cell = layout.cell(ci)
+            break
+    assert cell is not None, "CUPILLARS_%s not in %s" % (ref, gds_path)
+    return sorted((round(inst.dtrans.disp.x, 6), round(inst.dtrans.disp.y, 6))
+                  for inst in cell.each_inst())
+
+
+# ---------------------------------------------------------------------------
+# Contract constants
+# ---------------------------------------------------------------------------
+
+def test_manifest_constants_pinned():
+    """Readers exact-match these strings; bump both sides together."""
+    assert h.PILLAR_MANIFEST_SCHEMA == "adk-pillar-manifest"
+    assert h.PILLAR_MANIFEST_VERSION == "1.0.0"
+
+
+# ---------------------------------------------------------------------------
+# Bump-path runs write the manifest; other runs do not
+# ---------------------------------------------------------------------------
+
+def test_bump_path_writes_manifest_with_header(tmp_path, monkeypatch):
+    out = _convert(
+        tmp_path, monkeypatch,
+        {"U1": _write_pin_list(tmp_path, "U1"),
+         "U2": _write_pin_list(tmp_path, "U2")},
+        connection_type="cupillar_opt1")
+    m = _manifest(out)
+    assert m["schema"] == "adk-pillar-manifest"
+    assert m["version"] == "1.0.0"
+    assert m["generator"] == "hyp_to_gds.py"
+    assert m["assembly_gds"] == out.name
+    assert m["units"] == "um"
+    assert len(m["pillars"]) == 4  # 2 devices x 2 pins
+    for p in m["pillars"]:
+        assert p["method"] == "cupillar_opt1"
+        assert p["diameter_um"] == 44
+        assert p["moved_by_auto_resolve"] is False
+    # U1 at (200, -500) with pins at x=+-100: absolute frame sanity.
+    u1 = [(p["x_um"], p["y_um"]) for p in m["pillars"]
+          if p["device_ref"] == "U1"]
+    assert sorted(u1) == [(100.0, -500.0), (300.0, -500.0)]
+
+
+def test_no_bump_path_writes_no_manifest(tmp_path, monkeypatch):
+    """A conversion without any connection stack never emits the sidecar."""
+    out = _convert(tmp_path, monkeypatch, None, name="plain")
+    assert not out.with_name(out.stem + ".pillars.json").exists()
+
+
+def test_bump_path_with_zero_bumps_writes_empty_array(tmp_path, monkeypatch):
+    """The bump path ran (a method resolved) but the only device is unknown
+    to the HYP, so nothing is placed: manifest present, pillars empty."""
+    out = _convert(
+        tmp_path, monkeypatch,
+        {"U9": _write_pins(tmp_path, "U9", [(-100.0, 0.0)])},
+        name="empty", connection_type="cupillar_opt1")
+    m = _manifest(out)
+    assert m["pillars"] == []
+    assert m["schema"] == "adk-pillar-manifest"
+
+
+# ---------------------------------------------------------------------------
+# Positions are the as-drawn ones (GDS instances), method travels per die
+# ---------------------------------------------------------------------------
+
+def test_positions_match_drawn_instances(tmp_path, monkeypatch):
+    """Manifest x/y equal the pillar instance displacements in the GDS,
+    per device, in the same frame."""
+    out = _convert(
+        tmp_path, monkeypatch,
+        {"U1": _write_pin_list(tmp_path, "U1"),
+         "U2": _write_pin_list(tmp_path, "U2")},
+        connection_type="cupillar_opt1",
+        die_connections={"U2": "vendorx_microbump"})
+    m = _manifest(out)
+    for ref in ("U1", "U2"):
+        recorded = sorted((p["x_um"], p["y_um"]) for p in m["pillars"]
+                          if p["device_ref"] == ref)
+        assert recorded == _drawn_centers(out, ref)
+    # Per-die method + its body diameter travel into the records.
+    methods = {p["device_ref"]: (p["method"], p["diameter_um"])
+               for p in m["pillars"]}
+    assert methods["U1"] == ("cupillar_opt1", 44)
+    assert methods["U2"] == ("vendorx_microbump", 40)
+
+
+def test_auto_resolved_bump_recorded_at_moved_position(tmp_path, monkeypatch):
+    """Two U1 pads 60 um apart violate the opt1 separation (75 um):
+    auto-resolve pushes them to +-37.5 um around the midpoint. The manifest
+    must carry the moved (as-drawn) centers and flag them."""
+    out = _convert(
+        tmp_path, monkeypatch,
+        {"U1": _write_pins(tmp_path, "U1", [(-30.0, 0.0), (30.0, 0.0)])},
+        name="moved", connection_type="cupillar_opt1")
+    m = _manifest(out)
+    assert len(m["pillars"]) == 2
+    recorded = sorted((p["x_um"], p["y_um"]) for p in m["pillars"])
+    # As-drawn == manifest, and NOT the pre-resolve pad positions.
+    assert recorded == _drawn_centers(out, "U1")
+    assert recorded != [(170.0, -500.0), (230.0, -500.0)]
+    assert recorded == [(162.5, -500.0), (237.5, -500.0)]
+    assert all(p["moved_by_auto_resolve"] is True for p in m["pillars"])
+
+
+# ---------------------------------------------------------------------------
+# Determinism
+# ---------------------------------------------------------------------------
+
+def test_pillars_sorted_by_device_then_pin(tmp_path, monkeypatch):
+    """Ordering is (device_ref, pin_name), independent of input dict order."""
+    out = _convert(
+        tmp_path, monkeypatch,
+        {"U2": _write_pin_list(tmp_path, "U2"),   # U2 first on purpose
+         "U1": _write_pin_list(tmp_path, "U1")},
+        connection_type="cupillar_opt1")
+    m = _manifest(out)
+    keys = [(p["device_ref"], p["pin_name"]) for p in m["pillars"]]
+    assert keys == sorted(keys)
+    assert keys[0][0] == "U1"
+
+
+def test_manifest_bytes_deterministic(tmp_path, monkeypatch):
+    """Two identical runs produce byte-identical manifests (with a trailing
+    newline)."""
+    texts = []
+    for sub in ("a", "b"):
+        d = tmp_path / sub
+        d.mkdir()
+        out = _convert(
+            d, monkeypatch,
+            {"U1": _write_pin_list(d, "U1"),
+             "U2": _write_pin_list(d, "U2")},
+            connection_type="cupillar_opt1")
+        texts.append(out.with_name(out.stem + ".pillars.json").read_text())
+    assert texts[0] == texts[1]
+    assert texts[0].endswith("\n")
