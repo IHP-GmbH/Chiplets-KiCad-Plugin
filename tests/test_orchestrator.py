@@ -167,6 +167,19 @@ def test_die_connections_omitted_when_empty(tmp_path):
     assert "--die-connections" not in args
 
 
+def test_die_thicknesses_passthrough_sorted(tmp_path):
+    opts = _opts(tmp_path)
+    opts.die_thicknesses = {"U2": 750.0, "U1": 250}
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
+    spec = args[args.index("--die-thicknesses") + 1]
+    assert spec == "U1=250.0,U2=750.0"
+
+
+def test_die_thicknesses_omitted_when_empty(tmp_path):
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, _opts(tmp_path))
+    assert "--die-thicknesses" not in args
+
+
 def test_argv_starts_with_script_and_input(tmp_path):
     args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, _opts(tmp_path))
     # hyp_to_gds.py expects ``hyp_file`` as positional first argument.

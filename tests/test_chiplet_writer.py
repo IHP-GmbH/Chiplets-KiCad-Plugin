@@ -197,3 +197,54 @@ def test_write_die_connections_ignores_non_die_footprints(fixture_board_path):
         pytest.skip("fixture board has only die footprints")
     changed = write_die_connections(board, {other[0]: "cupillar_opt1"})
     assert changed == []
+
+
+def test_parse_thickness_um():
+    """Positive finite numbers pass; empty/garbage/non-positive are None."""
+    from chiplet_kicad_plugin.writers.chiplet_writer import parse_thickness_um
+
+    assert parse_thickness_um("750") == 750.0
+    assert parse_thickness_um(" 253.5 ") == 253.5
+    for bad in ("", "  ", None, "abc", "0", "-1", "nan", "inf", "1,5"):
+        assert parse_thickness_um(bad) is None, bad
+
+
+def test_die_thickness_field_roundtrip(fixture_board_path):
+    """read/write_die_thicknesses operate on the die footprints'
+    DIE_THICKNESS_UM fields (in-memory board; nothing is saved here)."""
+    from chiplet_kicad_plugin.writers.chiplet_writer import (
+        list_die_refs, read_die_thicknesses, write_die_thicknesses)
+
+    board = pcbnew.LoadBoard(fixture_board_path)
+    refs = list_die_refs(board)
+    assert refs, "fixture board has no die footprints (GDS_FILE field)"
+
+    target = refs[0]
+    initial = read_die_thicknesses(board)
+    new_value = "750" if initial.get(target) != 750.0 else "250"
+
+    changed = write_die_thicknesses(board, {target: new_value})
+    assert changed == [target]
+    assert read_die_thicknesses(board)[target] == float(new_value)
+
+    # Same value again -> no-op.
+    assert write_die_thicknesses(board, {target: new_value}) == []
+
+    # Clearing removes the die from the map (format default 0.0 applies
+    # downstream).
+    assert write_die_thicknesses(board, {target: ""}) == [target]
+    assert target not in read_die_thicknesses(board)
+
+
+def test_read_die_thicknesses_skips_malformed(fixture_board_path, capsys):
+    """A non-numeric field value warns and is skipped, never raises."""
+    from chiplet_kicad_plugin.writers.chiplet_writer import (
+        list_die_refs, read_die_thicknesses, write_die_thicknesses)
+
+    board = pcbnew.LoadBoard(fixture_board_path)
+    target = list_die_refs(board)[0]
+    write_die_thicknesses(board, {target: "not-a-number"})
+    result = read_die_thicknesses(board)
+    err = capsys.readouterr().err
+    assert target not in result
+    assert "not-a-number" in err

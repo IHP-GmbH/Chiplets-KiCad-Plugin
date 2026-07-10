@@ -169,6 +169,11 @@ class ExportOptions:
     # CONNECTION fields (run_export), so the board stays the source of
     # truth for per-die method selection.
     die_connections: Dict[str, str] = field(default_factory=dict)
+    # {ref: thickness um} per-die physical thickness. A die not listed
+    # keeps the format default of 0.0. Empty = auto-read from the board's
+    # per-footprint DIE_THICKNESS_UM fields (run_export), mirroring
+    # die_connections: the board stays the source of truth.
+    die_thicknesses: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -670,6 +675,12 @@ def build_cli_args(hyp_to_gds_path: str,
                         for ref, m in sorted(options.die_connections.items()))
         args += ["--die-connections", spec]
 
+    if options.die_thicknesses:
+        _reject_delimiter_chars(options.die_thicknesses, "die thickness")
+        spec = ",".join("%s=%s" % (ref, repr(float(t)))
+                        for ref, t in sorted(options.die_thicknesses.items()))
+        args += ["--die-thicknesses", spec]
+
     if options.io_pads_json:
         args += ["--io-pads", options.io_pads_json]
 
@@ -814,7 +825,7 @@ def run_export(board, options, plugin_dir,
     from .runner import run_async
     from ..writers.chiplet_writer import (
         write_chiplet, write_io_pads_json, write_die_pin_lists,
-        read_die_connections,
+        read_die_connections, read_die_thicknesses,
     )
     from ..writers.connection_stacks import validate_interconnect_ids
     from ..writers.hyperlynx_writer import write_hyperlynx
@@ -958,6 +969,22 @@ def run_export(board, options, plugin_dir,
                      % ", ".join("%s=%s" % (r, m) for r, m
                                  in sorted(effective_die_conns.items())))
 
+        # Per-die physical thickness: an explicit options map wins;
+        # otherwise the board's per-footprint DIE_THICKNESS_UM fields are
+        # the source of truth. Dies without an entry keep the format
+        # default of 0.0.
+        effective_die_thicks = options.die_thicknesses
+        if not effective_die_thicks:
+            try:
+                effective_die_thicks = read_die_thicknesses(board)
+            except Exception as exc:
+                effective_die_thicks = {}
+                _log("Warning: per-die thickness read failed: %s" % exc)
+            if effective_die_thicks:
+                _log("Per-die thickness (um) from board fields: %s"
+                     % ", ".join("%s=%s" % (r, t) for r, t
+                                 in sorted(effective_die_thicks.items())))
+
         # Unknown per-die method ids fail the export here (manifest is the
         # source of truth) instead of degrading later in the worker or DRC.
         validate_interconnect_ids(die_methods=effective_die_conns.values())
@@ -985,7 +1012,8 @@ def run_export(board, options, plugin_dir,
         effective_options = dataclasses.replace(
             options, io_pads_json=effective_io_pads,
             pad_locations=effective_pad_locs,
-            die_connections=effective_die_conns)
+            die_connections=effective_die_conns,
+            die_thicknesses=effective_die_thicks)
         cli = build_cli_args(hyp_to_gds, hyp_path, board_name, effective_options)
         command = [worker_py] + cli
 
