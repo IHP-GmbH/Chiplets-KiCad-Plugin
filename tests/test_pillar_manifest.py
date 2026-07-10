@@ -2,15 +2,17 @@
 """
 Tests for the <stem>.pillars.json pillar manifest emitted by hyp_to_gds.
 
-The manifest carries the as-drawn Cu-pillar/bump centers (assembly GDS
-top-cell global frame, y-up, micrometers, post collision auto-resolve) so
-manifest-level checks can align against exactly what the GDS holds. Pinned
-contract:
+The manifest carries the as-drawn Cu-pillar/bump centers (canonical
+interposer GDS-bbox-corner frame — the same frame .chiplet die positions
+and io_pads live in — y-up, micrometers, post collision auto-resolve) so
+manifest-level checks can align .chiplet placements against exactly what
+the GDS holds. Pinned contract:
   * written next to the assembly GDS whenever the bump-generation path runs,
   * a bump-path run placing zero bumps still writes an empty pillars array,
   * runs that never enter the bump path write nothing,
   * positions match the instances add_device_bumps drew — including bumps
-    shifted by collision auto-resolve (flagged moved_by_auto_resolve),
+    shifted by collision auto-resolve (flagged moved_by_auto_resolve) —
+    rebased by the interposer top-cell bbox lower-left corner,
   * schema/version strings are exact-match pinned, output is deterministic
     (sorted by device_ref then pin_name, trailing newline).
 """
@@ -79,17 +81,21 @@ def _manifest(out):
 
 
 def _drawn_centers(gds_path, ref):
-    """Sorted (x_um, y_um) of every pillar instance under CUPILLARS_<ref>."""
+    """Sorted (x_um, y_um) of every pillar instance under CUPILLARS_<ref>,
+    rebased into the canonical GDS-bbox-corner frame (the manifest frame):
+    raw instance displacement minus the top-cell bbox lower-left corner."""
     from klayout import db
     layout = db.Layout()
     layout.read(str(gds_path))
+    bbox = layout.top_cell().dbbox()
     cell = None
     for ci in range(layout.cells()):
         if layout.cell(ci).name == "CUPILLARS_%s" % ref:
             cell = layout.cell(ci)
             break
     assert cell is not None, "CUPILLARS_%s not in %s" % (ref, gds_path)
-    return sorted((round(inst.dtrans.disp.x, 6), round(inst.dtrans.disp.y, 6))
+    return sorted((round(inst.dtrans.disp.x - bbox.left, 6),
+                   round(inst.dtrans.disp.y - bbox.bottom, 6))
                   for inst in cell.each_inst())
 
 
@@ -124,10 +130,12 @@ def test_bump_path_writes_manifest_with_header(tmp_path, monkeypatch):
         assert p["method"] == "cupillar_opt1"
         assert p["diameter_um"] == 44
         assert p["moved_by_auto_resolve"] is False
-    # U1 at (200, -500) with pins at x=+-100: absolute frame sanity.
+    # U1 at (200, -500) with pins at x=+-100, in the canonical frame:
+    # the board outline spans (0, -1000)..(2000, 0), so the bbox corner
+    # (0, -1000) rebases the drawn centers to y=+500. Absolute sanity.
     u1 = [(p["x_um"], p["y_um"]) for p in m["pillars"]
           if p["device_ref"] == "U1"]
-    assert sorted(u1) == [(100.0, -500.0), (300.0, -500.0)]
+    assert sorted(u1) == [(100.0, 500.0), (300.0, 500.0)]
 
 
 def test_no_bump_path_writes_no_manifest(tmp_path, monkeypatch):
@@ -184,10 +192,11 @@ def test_auto_resolved_bump_recorded_at_moved_position(tmp_path, monkeypatch):
     m = _manifest(out)
     assert len(m["pillars"]) == 2
     recorded = sorted((p["x_um"], p["y_um"]) for p in m["pillars"])
-    # As-drawn == manifest, and NOT the pre-resolve pad positions.
+    # As-drawn == manifest, and NOT the pre-resolve pad positions
+    # (canonical frame: outline bbox corner (0, -1000) rebases y to +500).
     assert recorded == _drawn_centers(out, "U1")
-    assert recorded != [(170.0, -500.0), (230.0, -500.0)]
-    assert recorded == [(162.5, -500.0), (237.5, -500.0)]
+    assert recorded != [(170.0, 500.0), (230.0, 500.0)]
+    assert recorded == [(162.5, 500.0), (237.5, 500.0)]
     assert all(p["moved_by_auto_resolve"] is True for p in m["pillars"])
 
 
