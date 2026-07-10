@@ -437,6 +437,12 @@ class HYPParser:
 # threshold stray layers are tolerated with an aggregate warning.
 UNMAPPED_FAIL_FRACTION = 0.5
 
+# <stem>.pillars.json sidecar contract (as-drawn Cu-pillar/bump centers).
+# Readers exact-match the version string (same policy as the boundary
+# manifest); bump producers and readers together.
+PILLAR_MANIFEST_SCHEMA = "adk-pillar-manifest"
+PILLAR_MANIFEST_VERSION = "1.0.0"
+
 
 class GDSGenerator:
     """Generates GDS file from parsed HYP data using KLayout API."""
@@ -528,6 +534,10 @@ class GDSGenerator:
         self._via_cells: Dict[str, db.Cell] = {}  # Cache for via PCell instances
         self._via_group_cells: Dict[str, db.Cell] = {}  # metal_pair -> group cell
         self._boundary_records: List[dict] = []  # chiplet boundaries -> manifest
+        # As-drawn Cu-pillar records -> <stem>.pillars.json. None means the
+        # bump-generation path never ran (no manifest); an empty list means it
+        # ran and placed nothing (manifest with an empty pillars array).
+        self._pillar_records: Optional[List[dict]] = None
         # Opt-in, viewer-only annotation of the boundaries. No DRC rule reads
         # boundary_viz_layer; the contract lives in the manifest, not the GDS.
         self._annotate_boundaries = bool(annotate_boundaries)
@@ -1621,6 +1631,51 @@ class GDSGenerator:
               f"({len(self._boundary_records)} chiplet boundaries)")
         return manifest_path
 
+    def record_pillars(self, records: List[dict]) -> None:
+        """Accumulate as-drawn Cu-pillar records for the pillar manifest.
+
+        The first call (even with an empty list) marks the bump-generation
+        path as run, so write() emits a <stem>.pillars.json — possibly with
+        an empty pillars array. Each record carries device_ref, pin_name,
+        method, x_um/y_um (top-cell global frame, y-up, post collision
+        auto-resolve), diameter_um and moved_by_auto_resolve.
+        """
+        if self._pillar_records is None:
+            self._pillar_records = []
+        self._pillar_records.extend(records)
+
+    def _write_pillar_manifest(self, output_path: str) -> Optional[Path]:
+        """Write the <stem>.pillars.json sidecar with the as-drawn
+        Cu-pillar/bump centers (interposer top-cell global frame, y-up,
+        micrometers, post collision auto-resolve).
+
+        Written only when the bump-generation path ran (record_pillars was
+        called); a run that placed zero bumps still gets a manifest with an
+        empty pillars array. x_um/y_um are authoritative for manifest-level
+        checks; the GDS remains the fabrication ground truth. Version policy
+        mirrors the boundary manifest: readers exact-match the version.
+        """
+        if self._pillar_records is None:
+            return None
+        out = Path(output_path)
+        manifest_path = out.with_name(out.stem + ".pillars.json")
+        pillars = sorted(self._pillar_records,
+                         key=lambda r: (r["device_ref"], r["pin_name"]))
+        manifest = {
+            "schema": PILLAR_MANIFEST_SCHEMA,
+            "version": PILLAR_MANIFEST_VERSION,
+            "generator": "hyp_to_gds.py",
+            "assembly_gds": out.name,
+            "units": "um",
+            "pillars": pillars,
+        }
+        with manifest_path.open("w") as fh:
+            json.dump(manifest, fh, indent=2)
+            fh.write("\n")
+        print(f"  Pillar manifest written to: {manifest_path} "
+              f"({len(pillars)} pillar(s))")
+        return manifest_path
+
     def _paint_boundary_annotations(self) -> None:
         """Paint each chiplet boundary (and its instance label) onto a
         viewer-only annotation layer, for eyeball inspection of the assembly.
@@ -1658,7 +1713,9 @@ class GDSGenerator:
         Via instances are grouped by metal pair for a clean hierarchy.
         Context info is stripped so the GDS opens cleanly without PDK dependencies.
         A <stem>.boundaries.json manifest with the chiplet boundaries is written
-        alongside the GDS for the ADK assembly DRC.
+        alongside the GDS for the ADK assembly DRC, and — when the Cu-pillar
+        generation path ran — a <stem>.pillars.json manifest with the as-drawn
+        bump centers.
         """
         for via_cell in self._via_cells.values():
             via_cell.flatten(-1, True)
@@ -1668,6 +1725,7 @@ class GDSGenerator:
         self._paint_boundary_annotations()
         self.layout.write(output_path, save_opts)
         self._write_boundary_manifest(output_path)
+        self._write_pillar_manifest(output_path)
 
 
 def get_default_connection_stacks() -> dict:
@@ -2720,6 +2778,9 @@ def convert_hyp_to_gds(
             device_map = {dev.ref: dev for dev in parser.devices}
             total_pillars = 0
             device_reports = {}
+            # The bump path is running: mark it so write() emits the pillar
+            # manifest even when every device below ends up placing nothing.
+            generator.record_pillars([])
             for dev_ref, pin_json in pad_locations.items():
                 method = device_methods.get(dev_ref)
                 if not method:
@@ -2765,6 +2826,24 @@ def convert_hyp_to_gds(
                 device_reports[dev_ref] = dev_report
                 total_pillars += pillar_gen.add_device_bumps(
                     dev_ref, resolved, body_diameter)
+                # Record the as-drawn centers for the pillar manifest: the
+                # exact positions add_device_bumps just placed (resolved is
+                # index-aligned with the pre-resolve bumps list; the 0.01 um
+                # movement threshold matches auto_resolve_collisions').
+                generator.record_pillars([
+                    {
+                        "device_ref": dev_ref,
+                        "pin_name": drawn.pin_name or "",
+                        "method": method,
+                        "x_um": round(drawn.global_x_um, 6),
+                        "y_um": round(drawn.global_y_um, 6),
+                        "diameter_um": body_diameter,
+                        "moved_by_auto_resolve": math.hypot(
+                            drawn.global_x_um - orig.global_x_um,
+                            drawn.global_y_um - orig.global_y_um) > 0.01,
+                    }
+                    for orig, drawn in zip(bumps, resolved)
+                ])
             # Merge generated CUPILLARS_<ref> cells into the interposer top.
             # Each device lives in exactly one method's generator.
             merged = 0
