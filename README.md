@@ -109,10 +109,12 @@ Machine-readable sidecars land next to each generated GDS:
   chiplet (the PDK-agnostic assembly-DRC contract).
 - `<stem>.pillars.json` (schema `adk-pillar-manifest`, version `1.0.0`):
   the as-drawn Cu-pillar/bump centers — one record per placed bump with
-  device reference, pin name, connection method, x/y in the GDS top-cell
-  global frame (y-up, micrometers, after collision auto-resolve; bumps
-  the auto-resolve shifted are flagged `moved_by_auto_resolve`) and the
-  method's body diameter. Written whenever the bump-generation path runs,
+  device reference, pin name, connection method, x/y in the canonical
+  interposer GDS-bbox-corner frame (the same frame the `.chiplet` die
+  positions and io_pads use, so manifest-level checks can compare the two
+  sidecars directly; y-up, micrometers, after collision auto-resolve;
+  bumps the auto-resolve shifted are flagged `moved_by_auto_resolve`) and
+  the method's body diameter. Written whenever the bump-generation path runs,
   including runs that place zero bumps (empty `pillars` array). The x/y
   values are authoritative for manifest-level checks; the GDS remains
   the fabrication ground truth.

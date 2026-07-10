@@ -537,7 +537,18 @@ class GDSGenerator:
         # As-drawn Cu-pillar records -> <stem>.pillars.json. None means the
         # bump-generation path never ran (no manifest); an empty list means it
         # ran and placed nothing (manifest with an empty pillars array).
+        # Records accumulate in the raw drawing frame; the manifest writer
+        # rebases them into the canonical GDS-bbox-corner frame (see
+        # _write_pillar_manifest and _pillar_frame_origin).
         self._pillar_records: Optional[List[dict]] = None
+        # Lower-left corner (x_min, y_min, um) of the interposer top-cell
+        # bbox, captured at the FIRST pillar-manifest write (the interposer
+        # GDS write, before chiplet instances are added). Manifest x/y are
+        # rebased by this origin so they live in the same canonical
+        # GDS-bbox-corner frame as the .chiplet positions and io_pads
+        # (chiplet-studio coord frame contract); the later complete-GDS
+        # manifest reuses it so both sidecars share one frame.
+        self._pillar_frame_origin: Optional[Tuple[float, float]] = None
         # Opt-in, viewer-only annotation of the boundaries. No DRC rule reads
         # boundary_viz_layer; the contract lives in the manifest, not the GDS.
         self._annotate_boundaries = bool(annotate_boundaries)
@@ -1637,8 +1648,9 @@ class GDSGenerator:
         The first call (even with an empty list) marks the bump-generation
         path as run, so write() emits a <stem>.pillars.json — possibly with
         an empty pillars array. Each record carries device_ref, pin_name,
-        method, x_um/y_um (top-cell global frame, y-up, post collision
-        auto-resolve), diameter_um and moved_by_auto_resolve.
+        method, x_um/y_um (raw drawing frame, y-up, post collision
+        auto-resolve; the manifest writer rebases them to the canonical
+        GDS-bbox-corner frame), diameter_um and moved_by_auto_resolve.
         """
         if self._pillar_records is None:
             self._pillar_records = []
@@ -1646,8 +1658,17 @@ class GDSGenerator:
 
     def _write_pillar_manifest(self, output_path: str) -> Optional[Path]:
         """Write the <stem>.pillars.json sidecar with the as-drawn
-        Cu-pillar/bump centers (interposer top-cell global frame, y-up,
-        micrometers, post collision auto-resolve).
+        Cu-pillar/bump centers (canonical interposer GDS-bbox-corner frame,
+        y-up, micrometers, post collision auto-resolve).
+
+        The records accumulate in the raw drawing frame (HYP coordinates);
+        here they are rebased by the interposer top-cell bbox lower-left so
+        the manifest lives in the SAME frame as the .chiplet die positions
+        and io_pads (the canonical GDS-bbox-corner frame of the coord frame
+        contract, i.e. the exact re-anchor update_chiplet_file applies).
+        The origin is captured at the first manifest write — the interposer
+        GDS write, before chiplet instances are merged in — and reused for
+        the complete-GDS manifest so both sidecars share one frame.
 
         Written only when the bump-generation path ran (record_pillars was
         called); a run that placed zero bumps still gets a manifest with an
@@ -1657,10 +1678,20 @@ class GDSGenerator:
         """
         if self._pillar_records is None:
             return None
+        if self._pillar_frame_origin is None:
+            bbox = self.top_cell.dbbox()
+            self._pillar_frame_origin = ((0.0, 0.0) if bbox.empty()
+                                         else (bbox.left, bbox.bottom))
+        origin_x, origin_y = self._pillar_frame_origin
         out = Path(output_path)
         manifest_path = out.with_name(out.stem + ".pillars.json")
-        pillars = sorted(self._pillar_records,
-                         key=lambda r: (r["device_ref"], r["pin_name"]))
+        pillars = [
+            dict(rec,
+                 x_um=round(rec["x_um"] - origin_x, 6),
+                 y_um=round(rec["y_um"] - origin_y, 6))
+            for rec in sorted(self._pillar_records,
+                              key=lambda r: (r["device_ref"], r["pin_name"]))
+        ]
         manifest = {
             "schema": PILLAR_MANIFEST_SCHEMA,
             "version": PILLAR_MANIFEST_VERSION,
