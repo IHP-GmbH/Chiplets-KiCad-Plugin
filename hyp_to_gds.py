@@ -437,6 +437,12 @@ class HYPParser:
 # threshold stray layers are tolerated with an aggregate warning.
 UNMAPPED_FAIL_FRACTION = 0.5
 
+# <stem>.pillars.json sidecar contract (as-drawn Cu-pillar/bump centers).
+# Readers exact-match the version string (same policy as the boundary
+# manifest); bump producers and readers together.
+PILLAR_MANIFEST_SCHEMA = "adk-pillar-manifest"
+PILLAR_MANIFEST_VERSION = "1.0.0"
+
 
 class GDSGenerator:
     """Generates GDS file from parsed HYP data using KLayout API."""
@@ -528,6 +534,21 @@ class GDSGenerator:
         self._via_cells: Dict[str, db.Cell] = {}  # Cache for via PCell instances
         self._via_group_cells: Dict[str, db.Cell] = {}  # metal_pair -> group cell
         self._boundary_records: List[dict] = []  # chiplet boundaries -> manifest
+        # As-drawn Cu-pillar records -> <stem>.pillars.json. None means the
+        # bump-generation path never ran (no manifest); an empty list means it
+        # ran and placed nothing (manifest with an empty pillars array).
+        # Records accumulate in the raw drawing frame; the manifest writer
+        # rebases them into the canonical GDS-bbox-corner frame (see
+        # _write_pillar_manifest and _pillar_frame_origin).
+        self._pillar_records: Optional[List[dict]] = None
+        # Lower-left corner (x_min, y_min, um) of the interposer top-cell
+        # bbox, captured at the FIRST pillar-manifest write (the interposer
+        # GDS write, before chiplet instances are added). Manifest x/y are
+        # rebased by this origin so they live in the same canonical
+        # GDS-bbox-corner frame as the .chiplet positions and io_pads
+        # (chiplet-studio coord frame contract); the later complete-GDS
+        # manifest reuses it so both sidecars share one frame.
+        self._pillar_frame_origin: Optional[Tuple[float, float]] = None
         # Opt-in, viewer-only annotation of the boundaries. No DRC rule reads
         # boundary_viz_layer; the contract lives in the manifest, not the GDS.
         self._annotate_boundaries = bool(annotate_boundaries)
@@ -1621,6 +1642,73 @@ class GDSGenerator:
               f"({len(self._boundary_records)} chiplet boundaries)")
         return manifest_path
 
+    def record_pillars(self, records: List[dict]) -> None:
+        """Accumulate as-drawn Cu-pillar records for the pillar manifest.
+
+        The first call (even with an empty list) marks the bump-generation
+        path as run, so write() emits a <stem>.pillars.json — possibly with
+        an empty pillars array. Each record carries device_ref, pin_name,
+        method, x_um/y_um (raw drawing frame, y-up, post collision
+        auto-resolve; the manifest writer rebases them to the canonical
+        GDS-bbox-corner frame), diameter_um, moved_by_auto_resolve, and --
+        for moved bumps -- auto_resolve_shift_um (a frame-invariant
+        magnitude, so the writer's rebase leaves it untouched).
+        """
+        if self._pillar_records is None:
+            self._pillar_records = []
+        self._pillar_records.extend(records)
+
+    def _write_pillar_manifest(self, output_path: str) -> Optional[Path]:
+        """Write the <stem>.pillars.json sidecar with the as-drawn
+        Cu-pillar/bump centers (canonical interposer GDS-bbox-corner frame,
+        y-up, micrometers, post collision auto-resolve).
+
+        The records accumulate in the raw drawing frame (HYP coordinates);
+        here they are rebased by the interposer top-cell bbox lower-left so
+        the manifest lives in the SAME frame as the .chiplet die positions
+        and io_pads (the canonical GDS-bbox-corner frame of the coord frame
+        contract, i.e. the exact re-anchor update_chiplet_file applies).
+        The origin is captured at the first manifest write — the interposer
+        GDS write, before chiplet instances are merged in — and reused for
+        the complete-GDS manifest so both sidecars share one frame.
+
+        Written only when the bump-generation path ran (record_pillars was
+        called); a run that placed zero bumps still gets a manifest with an
+        empty pillars array. x_um/y_um are authoritative for manifest-level
+        checks; the GDS remains the fabrication ground truth. Version policy
+        mirrors the boundary manifest: readers exact-match the version.
+        """
+        if self._pillar_records is None:
+            return None
+        if self._pillar_frame_origin is None:
+            bbox = self.top_cell.dbbox()
+            self._pillar_frame_origin = ((0.0, 0.0) if bbox.empty()
+                                         else (bbox.left, bbox.bottom))
+        origin_x, origin_y = self._pillar_frame_origin
+        out = Path(output_path)
+        manifest_path = out.with_name(out.stem + ".pillars.json")
+        pillars = [
+            dict(rec,
+                 x_um=round(rec["x_um"] - origin_x, 6),
+                 y_um=round(rec["y_um"] - origin_y, 6))
+            for rec in sorted(self._pillar_records,
+                              key=lambda r: (r["device_ref"], r["pin_name"]))
+        ]
+        manifest = {
+            "schema": PILLAR_MANIFEST_SCHEMA,
+            "version": PILLAR_MANIFEST_VERSION,
+            "generator": "hyp_to_gds.py",
+            "assembly_gds": out.name,
+            "units": "um",
+            "pillars": pillars,
+        }
+        with manifest_path.open("w") as fh:
+            json.dump(manifest, fh, indent=2)
+            fh.write("\n")
+        print(f"  Pillar manifest written to: {manifest_path} "
+              f"({len(pillars)} pillar(s))")
+        return manifest_path
+
     def _paint_boundary_annotations(self) -> None:
         """Paint each chiplet boundary (and its instance label) onto a
         viewer-only annotation layer, for eyeball inspection of the assembly.
@@ -1658,7 +1746,9 @@ class GDSGenerator:
         Via instances are grouped by metal pair for a clean hierarchy.
         Context info is stripped so the GDS opens cleanly without PDK dependencies.
         A <stem>.boundaries.json manifest with the chiplet boundaries is written
-        alongside the GDS for the ADK assembly DRC.
+        alongside the GDS for the ADK assembly DRC, and — when the Cu-pillar
+        generation path ran — a <stem>.pillars.json manifest with the as-drawn
+        bump centers.
         """
         for via_cell in self._via_cells.values():
             via_cell.flatten(-1, True)
@@ -1668,6 +1758,7 @@ class GDSGenerator:
         self._paint_boundary_annotations()
         self.layout.write(output_path, save_opts)
         self._write_boundary_manifest(output_path)
+        self._write_pillar_manifest(output_path)
 
 
 def get_default_connection_stacks() -> dict:
@@ -2664,10 +2755,12 @@ def convert_hyp_to_gds(
         # geometry in the interconnect manifest gets no pillars, loudly.
         _die_conns = die_connections or {}
         device_methods = {}
+        connections_requested = False
         for dev_ref in pad_locations:
             method = _die_conns.get(dev_ref, connection_type)
             if not method:
                 continue
+            connections_requested = True
             if _connection_to_body_diameter(method) is None:
                 print(f"  Warning: connection '{method}' on {dev_ref} has "
                       f"no body geometry in the interconnect manifest; "
@@ -2688,7 +2781,14 @@ def convert_hyp_to_gds(
                 "without its pillars." % ", ".join(methods_in_use),
                 file=sys.stderr)
             return False
-        elif methods_in_use:
+        if connections_requested:
+            # The bump path was entered (connections requested alongside pad
+            # locations): guarantee a pillar manifest even when no method
+            # resolved body geometry, so consumers can tell "requested but
+            # nothing drawn" (empty pillars array) from "bump path never ran"
+            # (no manifest at all).
+            generator.record_pillars([])
+        if methods_in_use:
             # One generator + parameter set per method: the 3D body layers
             # (e.g. a vendor's 510/511 vs IHP's 500/501) and the fab
             # parameters travel with the method, not with the assembly.
@@ -2765,6 +2865,31 @@ def convert_hyp_to_gds(
                 device_reports[dev_ref] = dev_report
                 total_pillars += pillar_gen.add_device_bumps(
                     dev_ref, resolved, body_diameter)
+                # Record the as-drawn centers for the pillar manifest: the
+                # exact positions add_device_bumps just placed (resolved is
+                # index-aligned with the pre-resolve bumps list; the 0.01 um
+                # movement threshold matches auto_resolve_collisions').
+                # Moved bumps also record the shift magnitude so consumers
+                # can bound the expected pad-to-pillar deviation instead of
+                # accepting any distance on the flag alone.
+                pillar_records = []
+                for orig, drawn in zip(bumps, resolved):
+                    shift = math.hypot(
+                        drawn.global_x_um - orig.global_x_um,
+                        drawn.global_y_um - orig.global_y_um)
+                    record = {
+                        "device_ref": dev_ref,
+                        "pin_name": drawn.pin_name or "",
+                        "method": method,
+                        "x_um": round(drawn.global_x_um, 6),
+                        "y_um": round(drawn.global_y_um, 6),
+                        "diameter_um": body_diameter,
+                        "moved_by_auto_resolve": shift > 0.01,
+                    }
+                    if shift > 0.01:
+                        record["auto_resolve_shift_um"] = round(shift, 6)
+                    pillar_records.append(record)
+                generator.record_pillars(pillar_records)
             # Merge generated CUPILLARS_<ref> cells into the interposer top.
             # Each device lives in exactly one method's generator.
             merged = 0
