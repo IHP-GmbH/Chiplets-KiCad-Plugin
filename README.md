@@ -103,6 +103,26 @@ The Hyperlynx `.hyp` that drives the pipeline is always written to the
 output directory (next to the `.chiplet`), so other tools can consume the
 exact netlist the layout was generated from.
 
+Machine-readable sidecars land next to each generated GDS:
+
+- `<stem>.boundaries.json`: one mechanical boundary polygon per placed
+  chiplet (the PDK-agnostic assembly-DRC contract).
+- `<stem>.pillars.json` (schema `adk-pillar-manifest`, version `1.0.0`):
+  the as-drawn Cu-pillar/bump centers — one record per placed bump with
+  device reference, pin name, connection method, x/y in the GDS top-cell
+  global frame (y-up, micrometers, after collision auto-resolve; bumps
+  the auto-resolve shifted are flagged `moved_by_auto_resolve`) and the
+  method's body diameter. Written whenever the bump-generation path runs,
+  including runs that place zero bumps (empty `pillars` array). The x/y
+  values are authoritative for manifest-level checks; the GDS remains
+  the fabrication ground truth.
+- `<board>_cupillar_drc.json`: the complete Cu-pillar DRC report
+  (per-method parameters, per-device results), so warn-and-continue
+  violations survive past the dialog log.
+
+Readers of both manifests exact-match the `version` string; producer and
+readers are bumped together.
+
 ### PDK roots
 
 The interposer PDK, interconnect PDK and ADK checkouts the pipeline
@@ -237,7 +257,7 @@ chiplet_kicad_plugin/
 │                              and extended with plugin-specific flags:
 │                              --annotate-boundaries, --die-connections,
 │                              manifest-sourced --connection-type, the
-│                              .boundaries.json scheme)
+│                              .boundaries.json / .pillars.json sidecars)
 ├── tests/                     pytest suite (see tests/README.md)
 ├── requirements.txt           Worker venv deps
 └── LICENSE
