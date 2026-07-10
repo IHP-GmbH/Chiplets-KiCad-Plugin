@@ -1650,7 +1650,9 @@ class GDSGenerator:
         an empty pillars array. Each record carries device_ref, pin_name,
         method, x_um/y_um (raw drawing frame, y-up, post collision
         auto-resolve; the manifest writer rebases them to the canonical
-        GDS-bbox-corner frame), diameter_um and moved_by_auto_resolve.
+        GDS-bbox-corner frame), diameter_um, moved_by_auto_resolve, and --
+        for moved bumps -- auto_resolve_shift_um (a frame-invariant
+        magnitude, so the writer's rebase leaves it untouched).
         """
         if self._pillar_records is None:
             self._pillar_records = []
@@ -2753,10 +2755,12 @@ def convert_hyp_to_gds(
         # geometry in the interconnect manifest gets no pillars, loudly.
         _die_conns = die_connections or {}
         device_methods = {}
+        connections_requested = False
         for dev_ref in pad_locations:
             method = _die_conns.get(dev_ref, connection_type)
             if not method:
                 continue
+            connections_requested = True
             if _connection_to_body_diameter(method) is None:
                 print(f"  Warning: connection '{method}' on {dev_ref} has "
                       f"no body geometry in the interconnect manifest; "
@@ -2777,7 +2781,14 @@ def convert_hyp_to_gds(
                 "without its pillars." % ", ".join(methods_in_use),
                 file=sys.stderr)
             return False
-        elif methods_in_use:
+        if connections_requested:
+            # The bump path was entered (connections requested alongside pad
+            # locations): guarantee a pillar manifest even when no method
+            # resolved body geometry, so consumers can tell "requested but
+            # nothing drawn" (empty pillars array) from "bump path never ran"
+            # (no manifest at all).
+            generator.record_pillars([])
+        if methods_in_use:
             # One generator + parameter set per method: the 3D body layers
             # (e.g. a vendor's 510/511 vs IHP's 500/501) and the fab
             # parameters travel with the method, not with the assembly.
@@ -2809,9 +2820,6 @@ def convert_hyp_to_gds(
             device_map = {dev.ref: dev for dev in parser.devices}
             total_pillars = 0
             device_reports = {}
-            # The bump path is running: mark it so write() emits the pillar
-            # manifest even when every device below ends up placing nothing.
-            generator.record_pillars([])
             for dev_ref, pin_json in pad_locations.items():
                 method = device_methods.get(dev_ref)
                 if not method:
@@ -2861,20 +2869,27 @@ def convert_hyp_to_gds(
                 # exact positions add_device_bumps just placed (resolved is
                 # index-aligned with the pre-resolve bumps list; the 0.01 um
                 # movement threshold matches auto_resolve_collisions').
-                generator.record_pillars([
-                    {
+                # Moved bumps also record the shift magnitude so consumers
+                # can bound the expected pad-to-pillar deviation instead of
+                # accepting any distance on the flag alone.
+                pillar_records = []
+                for orig, drawn in zip(bumps, resolved):
+                    shift = math.hypot(
+                        drawn.global_x_um - orig.global_x_um,
+                        drawn.global_y_um - orig.global_y_um)
+                    record = {
                         "device_ref": dev_ref,
                         "pin_name": drawn.pin_name or "",
                         "method": method,
                         "x_um": round(drawn.global_x_um, 6),
                         "y_um": round(drawn.global_y_um, 6),
                         "diameter_um": body_diameter,
-                        "moved_by_auto_resolve": math.hypot(
-                            drawn.global_x_um - orig.global_x_um,
-                            drawn.global_y_um - orig.global_y_um) > 0.01,
+                        "moved_by_auto_resolve": shift > 0.01,
                     }
-                    for orig, drawn in zip(bumps, resolved)
-                ])
+                    if shift > 0.01:
+                        record["auto_resolve_shift_um"] = round(shift, 6)
+                    pillar_records.append(record)
+                generator.record_pillars(pillar_records)
             # Merge generated CUPILLARS_<ref> cells into the interposer top.
             # Each device lives in exactly one method's generator.
             merged = 0
