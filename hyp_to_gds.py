@@ -1739,6 +1739,7 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                         io_pads: Optional[List[Dict]] = None,
                         devices: Optional[List['Device']] = None,
                         die_connections: Optional[Dict[str, str]] = None,
+                        die_thicknesses: Optional[Dict[str, float]] = None,
                         outline_bbox: Optional[Tuple[float, float, float,
                                                      float]] = None,
                         to_um=None, to_um_y=None) -> bool:
@@ -1771,6 +1772,11 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                  id}. A die not listed keeps connection_type. The stacks of
                  every method in use are injected, and each die's z comes
                  from its own stack.
+        die_thicknesses: Per-die physical thickness {component id: um}.
+                 Written to the die's dimensions.thickness (body z-extent,
+                 spec default 0.0). Orthogonal to the connection stack
+                 heights, which model the interconnect gap below the die,
+                 and to position.z, which stays the z-mounting result.
         outline_bbox: Optional (x_min, y_min, width, height) in micrometers
                  of the board outline (prBoundary 189/0, drawn from KiCad's
                  Edge.Cuts). When available, interposer dimensions come
@@ -2025,9 +2031,24 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
 
         # Compute die z-values from connection_stacks
         connection_stacks = data.get('connection_stacks', {})
+        die_thicks = die_thicknesses or {}
         for component in data.get('components', []):
             if component.get('type') != 'die':
                 continue
+
+            # Per-die physical thickness (dimensions.thickness, um). The
+            # intermediate writer emits the placeholder 0.0 (byte-exact
+            # parity with the C++ exporter); the real value from the
+            # board's DIE_THICKNESS_UM fields lands here, like the per-die
+            # connection above. position.z is untouched: it remains the
+            # z-mounting seating plane, not a function of the die body.
+            thickness = die_thicks.get(component.get('id', ''))
+            if thickness is not None:
+                if 'dimensions' not in component:
+                    component['dimensions'] = {}
+                component['dimensions']['thickness'] = float(thickness)
+                print(f"  {component.get('id')}: dimensions.thickness = "
+                      f"{float(thickness)} um")
 
             # Per chiplet-studio/docs/coord_frame_contract.md sections 2
             # and 4.4: dies produced by the gds_to_kicad pipeline have
@@ -2467,6 +2488,7 @@ def convert_hyp_to_gds(
     annotate_boundaries: bool = False,
     boundary_viz_layer: Tuple[int, int] = (1000, 0),
     die_connections: Optional[Dict[str, str]] = None,
+    die_thicknesses: Optional[Dict[str, float]] = None,
 ) -> bool:
     """
     Main conversion function.
@@ -2493,6 +2515,9 @@ def convert_hyp_to_gds(
                          not listed uses connection_type. Drives both the 3D
                          bodies drawn under that die (its method's layers and
                          diameter) and its connection field in the .chiplet.
+        die_thicknesses: Per-die physical thickness {ref: um}. Written to
+                         each die's dimensions.thickness in the .chiplet;
+                         dies not listed keep the format default of 0.0.
 
     Returns:
         True if conversion was successful
@@ -2867,6 +2892,7 @@ def convert_hyp_to_gds(
                            io_pads=placed_io_pads,
                            devices=parser.devices,
                            die_connections=die_connections,
+                           die_thicknesses=die_thicknesses,
                            outline_bbox=outline_bbox,
                            to_um=generator._to_um,
                            to_um_y=generator._to_um_y):
@@ -3045,6 +3071,16 @@ Examples:
              "accordingly."
     )
     parser.add_argument(
+        "--die-thicknesses",
+        type=str,
+        metavar="REF=UM[,REF=UM,...]",
+        help="Per-die physical thickness in micrometers (e.g. U1=750,"
+             "U2=750). Written to each die's dimensions.thickness in the "
+             ".chiplet. Dies not listed keep the format default of 0.0. "
+             "Interconnect stack heights are a separate axis "
+             "(connection_stacks); do not fold them in here."
+    )
+    parser.add_argument(
         "--io-pads",
         type=str,
         metavar="JSON_FILE",
@@ -3123,6 +3159,27 @@ Examples:
             ref, method = item.split('=', 1)
             die_connections[ref.strip()] = method.strip()
 
+    # Parse per-die thickness: "U1=750,U2=750" (um, positive finite floats)
+    die_thicknesses = None
+    if args.die_thicknesses:
+        die_thicknesses = {}
+        for item in args.die_thicknesses.split(','):
+            if '=' not in item:
+                print(f"Error: Invalid die-thicknesses format: '{item}'. "
+                      f"Use REF=UM.", file=sys.stderr)
+                return 1
+            ref, raw = item.split('=', 1)
+            try:
+                value = float(raw.strip())
+            except ValueError:
+                value = float("nan")
+            if not math.isfinite(value) or value <= 0.0:
+                print(f"Error: Invalid die thickness '{raw.strip()}' for "
+                      f"'{ref.strip()}': expected a positive number of "
+                      f"micrometers.", file=sys.stderr)
+                return 1
+            die_thicknesses[ref.strip()] = value
+
     # Parse the annotation layer "LAYER/DATATYPE" (only used if --annotate-boundaries)
     try:
         _vl, _vd = args.boundary_viz_layer.split('/', 1)
@@ -3163,6 +3220,7 @@ Examples:
         annotate_boundaries=args.annotate_boundaries,
         boundary_viz_layer=boundary_viz_layer,
         die_connections=die_connections,
+        die_thicknesses=die_thicknesses,
     )
 
     return 0 if success else 1

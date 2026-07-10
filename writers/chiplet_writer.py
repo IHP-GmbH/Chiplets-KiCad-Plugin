@@ -11,6 +11,7 @@ Frame and anchor semantics follow
 chiplet-studio/docs/coord_frame_contract.md sections 1, 4.1, 4.4.
 """
 
+import math
 import os
 import sys
 
@@ -296,6 +297,84 @@ def write_die_connections(board, mapping):
         if text_changed:
             fp.SetField(CONNECTION_FIELD, new)
         field = _get_field(fp, CONNECTION_FIELD)
+        restyled = _style_managed_field(field) if field is not None else False
+        if text_changed or restyled:
+            changed.append(ref)
+    return changed
+
+
+# Footprint field carrying the die's physical thickness in micrometers
+# (the body z-extent written to .chiplet dimensions.thickness; interconnect
+# stack heights are a separate axis -- see connection_stacks). Same family
+# as CONNECTION: the board is the source of truth, presentation is
+# machine-managed.
+DIE_THICKNESS_FIELD = "DIE_THICKNESS_UM"
+
+
+def parse_thickness_um(raw):
+    """Parse a DIE_THICKNESS_UM field value. Returns a positive float in
+    micrometers, or None when the text is empty or not a positive finite
+    number (callers decide whether that warrants a warning)."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    if not math.isfinite(value) or value <= 0.0:
+        return None
+    return value
+
+
+def read_die_thicknesses(board):
+    """Per-die physical thickness (um) from the board's footprint fields.
+
+    Returns {ref: thickness_um} for every die footprint (GDS_FILE present)
+    whose DIE_THICKNESS_UM field parses as a positive finite number. A
+    non-empty value that does not parse warns to stderr and is skipped --
+    the die then keeps the format default of 0.0 downstream.
+    """
+    result = {}
+    for fp in list(board.Footprints()):
+        if not _field_text(fp, "GDS_FILE"):
+            continue
+        raw = _field_text(fp, DIE_THICKNESS_FIELD).strip()
+        if not raw:
+            continue
+        ref = fp.GetReference()
+        value = parse_thickness_um(raw)
+        if value is None:
+            print("WARNING: %s: ignoring %s '%s' (expected a positive "
+                  "number of micrometers)" % (ref, DIE_THICKNESS_FIELD, raw),
+                  file=sys.stderr)
+            continue
+        result[ref] = value
+    return result
+
+
+def write_die_thicknesses(board, mapping):
+    """Persist per-die thickness (um) to footprint DIE_THICKNESS_UM fields.
+
+    `mapping` is {ref: text}; an empty value clears the field (the die
+    falls back to the format default of 0.0). Only die footprints
+    (GDS_FILE present) are touched, and only when the field text or its
+    presentation actually changes (kept hidden on F.Fab at small size --
+    see _style_managed_field). Returns the refs that were modified; the
+    caller owns saving the board.
+    """
+    changed = []
+    for fp in list(board.Footprints()):
+        if not _field_text(fp, "GDS_FILE"):
+            continue
+        ref = fp.GetReference()
+        if ref not in mapping:
+            continue
+        new = (mapping[ref] or "").strip()
+        text_changed = _field_text(fp, DIE_THICKNESS_FIELD).strip() != new
+        if text_changed:
+            fp.SetField(DIE_THICKNESS_FIELD, new)
+        field = _get_field(fp, DIE_THICKNESS_FIELD)
         restyled = _style_managed_field(field) if field is not None else False
         if text_changed or restyled:
             changed.append(ref)
