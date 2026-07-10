@@ -283,24 +283,28 @@ class ChipletExportDialog(wx.Dialog):
         opts_box.Add(grid, 0, wx.EXPAND | wx.ALL, 4)
         outer.Add(opts_box, 0, wx.EXPAND | wx.ALL, 8)
 
-        # Per-die connection method: one row per die footprint (GDS_FILE
-        # field). Initialized from each footprint's CONNECTION field and
-        # written back on Run, so the board stays the source of truth for
-        # per-die method selection. A die on "(use default)" follows the
-        # assembly-wide stack above; mixed selections give each die its own
-        # method's 3D bodies, connection stack and DRC numbers.
+        # Per-die connection method and physical thickness: one row per die
+        # footprint (GDS_FILE field). Initialized from each footprint's
+        # CONNECTION / DIE_THICKNESS_UM fields and written back on Run, so
+        # the board stays the source of truth for per-die selection. A die
+        # on "(use default)" follows the assembly-wide stack above; mixed
+        # selections give each die its own method's 3D bodies, connection
+        # stack and DRC numbers. An empty thickness keeps the .chiplet
+        # format default of 0.0.
         self._die_conn_ctrls = {}
         self._die_conn_items = {}
+        self._die_thick_ctrls = {}
         die_refs = self._die_refs()
         if die_refs:
             die_box = wx.StaticBoxSizer(
                 wx.VERTICAL, panel,
-                "Per-die connection (overrides the default; saved to the "
-                "footprint's CONNECTION field)")
-            die_grid = wx.FlexGridSizer(rows=len(die_refs), cols=2,
+                "Per-die connection and thickness (saved to the footprint's "
+                "CONNECTION / DIE_THICKNESS_UM fields)")
+            die_grid = wx.FlexGridSizer(rows=len(die_refs), cols=4,
                                         vgap=2, hgap=8)
             die_grid.AddGrowableCol(1, 1)
             board_conns = self._board_die_connections()
+            board_thicks = self._board_die_thicknesses()
             for ref in die_refs:
                 die_grid.Add(wx.StaticText(panel, label="%s:" % ref),
                              0, wx.ALIGN_CENTER_VERTICAL)
@@ -308,6 +312,17 @@ class ChipletExportDialog(wx.Dialog):
                 self._die_conn_ctrls[ref] = ctrl
                 self._set_die_choice_items(ref, board_conns.get(ref, ""))
                 die_grid.Add(ctrl, 1, wx.EXPAND)
+                die_grid.Add(wx.StaticText(panel, label="thickness (um):"),
+                             0, wx.ALIGN_CENTER_VERTICAL)
+                thick = wx.TextCtrl(panel, size=wx.Size(80, -1))
+                thick.SetValue(board_thicks.get(ref, ""))
+                thick.SetToolTip(
+                    "Physical die thickness in micrometers (body z-extent "
+                    "written to dimensions.thickness). Empty keeps the "
+                    "format default of 0.0. Interconnect stack heights are "
+                    "modeled separately -- do not add them here.")
+                self._die_thick_ctrls[ref] = thick
+                die_grid.Add(thick, 0)
             die_box.Add(die_grid, 0, wx.EXPAND | wx.ALL, 4)
             outer.Add(die_box, 0, wx.EXPAND | wx.ALL, 8)
 
@@ -399,6 +414,22 @@ class ChipletExportDialog(wx.Dialog):
         except Exception:
             return {}
 
+    def _board_die_thicknesses(self):
+        """{ref: display text} persisted in DIE_THICKNESS_UM fields.
+
+        Values come back as floats from the reader; render them without
+        trailing zeros so the field shows what the user typed ("750", not
+        "750.000000").
+        """
+        if self._board is None:
+            return {}
+        try:
+            from .writers.chiplet_writer import read_die_thicknesses
+            return {ref: ("%.6f" % v).rstrip("0").rstrip(".")
+                    for ref, v in read_die_thicknesses(self._board).items()}
+        except Exception:
+            return {}
+
     def _set_die_choice_items(self, ref, current):
         """(Re)populate one die's method choice, selecting `current`.
 
@@ -425,6 +456,17 @@ class ChipletExportDialog(wx.Dialog):
         if idx is None or not (0 <= idx < len(items)):
             return ""
         return items[idx]
+
+    def _die_thickness_text(self, ref):
+        """Raw thickness field text for `ref` ("" = keep format default)."""
+        return self._die_thick_ctrls[ref].GetValue().strip()
+
+    def _die_thickness_errors(self):
+        """Refs whose thickness text is non-empty but not a positive number."""
+        from .writers.chiplet_writer import parse_thickness_um
+        return [ref for ref in sorted(self._die_thick_ctrls)
+                if self._die_thickness_text(ref)
+                and parse_thickness_um(self._die_thickness_text(ref)) is None]
 
     # ------------------------------------------------------------------
     # Options collection
@@ -479,6 +521,11 @@ class ChipletExportDialog(wx.Dialog):
         die_conns = {ref: self._die_conn_value(ref)
                      for ref in self._die_conn_ctrls}
         die_conns = {ref: m for ref, m in die_conns.items() if m}
+        from .writers.chiplet_writer import parse_thickness_um
+        die_thicks = {ref: parse_thickness_um(self._die_thickness_text(ref))
+                      for ref in self._die_thick_ctrls}
+        die_thicks = {ref: t for ref, t in die_thicks.items()
+                      if t is not None}
         return ExportOptions(
             output_dir=self._out_dir_ctrl.GetPath(),
             emit_chiplet=self._cb_chiplet.GetValue(),
@@ -488,6 +535,7 @@ class ChipletExportDialog(wx.Dialog):
             top_cell=self._top_cell_ctrl.GetValue() or "INTERPOSER",
             connection_type=conn,
             die_connections=die_conns,
+            die_thicknesses=die_thicks,
             lyp_override=self._lyp_ctrl.GetPath() or "",
             worker_python_override=self._worker_ctrl.GetPath() or "",
             interposer_pdk_root=self._interposer_root_ctrl.GetPath() or "",
@@ -520,6 +568,16 @@ class ChipletExportDialog(wx.Dialog):
                 wx.OK | wx.ICON_WARNING,
             )
             return
+        bad_thicks = self._die_thickness_errors()
+        if bad_thicks:
+            wx.MessageBox(
+                "Invalid die thickness for %s: expected a positive number "
+                "of micrometers (or empty to keep the format default)."
+                % ", ".join(bad_thicks),
+                "Chiplet Export",
+                wx.OK | wx.ICON_WARNING,
+            )
+            return
 
         self._log_ctrl.SetValue("")
         self._cancel_event = threading.Event()
@@ -542,6 +600,24 @@ class ChipletExportDialog(wx.Dialog):
             except Exception as exc:
                 self._append_log_safe(
                     "Warning: could not write CONNECTION fields: %s" % exc)
+
+        # Same for the per-die thickness fields (validated above; empty
+        # clears the field so the die keeps the format default).
+        if self._die_thick_ctrls and self._board is not None:
+            try:
+                from .writers.chiplet_writer import write_die_thicknesses
+                changed = write_die_thicknesses(
+                    self._board,
+                    {ref: self._die_thickness_text(ref)
+                     for ref in self._die_thick_ctrls})
+                if changed:
+                    self._append_log_safe(
+                        "Updated DIE_THICKNESS_UM field on: %s (save the "
+                        "board to keep it)" % ", ".join(changed))
+            except Exception as exc:
+                self._append_log_safe(
+                    "Warning: could not write DIE_THICKNESS_UM fields: %s"
+                    % exc)
 
         def _worker():
             try:

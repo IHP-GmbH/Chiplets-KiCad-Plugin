@@ -362,6 +362,52 @@ def test_update_chiplet_legacy_global_unchanged(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Per-die physical thickness (--die-thicknesses)
+# ---------------------------------------------------------------------------
+
+def test_update_chiplet_die_thickness_set_per_die(tmp_path):
+    """Listed dies get dimensions.thickness; unlisted dies keep the
+    intermediate writer's 0.0 placeholder. position.z stays the z-mounting
+    result: the die body extends up from the seating plane, so thickness
+    must not shift z."""
+    data = _update_mixed(
+        tmp_path, connection_type="cupillar_opt1",
+        die_thicknesses={"U1": 750.0})
+    assert _die(data, "U1")["dimensions"]["thickness"] == 750.0
+    assert _die(data, "U2")["dimensions"]["thickness"] == 0.0
+    assert _die(data, "U1")["position"]["z"] == 13.83 + 44.0
+    assert _die(data, "U2")["position"]["z"] == 13.83 + 44.0
+
+
+def test_update_chiplet_die_thickness_without_connections(tmp_path):
+    """Thickness applies independently of any connection selection."""
+    data = _update_mixed(
+        tmp_path, die_thicknesses={"U1": 250.0, "U2": 750.0})
+    assert _die(data, "U1")["dimensions"]["thickness"] == 250.0
+    assert _die(data, "U2")["dimensions"]["thickness"] == 750.0
+
+
+def test_update_chiplet_die_thickness_never_touches_interposer(tmp_path):
+    """The interposer's thickness encodes the attachment-surface z (the
+    z-mounting fallback surface) -- die_thicknesses only targets components
+    of type die, so an interposer entry is ignored by construction."""
+    data = _update_mixed(
+        tmp_path, die_thicknesses={"interposer": 999.0, "U1": 750.0})
+    interposer = next(c for c in data["components"]
+                      if c.get("type") == "interposer")
+    assert interposer["dimensions"]["thickness"] == 13.83
+    assert _die(data, "U1")["dimensions"]["thickness"] == 750.0
+
+
+def test_update_chiplet_no_thickness_keeps_placeholder(tmp_path):
+    """Without die_thicknesses the die blocks are byte-equal to the prior
+    behaviour (placeholder 0.0 survives)."""
+    data = _update_mixed(tmp_path, connection_type="cupillar_opt1")
+    assert _die(data, "U1")["dimensions"]["thickness"] == 0.0
+    assert _die(data, "U2")["dimensions"]["thickness"] == 0.0
+
+
+# ---------------------------------------------------------------------------
 # Per-die 3D bodies in the generated GDS (mixed methods, one export)
 # ---------------------------------------------------------------------------
 
