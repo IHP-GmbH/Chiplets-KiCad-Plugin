@@ -48,15 +48,18 @@ def test_top_cell_read_from_device_gds_path(tmp_path):
     db = pytest.importorskip("klayout.db")
     yaml = pytest.importorskip("yaml")
 
-    # Die GDS lives under chiplets/; the .chiplet sits in a throwaway output
-    # dir, so its ../chiplets/die.gds does NOT resolve from there. The device's
-    # gds_file (board-resolved absolute) is what makes top_cell resolvable.
+    # Die GDS lives at <root>/chiplets/die.gds. The .chiplet sits in a throwaway
+    # output dir nested two levels deep, so its ../chiplets/die.gds would resolve
+    # to <root>/a/b/chiplets/die.gds -- a path that does not exist. The
+    # .chiplet-relative fallback therefore cannot reach the die; only the device's
+    # gds_file (board-resolved absolute) makes top_cell resolvable. That isolates
+    # the device-GDS preference branch: drop it and this test fails.
     die_gds = tmp_path / "chiplets" / "die.gds"
     die_gds.parent.mkdir(parents=True)
     _write_die_gds(db, die_gds, "MyDie")
 
-    out = tmp_path / "throwaway_out"
-    out.mkdir()
+    out = tmp_path / "a" / "b" / "throwaway_out"
+    out.mkdir(parents=True)
     chiplet = out / "t.chiplet"
     chiplet.write_text(_CHIPLET)
 
