@@ -242,6 +242,11 @@ class HYPParser:
     )
     PERIMETER_ARC_PATTERN = re.compile(r'\(PERIMETER_ARC\b')
 
+    # The {BOARD "<path>"} header records the source board file (KiCad
+    # board.GetFileName()); its directory is the base for resolving a
+    # board-relative die GDS_FILE (see _parse_devices).
+    BOARD_HEADER_PATTERN = re.compile(r'\{BOARD\s+"([^"]*)"')
+
     def __init__(self, hyp_path: str):
         self.hyp_path = hyp_path
         self.segments: List[TraceSegment] = []
@@ -253,6 +258,7 @@ class HYPParser:
         self.units: str = "ENGLISH"  # Default to inches
         self.stackup_layers: List[str] = []  # Layer order from STACKUP (top to bottom)
         self.perimeter_segments: List[PerimeterSegment] = []  # board outline
+        self.board_path: str = ""  # source board file from the {BOARD "..."} header
 
     def parse(self) -> None:
         """Parse the HYP file and extract all geometry."""
@@ -267,6 +273,7 @@ class HYPParser:
             self._parse_units(content)
             self._parse_stackup(content)
             self._parse_board_perimeter(content)
+            self._parse_board_path(content)
             self._parse_padstacks(content)
             self._parse_devices(content)
             self._parse_segments_and_vias(content)
@@ -417,16 +424,40 @@ class HYPParser:
                 )
                 self.pins.append(pin)
 
+    def _parse_board_path(self, content: str) -> None:
+        """Capture the source board file path from the {BOARD "..."} header.
+
+        Its directory anchors a board-relative die GDS_FILE (e.g.
+        ../chiplets/die.gds), so the die layout resolves against the board's
+        own location instead of the process CWD (the .hyp lives in a temp dir).
+        """
+        m = self.BOARD_HEADER_PATTERN.search(content)
+        if m:
+            self.board_path = m.group(1)
+
     def _parse_devices(self, content: str) -> None:
         """Parse DEVICES section for GDS_FILE entries with position."""
+        board_dir = os.path.dirname(self.board_path) if self.board_path else ""
         for match in self.DEVICE_PATTERN.finditer(content):
+            gds_file = match.group(6)
+            # Resolve a board-relative die GDS_FILE (e.g. ../chiplets/die.gds)
+            # against the source board's directory, so the die layout is found
+            # wherever the export runs -- the .hyp itself lives in a temp dir,
+            # and the importer otherwise resolves a relative path against the
+            # process CWD. Absolute paths and ${VAR} ecosystem-root refs are
+            # left as-is (${VAR} is expanded later, in add_device); an empty
+            # board_dir (e.g. a synthetic {BOARD "name"} with no directory)
+            # also leaves the path untouched, preserving CWD-relative behavior.
+            if (board_dir and gds_file and "${" not in gds_file
+                    and not os.path.isabs(gds_file)):
+                gds_file = os.path.normpath(os.path.join(board_dir, gds_file))
             device = Device(
                 ref=match.group(1),
                 layer=match.group(2),
                 x=float(match.group(3)),       # Position X from HYP
                 y=float(match.group(4)),       # Position Y from HYP
                 rotation=float(match.group(5)),  # Rotation in degrees
-                gds_file=match.group(6)
+                gds_file=gds_file
             )
             self.devices.append(device)
 
@@ -2195,8 +2226,26 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     component['position']['x'] = new_x
                     component['position']['y'] = new_y
 
-            # Read top_cell from die GDS
-            die_gds = component.get('layout', '')
+            # Read top_cell from the die GDS. Prefer the device's GDS path,
+            # which the HYP parser already resolved against the board directory:
+            # a board-relative die layout (e.g. ../chiplets/die.gds) resolves
+            # correctly here regardless of the output directory, matching the
+            # geometry the assembly was built from. Fall back to the .chiplet
+            # layout field, resolved against the .chiplet's own directory (where
+            # readers anchor a relative layout) rather than the process CWD.
+            die_gds = ''
+            ref = component.get('id', '')
+            if devices is not None:
+                dev = next((d for d in devices
+                            if d.ref == ref and getattr(d, 'gds_file', '')),
+                           None)
+                if dev is not None:
+                    die_gds = dev.gds_file
+            if not die_gds:
+                die_gds = component.get('layout', '')
+                if die_gds and "${" not in die_gds and not os.path.isabs(die_gds):
+                    die_gds = os.path.normpath(os.path.join(
+                        str(chiplet_file.resolve().parent), die_gds))
             if die_gds:
                 die_top_cell = _read_gds_top_cell(die_gds)
                 if die_top_cell:
