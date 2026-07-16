@@ -520,11 +520,11 @@ def test_single_method_export_unchanged_by_die_connections_param(
 
 
 # ---------------------------------------------------------------------------
-# Board outline -> prBoundary 189/0 (interposer extent = Edge.Cuts, not copper)
+# Board outline -> prBoundary 235/0 (interposer extent = Edge.Cuts, not copper)
 # ---------------------------------------------------------------------------
 
 def _outline_dbbox(gds_path):
-    """DBox of prBoundary 189/0 in the top cell, or None when absent."""
+    """DBox of prBoundary 235/0 in the top cell, or None when absent."""
     from klayout import db
     layout = db.Layout()
     layout.read(gds_path)
@@ -548,7 +548,7 @@ def test_parser_reads_board_perimeter(tmp_path):
 
 def test_convert_draws_outline_on_prboundary(tmp_path, monkeypatch):
     """The board outline (2000x1000 um in MIXED_HYP) is drawn as a closed
-    polygon on prBoundary 189/0 of the generated interposer GDS."""
+    polygon on prBoundary 235/0 of the generated interposer GDS."""
     monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
     hyp = tmp_path / "o.hyp"
     hyp.write_text(MIXED_HYP)
