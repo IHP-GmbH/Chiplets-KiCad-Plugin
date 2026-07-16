@@ -1359,10 +1359,12 @@ class GDSGenerator:
     # interposer component from the fab outline instead of the drawn-copper
     # extent. A future assembly containment rule (chiplet inside interposer)
     # reads the same layer.
-    PRBOUNDARY_LAYER = (189, 0)
+    # 235/0 since the 2026-07-16 IntM4TM2 layer-map parity migration
+    # (was 189/0; GDS produced before then carry the outline on 189/0).
+    PRBOUNDARY_LAYER = (235, 0)
 
     def add_board_outline(self, perimeter_segments: List[PerimeterSegment]) -> int:
-        """Draw the board outline on prBoundary (189/0).
+        """Draw the board outline on prBoundary (235/0).
 
         Chains the BOARD-section PERIMETER_SEGMENTs into closed loops by
         matching endpoints and inserts one polygon per loop. All-or-nothing:
@@ -1427,7 +1429,7 @@ class GDSGenerator:
         return len(loops)
 
     def get_outline_bbox(self) -> Optional[Tuple[float, float, float, float]]:
-        """Bbox of the drawn board outline (prBoundary 189/0), or None.
+        """Bbox of the drawn board outline (prBoundary 235/0), or None.
 
         Returns:
             (x_min, y_min, width, height) in micrometers, or None when the
@@ -1900,13 +1902,13 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                  heights, which model the interconnect gap below the die,
                  and to position.z, which stays the z-mounting result.
         outline_bbox: Optional (x_min, y_min, width, height) in micrometers
-                 of the board outline (prBoundary 189/0, drawn from KiCad's
+                 of the board outline (prBoundary 235/0, drawn from KiCad's
                  Edge.Cuts). When available, interposer dimensions come
                  from it -- the fab outline -- instead of the drawn-geometry
                  bbox; position keeps the full-bbox center (the
                  anchor: bbox_center mesh contract). When None and bbox is
                  computed from the GDS here, it is derived from layer
-                 189/0 if present in the file.
+                 235/0 if present in the file.
 
     Returns:
         True if successful, False otherwise.
@@ -1983,11 +1985,11 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     x_min, y_min, width, height = bbox
 
                     # Dimensions: the fab outline (KiCad Edge.Cuts ->
-                    # prBoundary 189/0) when drawn; the drawn-geometry
+                    # prBoundary 235/0) when drawn; the drawn-geometry
                     # bbox otherwise (legacy GDS without an outline).
                     if outline_bbox:
                         dim_w, dim_h = outline_bbox[2], outline_bbox[3]
-                        dim_src = "board outline, prBoundary 189/0"
+                        dim_src = "board outline, prBoundary 235/0"
                     else:
                         dim_w, dim_h = width, height
                         dim_src = "drawn-geometry bbox"
@@ -3364,12 +3366,13 @@ Examples:
         return 1
 
     # Refuse an annotation layer that collides with a fabrication layer: the
-    # painter clear()s the layer first, so aliasing prBoundary (189/0), the
-    # legacy exchange0 (190/0), or a cu-pillar fab layer would silently wipe
-    # real geometry (and break the "never aliases a fab layer" contract).
+    # painter clear()s the layer first, so aliasing prBoundary (235/0; 189/0
+    # kept for pre-migration GDS), the exchange0 (190/0), or a cu-pillar fab
+    # layer would silently wipe real geometry (and break the "never aliases a
+    # fab layer" contract).
     if args.annotate_boundaries:
         _fab_layers = set(GDSGenerator.CUPILLAR_FAB_LAYERS.values()) | {
-            (189, 0), (190, 0)}
+            (235, 0), (189, 0), (190, 0)}
         if boundary_viz_layer in _fab_layers:
             print(f"Error: --boundary-viz-layer {boundary_viz_layer[0]}/"
                   f"{boundary_viz_layer[1]} collides with a fabrication layer; "
