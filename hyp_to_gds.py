@@ -2792,8 +2792,7 @@ def convert_hyp_to_gds(
         print(f"\nMerging pre-generated cu-pillar GDS: {cupillar_gds_path}")
         cupillar_layout = db.Layout()
         cupillar_layout.read(str(cupillar_path))
-        for ci in range(cupillar_layout.cells()):
-            src_cell = cupillar_layout.cell(ci)
+        for src_cell in cupillar_layout.each_cell():
             if src_cell.parent_cells() == 0:  # top-level cell(s)
                 new_cell = generator.layout.create_cell(src_cell.name)
                 new_cell.copy_tree(src_cell)
@@ -2946,8 +2945,12 @@ def convert_hyp_to_gds(
             merged = 0
             for m in methods_in_use:
                 m_layout = per_method[m][0].layout
-                for ci in range(m_layout.cells()):
-                    src = m_layout.cell(ci)
+                # Iterate valid cells only: a generator that instantiates a
+                # PCell and prunes the leftover proxy (as the IntM4TM2
+                # CuPillarPad generator does) leaves freed slots in the cell
+                # index space, so range(cells()) + cell(ci) would raise
+                # "Not a valid cell index". each_cell() skips the gaps.
+                for src in m_layout.each_cell():
                     if src.name.startswith("CUPILLARS_"):
                         new_cell = generator.layout.create_cell(src.name)
                         new_cell.copy_tree(src)
