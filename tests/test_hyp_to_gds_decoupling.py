@@ -645,3 +645,50 @@ def test_update_chiplet_falls_back_to_full_bbox_without_outline(tmp_path):
     assert ip["dimensions"]["height"] == 1000.0
     assert ip["position"]["x"] == 1500.0
     assert ip["position"]["y"] == 500.0
+
+
+def test_update_chiplet_missing_outline_warns_loudly(tmp_path, capsys):
+    """A GDS without any prBoundary must not degrade silently: the consumer
+    warns (stderr) that dimensions came from copper, not the fab outline, and
+    that placement can shift. With no legacy outline either, it points at
+    Edge.Cuts."""
+    from klayout import db
+    gds = tmp_path / "i.gds"
+    ly = db.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("TOP")
+    top.shapes(ly.layer(134, 0)).insert(db.DBox(0.0, 0.0, 3000.0, 1000.0))
+    ly.write(str(gds))
+    p = tmp_path / "d.chiplet"
+    p.write_text(MIXED_CHIPLET)
+    assert h.update_chiplet_file(str(p), str(gds)) is True
+    err = capsys.readouterr().err
+    assert "prBoundary 235/0 outline not found" in err
+    assert "can shift" in err
+    assert "Edge.Cuts" in err
+    assert "legacy" not in err  # nothing on 189/0 -> no migration hint
+
+
+def test_update_chiplet_missing_outline_flags_legacy_189(tmp_path, capsys):
+    """A pre-migration GDS carries the outline on 189/0. The consumer looks on
+    235/0, degrades, and names the legacy layer + the fix (regenerate)."""
+    import yaml
+    from klayout import db
+    gds = tmp_path / "i.gds"
+    ly = db.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("TOP")
+    top.shapes(ly.layer(134, 0)).insert(db.DBox(0.0, 0.0, 3000.0, 1000.0))
+    top.shapes(ly.layer(189, 0)).insert(db.DBox(0.0, 0.0, 2000.0, 1000.0))
+    ly.write(str(gds))
+    p = tmp_path / "d.chiplet"
+    p.write_text(MIXED_CHIPLET)
+    assert h.update_chiplet_file(str(p), str(gds)) is True
+    err = capsys.readouterr().err
+    assert "prBoundary 235/0 outline not found" in err
+    assert "189/0" in err
+    assert "Regenerate" in err
+    # dimensions still fall back to the drawn-geometry bbox (235/0 is absent)
+    data = yaml.safe_load(p.read_text())
+    ip = next(c for c in data["components"] if c["id"] == "interposer")
+    assert ip["dimensions"]["width"] == 3000.0
