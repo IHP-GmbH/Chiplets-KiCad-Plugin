@@ -18,7 +18,8 @@ import wx
 
 from .pipeline.orchestrator import (
     ExportOptions, ExportResult, run_export, available_connection_types,
-    describe_assembly_drc, discover_dependency_root, discover_interposer_lyp,
+    connection_method_specs, describe_assembly_drc, describe_connection_method,
+    discover_dependency_root, discover_interposer_lyp, format_connection_label,
 )
 
 
@@ -123,6 +124,27 @@ class _DirField(wx.Panel):
             dlg.Destroy()
 
 
+def _muted(parent, text="", shrinkable=False):
+    """Grey explanatory label; ``shrinkable`` keeps it out of the width budget.
+
+    A sizer takes a StaticText's full text width as its minimum and
+    ``outer.SetSizeHints`` turns the widest child into the dialog's enforced
+    minimum width -- and ``wx.ST_ELLIPSIZE_END`` alone does not change that
+    best size on wxGTK, it only decides how the text is clipped once the
+    control is already too narrow. So a long sentence needs both the style
+    and an explicit minimum of its own, or it silently widens the dialog by
+    a few hundred pixels. Column headers pass ``shrinkable=False``: they are
+    short, and their column is not growable, so their width is exactly what
+    should reserve space.
+    """
+    label = wx.StaticText(parent, label=text, style=wx.ST_ELLIPSIZE_END)
+    label.SetForegroundColour(
+        wx.SystemSettings.GetColour(wx.SYS_COLOUR_GRAYTEXT))
+    if shrinkable:
+        label.SetMinSize(wx.Size(1, -1))
+    return label
+
+
 class ChipletExportDialog(wx.Dialog):
     """Single-button chiplet export dialog."""
 
@@ -166,14 +188,28 @@ class ChipletExportDialog(wx.Dialog):
         out_box.Add(self._out_dir_ctrl, 1, wx.EXPAND | wx.ALL, 4)
         outer.Add(out_box, 0, wx.EXPAND | wx.ALL, 8)
 
-        # Output toggles
+        # Outputs. The .chiplet and the interposer GDS are stated, not
+        # offered: the .chiplet is the export's product and the GDS is the
+        # layout it references, and hyp_to_gds writes both on every run
+        # anyway -- a toggle could only have discarded them. The two real
+        # options are the extra artifacts.
         outs_box = wx.StaticBoxSizer(wx.VERTICAL, panel, "Outputs")
-        self._cb_chiplet = wx.CheckBox(panel, label="Canonical .chiplet")
-        self._cb_chiplet.SetValue(True)
-        self._cb_interposer = wx.CheckBox(panel, label="Interposer GDS")
-        self._cb_interposer.SetValue(True)
+        always = _muted(
+            panel,
+            "Always written: <board>.chiplet (open this in Chiplet Studio) "
+            "and layout/<board>_interposer.gds",
+            shrinkable=True)
+        always.SetToolTip(
+            "The .chiplet is the assembly description Chiplet Studio loads; "
+            "its layout: field points at the interposer GDS, so the two "
+            "travel together. Both are produced on every run.")
+        outs_box.Add(always, 0, wx.ALL, 2)
         self._cb_complete = wx.CheckBox(
             panel, label="Complete assembly GDS (with chiplet instances)")
+        self._cb_complete.SetToolTip(
+            "Interposer plus every placed die flattened into one GDS. "
+            "Required for the ADK assembly DRC, which runs right after the "
+            "export when this is on.")
         self._cb_annotate = wx.CheckBox(
             panel, label="Annotate chiplet boundaries (viewer-only layer)")
         self._cb_annotate.SetToolTip(
@@ -181,8 +217,7 @@ class ChipletExportDialog(wx.Dialog):
             "an annotation GDS layer (1000/0) for eyeball inspection in "
             "KLayout. No DRC rule reads it; the assembly contract stays in the "
             "boundary manifest. Off by default.")
-        for cb in (self._cb_chiplet, self._cb_interposer,
-                   self._cb_complete, self._cb_annotate):
+        for cb in (self._cb_complete, self._cb_annotate):
             outs_box.Add(cb, 0, wx.ALL, 2)
         outer.Add(outs_box, 0, wx.EXPAND | wx.ALL, 8)
 
@@ -240,7 +275,7 @@ class ChipletExportDialog(wx.Dialog):
 
         # Pipeline options
         opts_box = wx.StaticBoxSizer(wx.VERTICAL, panel, "Pipeline options")
-        grid = wx.FlexGridSizer(rows=3, cols=2, vgap=4, hgap=8)
+        grid = wx.FlexGridSizer(rows=4, cols=2, vgap=4, hgap=8)
         grid.AddGrowableCol(1, 1)
 
         grid.Add(wx.StaticText(panel, label="Top cell:"),
@@ -254,11 +289,27 @@ class ChipletExportDialog(wx.Dialog):
         # methods included); built-in IHP fallback keeps the dialog usable
         # when no PDK is on disk. Per-die overrides below win over this
         # assembly-wide default.
-        self._conn_choices = available_connection_types(
-            self._interconnect_root_ctrl.GetPath(), board=self._board)
-        self._conn_ctrl = wx.Choice(panel, choices=self._conn_choices)
+        #
+        # _conn_choices holds bare method ids and _conn_labels the strings
+        # shown; the two are index-parallel, so every read-back path keeps
+        # returning the id the CLI and the CONNECTION field expect. Same
+        # shape the per-die rows already use with _die_conn_items.
+        self._conn_choices = []
+        self._conn_labels = []
+        self._conn_specs = {}
+        self._load_connection_catalogue()
+        self._conn_ctrl = wx.Choice(panel, choices=self._conn_labels)
         self._conn_ctrl.SetSelection(0)
+        self._conn_ctrl.Bind(wx.EVT_CHOICE, self._on_conn_selected)
         grid.Add(self._conn_ctrl, 1, wx.EXPAND)
+
+        # The numbers behind the selected method: pitch and spacing are what
+        # the assembly DRC will check this design against, so they belong on
+        # screen and not only in the PDK manifest. One line for the whole
+        # dialog -- one per die row would crowd out the log on a 2+ die board.
+        grid.Add(wx.StaticText(panel, label=""), 0)
+        self._conn_detail = _muted(panel, shrinkable=True)
+        grid.Add(self._conn_detail, 1, wx.EXPAND)
 
         grid.Add(wx.StaticText(panel, label="Interposer technology LYP:"),
                  0, wx.ALIGN_CENTER_VERTICAL)
@@ -298,43 +349,80 @@ class ChipletExportDialog(wx.Dialog):
         if die_refs:
             die_box = wx.StaticBoxSizer(
                 wx.VERTICAL, panel,
-                "Per-die connection and thickness (saved to the footprint's "
-                "CONNECTION / DIE_THICKNESS_UM fields)")
-            die_grid = wx.FlexGridSizer(rows=len(die_refs), cols=4,
+                "Per-die settings (saved to the footprint's CONNECTION / "
+                "DIE_THICKNESS_UM fields)")
+            die_grid = wx.FlexGridSizer(rows=len(die_refs) + 1, cols=4,
                                         vgap=2, hgap=8)
             die_grid.AddGrowableCol(1, 1)
+            # Column headers: two unrelated quantities share each row, and
+            # without them "thickness" next to a connection dropdown reads as
+            # the thickness OF that connection.
+            for header in ("Die", "Interconnect method", "",
+                           "Die thickness (um)"):
+                die_grid.Add(_muted(panel, header), 0,
+                             wx.ALIGN_CENTER_VERTICAL)
             board_conns = self._board_die_connections()
             board_thicks = self._board_die_thicknesses()
             for ref in die_refs:
                 die_grid.Add(wx.StaticText(panel, label="%s:" % ref),
                              0, wx.ALIGN_CENTER_VERTICAL)
                 ctrl = wx.Choice(panel)
+                ctrl.Bind(wx.EVT_CHOICE,
+                          lambda _e, r=ref: self._refresh_die_tooltip(r))
                 self._die_conn_ctrls[ref] = ctrl
                 self._set_die_choice_items(ref, board_conns.get(ref, ""))
                 die_grid.Add(ctrl, 1, wx.EXPAND)
-                die_grid.Add(wx.StaticText(panel, label="thickness (um):"),
+                die_grid.Add(wx.StaticText(panel, label="die Si thickness:"),
                              0, wx.ALIGN_CENTER_VERTICAL)
-                thick = wx.TextCtrl(panel, size=wx.Size(80, -1))
+                thick = wx.TextCtrl(panel, size=wx.Size(90, -1))
                 thick.SetValue(board_thicks.get(ref, ""))
+                # A hint, not a value: GetValue() stays empty, so an
+                # untouched field is never stamped onto the footprint of a
+                # board that never declared a thickness.
+                thick.SetHint("750")
                 thick.SetToolTip(
-                    "Physical die thickness in micrometers (body z-extent "
-                    "written to dimensions.thickness). Empty keeps the "
-                    "format default of 0.0. Interconnect stack heights are "
-                    "modeled separately -- do not add them here.")
+                    "Physical thickness of the silicon die body in "
+                    "micrometers, written to dimensions.thickness. 750 is a "
+                    "standard SG13G2 die. Empty exports 0.0, which the ADK "
+                    "3Dblox export rejects and which Chiplet Studio renders "
+                    "as a 200 um body. Interconnect stack heights are a "
+                    "separate axis -- do not add them here.")
                 self._die_thick_ctrls[ref] = thick
                 die_grid.Add(thick, 0)
             die_box.Add(die_grid, 0, wx.EXPAND | wx.ALL, 4)
+            die_box.Add(
+                _muted(panel,
+                       "Interconnect stack heights (24-80 um) come from the "
+                       "interconnect PDK manifest and are not editable here; "
+                       "the thickness column is the silicon die body.",
+                       shrinkable=True),
+                0, wx.EXPAND | wx.ALL, 4)
             outer.Add(die_box, 0, wx.EXPAND | wx.ALL, 8)
 
-        # Worker python override
-        worker_box = wx.StaticBoxSizer(
-            wx.HORIZONTAL, panel,
-            "Worker Python override (optional; .venv/bin/python3 auto-detected)",
-        )
-        self._worker_ctrl = wx.FilePickerCtrl(
-            panel, wildcard="Python interpreter|*|All files|*")
-        worker_box.Add(self._worker_ctrl, 1, wx.EXPAND | wx.ALL, 4)
-        outer.Add(worker_box, 0, wx.EXPAND | wx.ALL, 8)
+        # Worker Python: one line, pre-filled with what discovery resolved, so
+        # it reports provenance instead of sitting there as an empty box. Left
+        # blank the export follows the discovery chain; typing a path here is
+        # the only override that takes effect without restarting KiCad (the
+        # env var and the project text variable both need one).
+        worker_row = wx.BoxSizer(wx.HORIZONTAL)
+        worker_row.Add(wx.StaticText(panel, label="Worker Python:"),
+                       0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        self._worker_ctrl = wx.TextCtrl(panel)
+        self._worker_ctrl.SetHint(self._worker_python_hint())
+        worker_tip = (
+            "Interpreter that runs hyp_to_gds and the ADK DRC; it needs the "
+            "klayout and PyYAML modules, which KiCad's bundled Python lacks. "
+            "Leave empty to follow the discovery chain "
+            "($KICAD_CHIPLET_PYTHON, the plugin's .venv, the project text "
+            "variable, then a probed python3 on PATH). Set it when this "
+            "checkout has no .venv or the auto-detected one is incomplete.")
+        self._worker_ctrl.SetToolTip(worker_tip)
+        worker_browse = wx.Button(panel, label="Browse...",
+                                  style=wx.BU_EXACTFIT)
+        worker_browse.Bind(wx.EVT_BUTTON, self._on_browse_worker)
+        worker_row.Add(self._worker_ctrl, 1, wx.EXPAND)
+        worker_row.Add(worker_browse, 0, wx.LEFT, 4)
+        outer.Add(worker_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
 
         # Log
         self._log_ctrl = wx.TextCtrl(
@@ -365,6 +453,10 @@ class ChipletExportDialog(wx.Dialog):
         self._close_btn.Bind(wx.EVT_BUTTON, self._on_close)
         self.Bind(wx.EVT_CLOSE, self._on_close)
 
+        # EVT_CHOICE does not fire for the SetSelection calls above, so the
+        # detail line and tooltips need one explicit pass at build time.
+        self._on_conn_selected()
+
         panel.SetSizer(outer)
         outer.SetSizeHints(self)
 
@@ -389,6 +481,96 @@ class ChipletExportDialog(wx.Dialog):
             except Exception:
                 pass
         return str(Path.home())
+
+    def _worker_python_hint(self):
+        """Placeholder text for the worker-Python field.
+
+        Shows the interpreter discovery already resolved so the empty field
+        reads as provenance rather than as a blank required box. Deliberately
+        uses the probe-free preview: the full chain's PATH leg spawns an
+        import probe with a multi-second timeout, and this runs on the UI
+        thread while the dialog is being built.
+        """
+        try:
+            from .pipeline.discovery import preview_worker_python
+            path, source = preview_worker_python(self._plugin_dir,
+                                                 board=self._board)
+        except Exception:
+            path, source = "", ""
+        if path:
+            return "%s  (auto: %s)" % (path, source)
+        return "(auto-detected at Run)"
+
+    def _on_browse_worker(self, _event):
+        dlg = wx.FileDialog(
+            self, "Select the worker Python interpreter",
+            defaultDir=os.path.dirname(self._worker_ctrl.GetValue()) or "/usr/bin",
+            wildcard="Python interpreter|*|All files|*",
+            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
+        )
+        try:
+            if dlg.ShowModal() == wx.ID_OK:
+                self._worker_ctrl.SetValue(dlg.GetPath())
+        finally:
+            dlg.Destroy()
+
+    # ------------------------------------------------------------------
+    # Connection-method catalogue (ids, display labels, spec sheets)
+    # ------------------------------------------------------------------
+
+    def _load_connection_catalogue(self):
+        """(Re)read method ids and their specs from the interconnect PDK.
+
+        Fills the index-parallel ``_conn_choices`` (ids) / ``_conn_labels``
+        (display) pair plus ``_conn_specs``. Every read-back path indexes the
+        id list, so what reaches the CLI and the CONNECTION fields is always
+        the bare method id -- the labels are presentation only.
+        """
+        root = self._interconnect_root_ctrl.GetPath()
+        self._conn_choices = available_connection_types(root, board=self._board)
+        self._conn_specs = connection_method_specs(root, board=self._board)
+        self._conn_labels = [
+            "(none - keep each die's CONNECTION field)" if not method
+            else self._conn_label_for(method)
+            for method in self._conn_choices
+        ]
+
+    def _conn_label_for(self, method_id):
+        """Display label for a method id (bare id when the manifest is mute)."""
+        return format_connection_label(method_id,
+                                       self._conn_specs.get(method_id))
+
+    def _conn_detail_for(self, method_id):
+        """Spec-sheet line for a method id, for the detail text and tooltips."""
+        if not method_id:
+            return ("No assembly-wide default: each die keeps the method in "
+                    "its own CONNECTION field.")
+        return describe_connection_method(method_id,
+                                          self._conn_specs.get(method_id))
+
+    def _on_conn_selected(self, _event=None):
+        """Refresh the detail line + tooltip under the assembly-wide choice.
+
+        Also called explicitly after every programmatic ``SetSelection``:
+        wx does not raise EVT_CHOICE for those.
+        """
+        idx = self._conn_ctrl.GetSelection()
+        method = (self._conn_choices[idx]
+                  if idx is not None and 0 <= idx < len(self._conn_choices)
+                  else "")
+        detail = self._conn_detail_for(method)
+        self._conn_detail.SetLabel(detail)
+        self._conn_ctrl.SetToolTip(detail)
+
+    def _refresh_die_tooltip(self, ref):
+        """Put the selected method's spec sheet on one die row's tooltip."""
+        ctrl = self._die_conn_ctrls.get(ref)
+        if ctrl is None:
+            return
+        method = self._die_conn_value(ref)
+        ctrl.SetToolTip(
+            self._conn_detail_for(method) if method
+            else "Follows the assembly-wide connection stack selected above.")
 
     # ------------------------------------------------------------------
     # Per-die connection rows
@@ -442,11 +624,13 @@ class ChipletExportDialog(wx.Dialog):
             methods.append(current)
         self._die_conn_items[ref] = [""] + methods
         ctrl = self._die_conn_ctrls[ref]
-        ctrl.Set(["(use default)"] + methods)
+        ctrl.Set(["(use default)"]
+                 + [self._conn_label_for(m) for m in methods])
         try:
             ctrl.SetSelection(self._die_conn_items[ref].index(current))
         except ValueError:
             ctrl.SetSelection(0)
+        self._refresh_die_tooltip(ref)
 
     def _die_conn_value(self, ref):
         """Currently selected method for `ref` ("" = use default)."""
@@ -490,8 +674,11 @@ class ChipletExportDialog(wx.Dialog):
     def _refresh_connection_choices(self, _event=None):
         """Re-read the connection stacks from the selected interconnect PDK.
 
-        Preserves the current selection when the new manifest still offers
-        it; otherwise resets to "" (no --connection-type).
+        A selection the new manifest does not declare is kept as an extra
+        item rather than dropped: the per-die rows have always behaved that
+        way, and silently resetting an assembly-wide choice because the user
+        was mid-way through typing a PDK path is worse than showing a method
+        the current checkout cannot describe.
         """
         if self._closing or not hasattr(self, "_conn_ctrl"):
             return  # dialog closing/destroyed, or still under construction
@@ -499,13 +686,16 @@ class ChipletExportDialog(wx.Dialog):
         idx = self._conn_ctrl.GetSelection()
         if idx is not None and 0 <= idx < len(self._conn_choices):
             current = self._conn_choices[idx]
-        self._conn_choices = available_connection_types(
-            self._interconnect_root_ctrl.GetPath(), board=self._board)
-        self._conn_ctrl.Set(self._conn_choices)
+        self._load_connection_catalogue()
+        if current and current not in self._conn_choices:
+            self._conn_choices.append(current)
+            self._conn_labels.append(self._conn_label_for(current))
+        self._conn_ctrl.Set(self._conn_labels)
         try:
             self._conn_ctrl.SetSelection(self._conn_choices.index(current))
         except ValueError:
             self._conn_ctrl.SetSelection(0)
+        self._on_conn_selected()
 
         # The per-die rows offer the same manifest's methods; each keeps
         # its current selection when the new manifest still has it.
@@ -528,8 +718,6 @@ class ChipletExportDialog(wx.Dialog):
                       if t is not None}
         return ExportOptions(
             output_dir=self._out_dir_ctrl.GetPath(),
-            emit_chiplet=self._cb_chiplet.GetValue(),
-            emit_interposer_gds=self._cb_interposer.GetValue(),
             emit_complete_gds=self._cb_complete.GetValue(),
             annotate_boundaries=self._cb_annotate.GetValue(),
             top_cell=self._top_cell_ctrl.GetValue() or "INTERPOSER",
@@ -537,7 +725,7 @@ class ChipletExportDialog(wx.Dialog):
             die_connections=die_conns,
             die_thicknesses=die_thicks,
             lyp_override=self._lyp_ctrl.GetPath() or "",
-            worker_python_override=self._worker_ctrl.GetPath() or "",
+            worker_python_override=self._worker_ctrl.GetValue().strip(),
             interposer_pdk_root=self._interposer_root_ctrl.GetPath() or "",
             interconnect_pdk_root=self._interconnect_root_ctrl.GetPath() or "",
             adk_root=self._adk_root_ctrl.GetPath() or "",
@@ -559,20 +747,25 @@ class ChipletExportDialog(wx.Dialog):
                 wx.OK | wx.ICON_WARNING,
             )
             return
-        if not (options.emit_chiplet or options.emit_interposer_gds
-                or options.emit_complete_gds):
-            wx.MessageBox(
-                "Enable at least one output (canonical .chiplet, "
-                "interposer GDS, or complete-assembly GDS).",
-                "Chiplet Export",
-                wx.OK | wx.ICON_WARNING,
-            )
-            return
+        # An override that is not runnable must fail here, with a message,
+        # rather than deep in the subprocess launch as a raw OSError.
+        if options.worker_python_override:
+            from .pipeline.discovery import _is_executable
+            if not _is_executable(Path(options.worker_python_override)):
+                wx.MessageBox(
+                    "Worker Python is not an executable file:\n%s\n\nClear "
+                    "the field to use the auto-detected interpreter."
+                    % options.worker_python_override,
+                    "Chiplet Export",
+                    wx.OK | wx.ICON_WARNING,
+                )
+                return
         bad_thicks = self._die_thickness_errors()
         if bad_thicks:
             wx.MessageBox(
                 "Invalid die thickness for %s: expected a positive number "
-                "of micrometers (or empty to keep the format default)."
+                "of micrometers (750 for a standard SG13G2 die), or empty "
+                "to export 0.0."
                 % ", ".join(bad_thicks),
                 "Chiplet Export",
                 wx.OK | wx.ICON_WARNING,

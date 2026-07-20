@@ -164,14 +164,46 @@ def find_worker_python(plugin_dir, board=None):
             return str(Path(which).absolute())
 
     raise WorkerPythonNotFoundError(
-        "Could not locate a usable worker Python (env/project overrides are "
-        "used as-is when executable; the .venv and PATH legs additionally "
-        "require a klayout + PyYAML import).\n"
+        "Could not locate a usable worker Python (the env var, the local "
+        ".venv and the project text variable are used as-is when executable; "
+        "only the PATH python3 candidate is probed for a klayout + PyYAML "
+        "import).\n"
         "Tried:\n  - "
         + "\n  - ".join("%s: %s" % c for c in tried)
         + "\n\nTo create the recommended worker venv:\n\n"
         + _venv_bootstrap_help(plugin_dir)
     )
+
+
+def preview_worker_python(plugin_dir, board=None):
+    """``(path, source)`` the dialog can show without spawning a subprocess.
+
+    Same legs as :func:`find_worker_python`, in the same order, minus the
+    PATH candidate: that one is only usable after a ``klayout + yaml`` import
+    probe (up to ``PROBE_TIMEOUT_SECONDS``), and the dialog builds its widgets
+    on the UI thread where a stalled subprocess would freeze the window. The
+    probe stays where it already runs harmlessly -- inside ``run_export`` on
+    the worker thread.
+
+    Returns ``("", "")`` when only the PATH leg would remain, so the caller
+    can say "auto-detected at Run" instead of showing a path that may not
+    survive the probe.
+    """
+    plugin_dir = str(Path(plugin_dir).resolve())
+
+    env_value = os.environ.get(WORKER_ENV_VAR)
+    if env_value and _is_executable(Path(env_value)):
+        return str(Path(env_value).absolute()), "$%s" % WORKER_ENV_VAR
+
+    venv = _venv_python(plugin_dir)
+    if venv is not None:
+        return str(venv.absolute()), "plugin .venv"
+
+    proj_value = _lookup_text_var(board, WORKER_ENV_VAR)
+    if proj_value and _is_executable(Path(proj_value)):
+        return str(Path(proj_value).absolute()), "project text variable"
+
+    return "", ""
 
 
 def find_hyp_to_gds(plugin_dir):

@@ -130,8 +130,13 @@ class ExportOptions:
     """User-visible options collected by the dialog."""
 
     output_dir: str = ""
+    # The .chiplet and the interposer GDS are the pipeline's product, not
+    # options: the .chiplet is unusable until --update-chiplet-file rewrites
+    # it into the canonical frame, and its `layout:` field points at the
+    # interposer GDS. hyp_to_gds writes that GDS on every run regardless, so
+    # a toggle could only ever have thrown the result away. Neither has a
+    # dialog control; emit_chiplet survives as a headless escape hatch.
     emit_chiplet: bool = True
-    emit_interposer_gds: bool = True
     emit_complete_gds: bool = False
     # Viewer-only: paint each chiplet boundary onto an annotation GDS layer
     # (no DRC rule reads it). Drives hyp_to_gds --annotate-boundaries. Off by
@@ -363,6 +368,35 @@ def _read_component_connections(chiplet_path: str) -> List[tuple]:
     return entries
 
 
+def _load_interconnect_methods(interconnect_root: str = "",
+                               board=None) -> Dict[str, dict]:
+    """``{method_id: entry}`` from the interconnect PDK's method manifest.
+
+    The single manifest reader for this module: the connection-type list, the
+    dialog's spec labels and the per-method DRC derivation all go through it,
+    so they can never disagree about which methods exist. The root is the
+    explicit ``interconnect_root`` or the discovery chain's result.
+
+    Reads the JSON directly (stdlib only): no import of the PDK's reader
+    module and no sys.path mutation inside KiCad's bundled Python. Returns
+    {} when nothing is readable -- every caller degrades on an empty dict
+    rather than propagating a filesystem error into the dialog.
+    """
+    import json
+
+    root = interconnect_root or discover_dependency_root(
+        "INTERCONNECT_PDK_ROOT", board=board)
+    if not root:
+        return {}
+    manifest_path = Path(root) / "manifest" / "interconnect_methods.json"
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            methods = json.load(fh).get("methods", {})
+    except Exception:
+        return {}
+    return methods if isinstance(methods, dict) else {}
+
+
 def derive_interconnect_methods(chiplet_path: str,
                                 interconnect_root: str = "",
                                 board=None) -> Dict[str, dict]:
@@ -378,20 +412,11 @@ def derive_interconnect_methods(chiplet_path: str,
     derivable (no connections, no manifest): the DRC then runs exactly as
     before this refinement existed.
     """
-    import json
-
     connections = _read_component_connections(chiplet_path)
     if not connections:
         return {}
-    root = interconnect_root or discover_dependency_root(
-        "INTERCONNECT_PDK_ROOT", board=board)
-    if not root:
-        return {}
-    manifest_path = Path(root) / "manifest" / "interconnect_methods.json"
-    try:
-        with open(manifest_path, "r", encoding="utf-8") as fh:
-            methods_db = json.load(fh).get("methods", {})
-    except Exception:
+    methods_db = _load_interconnect_methods(interconnect_root, board=board)
+    if not methods_db:
         return {}
 
     derived: Dict[str, dict] = {}
@@ -500,24 +525,167 @@ def available_connection_types(interconnect_root: str = "",
     that vendor's catalogue. Falls back to the built-in IHP set when no
     manifest is readable, so the dialog still opens.
 
-    Reads the manifest JSON directly (stdlib only): no import of the PDK's
-    reader module and no sys.path mutation inside KiCad's bundled Python.
+    Returns bare method ids; :func:`format_connection_label` turns one into
+    the string the dialog displays.
     """
-    import json
-
-    root = interconnect_root or discover_dependency_root(
-        "INTERCONNECT_PDK_ROOT", board=board)
-    if root:
-        manifest = Path(root) / "manifest" / "interconnect_methods.json"
-        try:
-            with open(manifest, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            methods = list(data["methods"].keys())
-            if methods:
-                return [""] + methods
-        except Exception:
-            pass
+    methods = list(_load_interconnect_methods(interconnect_root, board=board))
+    if methods:
+        return [""] + methods
     return ["", "cupillar_opt1", "cupillar_opt2", "cupillar_opt3", "sbump_sac305"]
+
+
+def connection_method_specs(interconnect_root: str = "",
+                            board=None) -> Dict[str, dict]:
+    """Decision-relevant numbers per connection method, for the dialog labels.
+
+    ``{method_id: {"pitch", "spacing", "opening", "diameter", "height",
+    "vendor", "description"}}`` -- the fields a designer picks a method by,
+    and (for pitch/spacing/opening) the very numbers the assembly DRC will
+    check the design against. Each field is independently optional: a
+    manifest entry missing one simply omits that key instead of dropping
+    the whole method. {} when no manifest is readable, which makes the
+    labels degrade to bare ids.
+    """
+    specs: Dict[str, dict] = {}
+    for method_id, entry in _load_interconnect_methods(
+            interconnect_root, board=board).items():
+        if not isinstance(entry, dict):
+            continue
+        spec: dict = {}
+        pitch_rules = entry.get("pitch_rules") or {}
+        fab_params = entry.get("fab_params") or {}
+        for key, source, name in (
+                ("pitch", pitch_rules, "IXN_pitch"),
+                ("spacing", pitch_rules, "IXN_spacing"),
+                ("opening", fab_params, "passiv_opening_um"),
+                ("diameter", entry, "body_diameter_um"),
+        ):
+            try:
+                spec[key] = float(source[name])
+            except (KeyError, TypeError, ValueError):
+                pass
+        layers = (entry.get("connection_stack") or {}).get("layers")
+        if isinstance(layers, list):
+            try:
+                spec["height"] = sum(float(layer["height"]) for layer in layers)
+                spec["layers"] = [
+                    (str(layer.get("name", "")), float(layer["height"]))
+                    for layer in layers
+                ]
+            except (KeyError, TypeError, ValueError):
+                spec.pop("height", None)
+                spec.pop("layers", None)
+        for key in ("vendor", "description"):
+            value = entry.get(key)
+            if value:
+                spec[key] = str(value)
+        specs[method_id] = spec
+    return specs
+
+
+def _um(value) -> str:
+    """Render a micrometer dimension without trailing zeros: 75.0 -> "75"."""
+    return "%gum" % value
+
+
+def format_connection_label(method_id: str, spec: Optional[dict] = None) -> str:
+    """Short dropdown label: ``cupillar_opt1 - 75um pitch, 44um dia``.
+
+    The id stays the label's prefix so the GTK dropdown's type-to-select
+    still works on method ids. Falls back to the bare id when the manifest
+    knows nothing about it -- the built-in fallback list, or a value the
+    board carries that this PDK does not declare. Never invents numbers.
+    """
+    spec = spec or {}
+    parts = []
+    if "pitch" in spec:
+        parts.append("%s pitch" % _um(spec["pitch"]))
+    if "diameter" in spec:
+        parts.append("%s dia" % _um(spec["diameter"]))
+    if not parts:
+        return method_id
+    return "%s - %s" % (method_id, ", ".join(parts))
+
+
+def describe_connection_method(method_id: str,
+                               spec: Optional[dict] = None) -> str:
+    """Full one-line spec sheet for the detail text under the dropdown.
+
+    Everything the manifest knows that bears on the choice: the vendor's
+    description, the pitch rules the assembly DRC enforces, the fab opening,
+    the body diameter and the stack height broken down by layer.
+    """
+    spec = spec or {}
+    if not spec:
+        return method_id
+    parts = []
+    if "pitch" in spec and "spacing" in spec:
+        parts.append("pitch %s / spacing %s"
+                     % (_um(spec["pitch"]), _um(spec["spacing"])))
+    elif "pitch" in spec:
+        parts.append("pitch %s" % _um(spec["pitch"]))
+    if "opening" in spec:
+        parts.append("%s opening" % _um(spec["opening"]))
+    if "diameter" in spec:
+        parts.append("%s dia" % _um(spec["diameter"]))
+    if "height" in spec:
+        height = "%s tall" % _um(spec["height"])
+        layers = spec.get("layers") or []
+        if len(layers) > 1:
+            height += " (%s)" % " + ".join(
+                "%s %g" % (name, value) for name, value in layers)
+        parts.append(height)
+    text = ", ".join(parts)
+    if spec.get("description"):
+        text = "%s - %s" % (spec["description"], text) if text \
+            else spec["description"]
+    if spec.get("vendor"):
+        text = "%s - %s" % (text, spec["vendor"]) if text else spec["vendor"]
+    return text or method_id
+
+
+# Plausible range for a silicon die body, in micrometers. Outside it the value
+# is almost always a unit slip -- 0.75 typed in millimetres, 750000 in
+# nanometres -- rather than a real part: ``parse_thickness_um`` accepts any
+# positive float and nothing downstream questions the magnitude.
+DIE_THICKNESS_PLAUSIBLE_UM = (50.0, 2000.0)
+
+
+def describe_die_thickness_gaps(die_refs: List[str],
+                                thicknesses: Dict[str, float]) -> List[str]:
+    """Warning lines about per-die thickness, for the export log.
+
+    Two things worth saying out loud, because neither is visible in the
+    exported file:
+
+      * A die with no ``DIE_THICKNESS_UM`` ships ``dimensions.thickness: 0.0``.
+        The ADK's 3Dblox export rejects that outright, while Chiplet Studio
+        and the thermal stackup each silently substitute a different default
+        -- so the same assembly gets three different die bodies.
+      * A thickness far outside the plausible range is a unit slip, not a
+        part.
+
+    Pure (no pcbnew) so the export path and the tests share one rule.
+    """
+    lines = []
+    missing = [ref for ref in die_refs if ref not in thicknesses]
+    if missing:
+        lines.append(
+            "WARNING: no DIE_THICKNESS_UM for %s -- these dies export with "
+            "dimensions.thickness=0.0, which the ADK 3Dblox export rejects "
+            "and which Chiplet Studio silently renders as a 200 um body. "
+            "Set the die thickness (750 um for a standard SG13G2 die) in the "
+            "export dialog or the footprint field."
+            % ", ".join(missing))
+    low, high = DIE_THICKNESS_PLAUSIBLE_UM
+    odd = ["%s=%g" % (ref, thicknesses[ref]) for ref in sorted(thicknesses)
+           if not (low <= thicknesses[ref] <= high)]
+    if odd:
+        lines.append(
+            "WARNING: implausible die thickness %s -- the field is in "
+            "micrometers (a 0.75 mm die is 750). Exporting as given."
+            % ", ".join(odd))
+    return lines
 
 
 def build_worker_env(options: ExportOptions,
@@ -639,8 +807,12 @@ def build_cli_args(hyp_to_gds_path: str,
     out_dir = options.output_dir
     args: List[str] = [hyp_to_gds_path, hyp_path]
 
-    if options.emit_interposer_gds:
-        args += ["-o", layout_path(out_dir, "%s_interposer.gds" % board_name)]
+    # Always: hyp_to_gds writes the interposer GDS unconditionally, and
+    # without -o it lands next to the .hyp -- which lives in the workspace
+    # tmpdir this module deletes on the way out, taking the boundary and
+    # pillar sidecars with it and leaving the .chiplet's `layout:` pointing
+    # at a path that no longer exists.
+    args += ["-o", layout_path(out_dir, "%s_interposer.gds" % board_name)]
 
     if options.top_cell:
         args += ["-c", options.top_cell]
@@ -825,7 +997,7 @@ def run_export(board, options, plugin_dir,
     from .runner import run_async
     from ..writers.chiplet_writer import (
         write_chiplet, write_io_pads_json, write_die_pin_lists,
-        read_die_connections, read_die_thicknesses,
+        read_die_connections, read_die_thicknesses, list_die_refs,
     )
     from ..writers.connection_stacks import validate_interconnect_ids
     from ..writers.hyperlynx_writer import write_hyperlynx
@@ -836,9 +1008,7 @@ def run_export(board, options, plugin_dir,
         Path(options.output_dir).mkdir(parents=True, exist_ok=True)
         # The worker (KLayout layout.write + the boundaries sidecar) does not
         # create parent dirs, so the layout/ subdir must exist before it runs.
-        if options.emit_interposer_gds or options.emit_complete_gds:
-            Path(layout_dir(options.output_dir)).mkdir(
-                parents=True, exist_ok=True)
+        Path(layout_dir(options.output_dir)).mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         return ExportResult(error="Cannot create output directory: %s" % exc)
 
@@ -985,6 +1155,16 @@ def run_export(board, options, plugin_dir,
                      % ", ".join("%s=%s" % (r, t) for r, t
                                  in sorted(effective_die_thicks.items())))
 
+        # The inverse of the line above: a die with no thickness is not a
+        # neutral default, it is a 0.0 that breaks one consumer and gets
+        # silently invented by two others. Say so on every run.
+        try:
+            for line in describe_die_thickness_gaps(list_die_refs(board),
+                                                    effective_die_thicks):
+                _log(line)
+        except Exception as exc:
+            _log("Warning: die thickness check failed: %s" % exc)
+
         # Unknown per-die method ids fail the export here (manifest is the
         # source of truth) instead of degrading later in the worker or DRC.
         validate_interconnect_ids(die_methods=effective_die_conns.values())
@@ -1035,6 +1215,25 @@ def run_export(board, options, plugin_dir,
             cancel_event=cancel_event,
             env=worker_env,
         )
+
+        # The staged .chiplet is the intermediate until the worker finalizes
+        # it in place. If the worker failed or was cancelled it never did, so
+        # what sits in the output dir carries `_metadata.finalize_required:
+        # true` -- a file Chiplet Studio refuses to load, in the exact place
+        # (and under the exact name) where a good one belongs. Retire it under
+        # a name that cannot be mistaken for a product.
+        chiplet_ok = options.emit_chiplet and run.exit_code == 0 \
+            and not run.cancelled
+        if options.emit_chiplet and not chiplet_ok:
+            unfinalized = chiplet_final + ".unfinalized"
+            try:
+                os.replace(chiplet_final, unfinalized)
+                _log("Export did not finalize the .chiplet; the intermediate "
+                     "is kept as %s (Chiplet Studio cannot load it)."
+                     % unfinalized)
+            except OSError as exc:
+                _log("Warning: could not retire the unfinalized .chiplet: %s"
+                     % exc)
 
         # The worker writes <board>_cupillar_drc.json next to the interposer
         # GDS (now under layout/) when a cupillar stack drives pillar
@@ -1173,12 +1372,12 @@ def run_export(board, options, plugin_dir,
             exit_code=run.exit_code,
             cancelled=run.cancelled or drc_cancelled,
             hyp_path=hyp_final,
-            chiplet_path=(chiplet_final if options.emit_chiplet else ""),
-            interposer_gds_path=(
-                layout_path(options.output_dir,
-                            "%s_interposer.gds" % board_name)
-                if options.emit_interposer_gds else ""
-            ),
+            # Only a finalized file gets reported: a headless caller handed a
+            # path to an intermediate would ship it straight to a consumer
+            # that rejects it.
+            chiplet_path=(chiplet_final if chiplet_ok else ""),
+            interposer_gds_path=layout_path(
+                options.output_dir, "%s_interposer.gds" % board_name),
             complete_gds_path=(
                 complete_gds_abs if options.emit_complete_gds else ""
             ),

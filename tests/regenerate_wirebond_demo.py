@@ -181,7 +181,6 @@ def main():
     options = ExportOptions(
         output_dir=output_dir,
         emit_chiplet=True,
-        emit_interposer_gds=True,
         emit_complete_gds=True,
         top_cell="INTERPOSER",
         connection_type=args.connection,
