@@ -623,6 +623,18 @@ def write_chiplet(board, output_path):
             ref = footprint.GetReference()
             gds = _field_text(footprint, "GDS_FILE")
             orient = _field_text(footprint, "ORIENTATION")
+            # ORIENTATION is a free-text footprint field. The frame contract
+            # defines only face_up (the default) and flip_chip; an empty field
+            # means face_up. Any other token (a typo, or the non-canonical
+            # "face_down") would otherwise fall through to a non-flip die that
+            # is silently emitted un-mirrored and without its connection stack.
+            # Fail loudly at export, mirroring the IO_CLASS check above.
+            if orient not in ("", "face_up", "flip_chip"):
+                raise ValueError(
+                    "Footprint %s has an unrecognized ORIENTATION '%s'; expected "
+                    "face_up or flip_chip (use flip_chip, not face_down)."
+                    % (ref, orient)
+                )
             is_flip_chip = (orient == "flip_chip")
 
             f.write("  - id: %s\n" % yaml_scalar(ref))

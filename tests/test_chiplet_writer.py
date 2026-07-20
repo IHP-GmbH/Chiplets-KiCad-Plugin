@@ -184,6 +184,26 @@ def test_die_connection_field_roundtrip(fixture_board_path):
     assert target not in read_die_connections(board)
 
 
+def test_invalid_orientation_field_is_a_hard_error(fixture_board_path, tmp_path):
+    """A die footprint carrying a non-canonical ORIENTATION (a typo, or the
+    non-canonical 'face_down') must fail loudly at export, not be silently
+    emitted un-mirrored and without its connection stack."""
+    from chiplet_kicad_plugin.writers.chiplet_writer import _field_text
+
+    board = pcbnew.LoadBoard(fixture_board_path)
+    die = next((fp for fp in board.Footprints()
+                if _field_text(fp, "GDS_FILE")), None)
+    assert die is not None, "fixture board has no die footprint"
+    for bad in ("face_down", "flip-chip"):
+        die.SetField("ORIENTATION", bad)
+        out = tmp_path / ("bad_%s.chiplet" % bad.replace("-", "_"))
+        with pytest.raises(ValueError, match="ORIENTATION"):
+            write_chiplet(board, str(out))
+    # A canonical value still exports.
+    die.SetField("ORIENTATION", "flip_chip")
+    write_chiplet(board, str(tmp_path / "ok.chiplet"))
+
+
 def test_write_die_connections_ignores_non_die_footprints(fixture_board_path):
     """Refs without a GDS_FILE field are never touched."""
     from chiplet_kicad_plugin.writers.chiplet_writer import (
