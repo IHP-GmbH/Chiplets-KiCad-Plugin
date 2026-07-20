@@ -1363,6 +1363,12 @@ class GDSGenerator:
     # (was 189/0; GDS produced before then carry the outline on 189/0).
     PRBOUNDARY_LAYER = (235, 0)
 
+    # prBoundary layers this plugin drew before the 189->235 migration. Only
+    # used to enrich the loud "outline missing" warning in update_chiplet_file:
+    # if the current layer is empty but geometry sits on one of these, the GDS
+    # is pre-migration and just needs regenerating.
+    LEGACY_PRBOUNDARY_LAYERS = ((189, 0),)
+
     def add_board_outline(self, perimeter_segments: List[PerimeterSegment]) -> int:
         """Draw the board outline on prBoundary (235/0).
 
@@ -1856,6 +1862,30 @@ def _connection_type_cli_choices():
     return im.list_methods()
 
 
+def _probe_outline_layers(gds_path: str,
+                          layers: Tuple[Tuple[int, int], ...]
+                          ) -> Optional[Tuple[int, int]]:
+    """First (layer, datatype) in `layers` carrying non-empty top-cell
+    geometry in `gds_path`, or None.
+
+    Best-effort: only used to enrich a warning, so any read error (missing
+    file, no top cell) yields None rather than raising.
+    """
+    try:
+        layout = db.Layout()
+        layout.read(str(gds_path))
+        top = layout.top_cell()
+        if top is None:
+            return None
+        for (lnum, dt) in layers:
+            idx = layout.find_layer(lnum, dt)
+            if idx is not None and not top.dbbox(idx).empty():
+                return (lnum, dt)
+    except Exception:
+        return None
+    return None
+
+
 def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                         bbox: Tuple[float, float, float, float] = None,
                         connection_type: str = "",
@@ -1993,6 +2023,40 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     else:
                         dim_w, dim_h = width, height
                         dim_src = "drawn-geometry bbox"
+                        # Loud degradation signal. Without the fab outline the
+                        # interposer is sized from whatever copper happens to be
+                        # drawn, and every die/pad downstream is anchored on that
+                        # size and center -- so a missing outline silently shifts
+                        # the whole assembly. Warn (stderr), and if the outline is
+                        # merely on a pre-migration layer say so, since that is a
+                        # one-command fix (regenerate).
+                        pl, pd = GDSGenerator.PRBOUNDARY_LAYER
+                        msg = (
+                            f"Warning: prBoundary {pl}/{pd} outline not found in "
+                            f"'{interposer_gds_path}'; interposer dimensions fall "
+                            f"back to the drawn-geometry bbox "
+                            f"({dim_w:.2f} x {dim_h:.2f} um), which is not the fab "
+                            f"outline. Downstream placement anchors on this size "
+                            f"and center, so dies/pads can shift in the assembly."
+                        )
+                        legacy = _probe_outline_layers(
+                            interposer_gds_path,
+                            GDSGenerator.LEGACY_PRBOUNDARY_LAYERS)
+                        if legacy:
+                            ll, ld = legacy
+                            msg += (
+                                f" An outline WAS found on the legacy prBoundary "
+                                f"{ll}/{ld}: this GDS predates the {ll}/{ld}->"
+                                f"{pl}/{pd} IntM4TM2 layer-map migration. "
+                                f"Regenerate it with the current plugin so the "
+                                f"outline lands on {pl}/{pd}."
+                            )
+                        else:
+                            msg += (
+                                " If this interposer should have a board outline, "
+                                "add a closed Edge.Cuts in KiCad and re-export."
+                            )
+                        print(msg, file=sys.stderr)
                     component['dimensions']['width'] = dim_w
                     component['dimensions']['height'] = dim_h
 
