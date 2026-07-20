@@ -14,6 +14,9 @@ adk-tools as a submodule.
 
 ## Status
 
+> [!WARNING]
+> Chiplet KiCad Plugin is currently a preview release only!
+
 The plugin is the sole entry point for chiplet export. The legacy C++
 menu actions (`File > Export > Chiplet...` and
 `File > Export > Hyperlynx...`) have been removed from the KiCad fork.
