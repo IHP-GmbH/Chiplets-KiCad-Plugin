@@ -28,6 +28,8 @@ from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
     load_interposer_adapter, load_interconnect_adapter,
     available_connection_types, discover_dependency_root,
     discover_interposer_lyp,
+    connection_method_specs, format_connection_label,
+    describe_connection_method, describe_die_thickness_gaps,
     derive_interconnect_methods, write_ixn_methods_sidecar,
     _read_component_connections, _open_run_log,
 )
@@ -98,11 +100,14 @@ def test_annotate_boundaries_toggle(tmp_path):
     assert "--annotate-boundaries" in args
 
 
-def test_disable_interposer_drops_output_flag(tmp_path):
-    opts = _opts(tmp_path)
-    opts.emit_interposer_gds = False
-    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
-    assert "-o" not in args
+def test_interposer_output_always_passed(tmp_path):
+    """-o is not optional: hyp_to_gds writes the interposer GDS on every run,
+    so omitting the flag only sent it (and its sidecars) into the workspace
+    tmpdir the orchestrator deletes -- leaving the .chiplet's `layout:`
+    pointing at a path that no longer exists."""
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, _opts(tmp_path))
+    expected = os.path.join(str(tmp_path), "layout", "demo_interposer.gds")
+    assert args[args.index("-o") + 1] == expected
 
 
 def test_disable_chiplet_drops_update_flag(tmp_path):
@@ -190,7 +195,6 @@ def test_all_options_at_once(tmp_path):
     opts = ExportOptions(
         output_dir=str(tmp_path),
         emit_chiplet=True,
-        emit_interposer_gds=True,
         emit_complete_gds=True,
         top_cell="ASSEMBLY_TOP",
         connection_type="sbump_sac305",
@@ -672,6 +676,96 @@ def test_available_connection_types_bad_root_falls_back(tmp_path):
     types = available_connection_types(str(tmp_path / "not_a_pdk"))
     assert types == ["", "cupillar_opt1", "cupillar_opt2",
                      "cupillar_opt3", "sbump_sac305"]
+
+
+# ---------------------------------------------------------------------------
+# Connection-method labels (what the dialog shows next to each method id)
+# ---------------------------------------------------------------------------
+
+
+@needs_interconnect
+def test_connection_labels_from_real_manifest():
+    """The label is built from the manifest, and the id stays its prefix so
+    the dropdown's type-to-select still works on method ids."""
+    specs = connection_method_specs()
+    label = format_connection_label("cupillar_opt1", specs["cupillar_opt1"])
+    assert label == "cupillar_opt1 - 75um pitch, 44um dia"
+    for method, spec in specs.items():
+        assert format_connection_label(method, spec).startswith(method)
+
+
+@needs_interconnect
+def test_connection_specs_stack_height_is_summed():
+    """height is the sum of the stack's layer heights -- the number that
+    lifts the die (position.z), not a single layer."""
+    specs = connection_method_specs()
+    assert specs["cupillar_opt1"]["height"] == 44.0   # Cu 28 + SnAg 16
+    assert specs["sbump_sac305"]["height"] == 80.0    # single ball
+    assert specs["cupillar_opt1"]["spacing"] == 40.0
+    assert specs["cupillar_opt1"]["opening"] == 35.0
+
+
+@needs_interconnect
+def test_describe_connection_method_carries_the_drc_numbers():
+    text = describe_connection_method("cupillar_opt1",
+                                      connection_method_specs()["cupillar_opt1"])
+    for fragment in ("pitch 75um", "spacing 40um", "35um opening",
+                     "44um dia", "44um tall", "PacTech"):
+        assert fragment in text
+
+
+def test_connection_label_without_manifest_is_the_bare_id():
+    """No manifest, no numbers: the fallback list and any board value this
+    PDK does not declare must never be labelled with invented specs."""
+    assert format_connection_label("cupillar_opt1", None) == "cupillar_opt1"
+    assert format_connection_label("legacy_stack", {}) == "legacy_stack"
+    assert describe_connection_method("legacy_stack", {}) == "legacy_stack"
+
+
+def test_connection_label_survives_a_partial_manifest_entry(tmp_path):
+    """A vendor entry missing pitch_rules degrades field by field instead of
+    dropping the method from the dialog."""
+    root = tmp_path / "vendor_pdk"
+    (root / "manifest").mkdir(parents=True)
+    (root / "manifest" / "interconnect_methods.json").write_text(json.dumps(
+        {"methods": {"vendor_a": {"body_diameter_um": 30}}}))
+    specs = connection_method_specs(str(root))
+    assert specs["vendor_a"] == {"diameter": 30.0}
+    assert format_connection_label("vendor_a", specs["vendor_a"]) == \
+        "vendor_a - 30um dia"
+
+
+def test_connection_specs_bad_root_is_empty(tmp_path):
+    assert connection_method_specs(str(tmp_path / "not_a_pdk")) == {}
+
+
+# ---------------------------------------------------------------------------
+# Die-thickness warnings
+# ---------------------------------------------------------------------------
+
+
+def test_die_thickness_gap_named_for_every_unset_die():
+    lines = describe_die_thickness_gaps(["U1", "U2", "U3"], {"U2": 750.0})
+    assert len(lines) == 1
+    assert "U1, U3" in lines[0]
+    assert "U2" not in lines[0].split("--")[0]
+
+
+def test_die_thickness_no_warning_when_all_set():
+    assert describe_die_thickness_gaps(["U1"], {"U1": 750.0}) == []
+
+
+def test_die_thickness_implausible_magnitude_warns():
+    """0.75 is a millimetre value and 750000 a nanometre one; the field is
+    micrometers and parse_thickness_um accepts both without complaint."""
+    lines = describe_die_thickness_gaps(["U1", "U2"],
+                                        {"U1": 0.75, "U2": 750000.0})
+    assert len(lines) == 1
+    assert "U1=0.75" in lines[0] and "U2=750000" in lines[0]
+
+
+def test_die_thickness_no_dies_no_warnings():
+    assert describe_die_thickness_gaps([], {}) == []
 
 
 def test_build_worker_env_none_when_no_overrides():

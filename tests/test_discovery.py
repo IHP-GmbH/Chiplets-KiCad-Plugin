@@ -133,6 +133,57 @@ def test_path_probe_fails(tmp_path, monkeypatch):
         discovery.find_worker_python(tmp_path)
 
 
+def test_preview_reports_the_venv_and_its_source(tmp_path):
+    venv_py = tmp_path / ".venv" / "bin" / "python3"
+    _make_exe(venv_py)
+    path, source = discovery.preview_worker_python(tmp_path)
+    assert path == str(venv_py.resolve())
+    assert source == "plugin .venv"
+
+
+def test_preview_prefers_the_env_var(tmp_path, monkeypatch):
+    exe = tmp_path / "py_from_env"
+    _make_exe(exe)
+    _make_exe(tmp_path / ".venv" / "bin" / "python3")
+    monkeypatch.setenv(discovery.WORKER_ENV_VAR, str(exe))
+    assert discovery.preview_worker_python(tmp_path) == (
+        str(exe.resolve()), "$" + discovery.WORKER_ENV_VAR)
+
+
+def test_preview_reads_the_project_text_var(tmp_path, monkeypatch):
+    exe = tmp_path / "py_from_proj"
+    _make_exe(exe)
+    monkeypatch.setattr(discovery, "_venv_python", lambda d: None)
+    board = _FakeBoard({discovery.WORKER_ENV_VAR: str(exe)})
+    assert discovery.preview_worker_python(tmp_path, board=board) == (
+        str(exe.resolve()), "project text variable")
+
+
+def test_preview_never_probes_path(tmp_path, monkeypatch):
+    """The PATH leg costs a subprocess with a multi-second timeout, and the
+    dialog calls this while building widgets on the UI thread. Preview must
+    report nothing rather than pay it."""
+    monkeypatch.setattr(discovery, "_venv_python", lambda d: None)
+    monkeypatch.setattr(discovery.shutil, "which", lambda name: "/usr/bin/python3")
+
+    def _boom(py):
+        raise AssertionError("preview must not probe imports")
+
+    monkeypatch.setattr(discovery, "_probe_imports", _boom)
+    assert discovery.preview_worker_python(tmp_path) == ("", "")
+
+
+def test_error_message_describes_which_legs_are_probed(tmp_path, monkeypatch):
+    """The message used to claim the .venv leg required a klayout+PyYAML
+    import; it does not, and only the PATH candidate is probed."""
+    monkeypatch.setattr(discovery, "_venv_python", lambda d: None)
+    monkeypatch.setattr(discovery.shutil, "which", lambda name: None)
+    with pytest.raises(discovery.WorkerPythonNotFoundError) as exc:
+        discovery.find_worker_python(tmp_path)
+    msg = str(exc.value)
+    assert "only the PATH python3 candidate is probed" in msg
+
+
 def test_all_fail_raises_actionable_error(tmp_path, monkeypatch):
     monkeypatch.setattr(discovery, "_venv_python", lambda d: None)
     monkeypatch.setattr(discovery.shutil, "which", lambda name: None)

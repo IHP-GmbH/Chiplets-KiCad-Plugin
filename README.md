@@ -90,13 +90,19 @@ the loaded `.kicad_pcb`.
 
 ### Outputs
 
-Tick what you want produced:
+Every run writes the canonical `.chiplet` (the GDS-bbox-corner-anchored
+assembly file consumed by chiplet-studio) and the interposer GDS it
+references. Neither is a toggle: `hyp_to_gds.py` produces both on every
+run regardless, and the `.chiplet` is unusable until the same run
+finalizes it, so an opt-out could only have thrown away work already
+done — and did, silently, when the `.chiplet` was skipped while the
+assembly DRC still ran. `ExportOptions.emit_chiplet` survives as a
+headless escape hatch.
 
-- *Canonical .chiplet* (default ON): the GDS-bbox-corner-anchored
-  assembly file consumed by chiplet-studio.
-- *Interposer GDS* (default ON): the interposer-only layout.
+Tick what you additionally want produced:
+
 - *Complete assembly GDS* (default OFF): interposer plus all chiplet
-  instances flattened into one GDS.
+  instances flattened into one GDS. Required by the assembly DRC.
 - *Annotate chiplet boundaries (viewer-only layer)* (default OFF): paint
   each chiplet boundary and instance label onto annotation layer
   `1000/0` for eyeball inspection in KLayout. No DRC rule reads this
@@ -149,6 +155,15 @@ environment variables: `INTERPOSER_PDK_ROOT`, `INTERCONNECT_PDK_ROOT`,
   `sbump_sac305`, vendor methods). Empty means the writer keeps the
   dies' existing connection field untouched. This is the assembly-wide
   default; per-die rows below override it.
+
+  Each entry is labelled with the numbers the choice actually turns on —
+  `cupillar_opt1 - 75um pitch, 44um dia` — and the grey line underneath
+  spells the selected method out in full (pitch, minimum spacing,
+  passivation opening, body diameter, stack height by layer, vendor).
+  Pitch and spacing are the very rules the assembly DRC will check the
+  design against. Every number comes from the interconnect PDK manifest:
+  when no manifest is readable the dropdown falls back to bare method
+  ids rather than showing values it cannot source.
 - *Interposer technology LYP* (optional): the KLayout layer-properties
   file of the interposer technology. Pre-filled with the discovered
   default via `discover_interposer_lyp()`, which follows the
@@ -170,19 +185,50 @@ environment variables: `INTERPOSER_PDK_ROOT`, `INTERCONNECT_PDK_ROOT`,
   typically from `bump_mirror.py`, can be supplied through the headless
   `ExportOptions.cupillar_gds`.
 
-### Per-die connection
+### Per-die settings
 
-One choice per die footprint, shown only when the board has die
-footprints. Each row is initialized from that footprint's `CONNECTION`
-field and written back to it on Run, so the board stays the source of
-truth for per-die method selection. A die left on the default follows
-the assembly-wide *Connection stack* above; an explicit selection gives
-that die its own connection stack, 3D bodies and DRC numbers.
+One row per die footprint, shown only when the board has die footprints.
+Both columns are initialized from that footprint's fields and written
+back to them on Run, so the board stays the source of truth.
 
-### Worker Python override
+**Interconnect method** (`CONNECTION` field). A die left on *(use
+default)* follows the assembly-wide *Connection stack* above; an
+explicit selection gives that die its own connection stack, 3D bodies
+and DRC numbers. A value the current PDK does not declare is kept in the
+list rather than dropped, so pointing at another checkout never silently
+rewrites a board's selection.
 
-Optional. Bypass the discovery chain by pointing at a specific
-interpreter.
+**Die thickness** (`DIE_THICKNESS_UM` field). The physical z-extent of
+the *silicon die body*, written to the `.chiplet`'s
+`components[].dimensions.thickness`. 750 um is a standard SG13G2 die,
+shown as a placeholder — a hint only: an untouched field is never
+stamped onto a board that never declared one.
+
+This is **not** the interconnect thickness. A method's stack height
+(24–80 um across the shipped methods) comes from the interconnect PDK
+manifest and lands in `position.z = interposer_thickness +
+stack_height`; it is fab data and deliberately not editable here. The
+die body extends upward from that seating plane and is independent of
+it.
+
+Leaving it empty is not free: the die exports with `thickness: 0.0`,
+which `adk/openroad/chiplet2dbx.py` rejects outright, and which
+chiplet-studio (200 um) and `assembly_multiphysics` (250 um) each
+silently replace with a different guess. The export logs a warning
+naming every die that ships a zero, and a second one for values outside
+~50–2000 um, which are almost always millimetres or nanometres typed
+into a micrometer field.
+
+### Worker Python
+
+Which interpreter runs `hyp_to_gds.py` and the ADK DRC. The field shows
+the interpreter the discovery chain resolved (env var, plugin `.venv`,
+project text variable) as a placeholder, so an empty field reads as
+provenance rather than as something missing. Type or browse a path to
+override it — the only override that takes effect without restarting
+KiCad, which matters when this checkout has no `.venv` (installs from
+the `adk-tools` submodule) or the auto-detected one is incomplete. A
+path that is not an executable file is rejected before the run starts.
 
 ### Assembly DRC
 
@@ -195,7 +241,7 @@ stays 0 and the status line flags the failed deck separately.
 
 ## Troubleshooting
 
-**"Could not locate a Python interpreter with klayout + PyYAML"**
+**"Could not locate a usable worker Python"**
 
 The plugin tried every discovery step and none worked. Fix one of:
 
@@ -204,6 +250,9 @@ The plugin tried every discovery step and none worked. Fix one of:
   launches KiCad.
 - Set `KICAD_CHIPLET_PYTHON` as a project text variable in
   *Board Setup > Text Variables*.
+- Point the dialog's *Worker Python* field at one directly (takes effect
+  without restarting KiCad; note a present-but-broken `.venv` wins over
+  the project text variable, so this is the way past it).
 
 **The Run button is disabled / never enables**
 
@@ -283,7 +332,6 @@ board = pcbnew.LoadBoard("/path/to/board.kicad_pcb")
 options = ExportOptions(
     output_dir="/tmp/chiplet_out",
     emit_chiplet=True,
-    emit_interposer_gds=True,
     emit_complete_gds=True,
     top_cell="INTERPOSER",
     lyp_override="/path/to/intm4tm2.lyp",
