@@ -4,8 +4,9 @@
 Exposes ``pipeline.orchestrator.run_export`` as a stable command-line tool so
 the flow can be driven without pcbnew's GUI: a KiCad board goes in, the full
 output tree (canonical ``.chiplet`` + driving ``.hyp`` + interposer/complete
-GDS) plus the ADK assembly DRC come out. This is the entry point the adk-tools
-``chiplet-export`` wrapper and the Chiplets Project Manager's export stage call.
+GDS) plus the ADK assembly DRC come out. The Chiplets Project Manager's export
+stage drives it, and it is the intended entry point for an adk-tools
+``chiplet-export`` wrapper.
 
 Sequence mirrors the dialog's Run button (write Hyperlynx + intermediate
 .chiplet, run hyp_to_gds.py, run the assembly DRC over the complete GDS). The
