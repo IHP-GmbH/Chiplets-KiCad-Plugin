@@ -30,6 +30,7 @@ from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
     discover_interposer_lyp,
     connection_method_specs, format_connection_label,
     describe_connection_method, describe_die_thickness_gaps,
+    describe_interposer_body_default,
     derive_interconnect_methods, write_ixn_methods_sidecar,
     _read_component_connections, _open_run_log,
 )
@@ -766,6 +767,23 @@ def test_die_thickness_implausible_magnitude_warns():
 
 def test_die_thickness_no_dies_no_warnings():
     assert describe_die_thickness_gaps([], {}) == []
+
+
+def test_interposer_body_plausible_no_warning():
+    # A thinned Si interposer (~300 um) or a full wafer (~750) is plausible.
+    assert describe_interposer_body_default(300.0) == []
+    assert describe_interposer_body_default(750.0) == []
+
+
+def test_interposer_body_fr4_default_warns():
+    # The KiCad default FR-4 board (~1.6 mm) means no real interposer stackup.
+    lines = describe_interposer_body_default(1600.0)
+    assert len(lines) == 1
+    assert "1600" in lines[0] and "attachment_surface_z" in lines[0]
+
+
+def test_interposer_body_none_no_warning():
+    assert describe_interposer_body_default(None) == []
 
 
 def test_build_worker_env_none_when_no_overrides():

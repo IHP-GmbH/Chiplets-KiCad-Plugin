@@ -474,6 +474,22 @@ UNMAPPED_FAIL_FRACTION = 0.5
 PILLAR_MANIFEST_SCHEMA = "adk-pillar-manifest"
 PILLAR_MANIFEST_VERSION = "1.0.0"
 
+# Interposer die-attachment surface z (a.k.a. BEOL top), in micrometers: the
+# plane dies mount on, in the interposer's local frame. For SG13G2 it is the top
+# of TopMetal2 above the silicon surface -- 10.83 (TM2 bottom) + 3.00 (TM2
+# thickness) = 13.83, the sum of the SG13G2 BEOL band thicknesses (process spec
+# Rev 1.2, Fig 1.1.1 / Sec 2.16). It is a *process* constant, not a per-design
+# tunable, and is a distinct quantity from the interposer's physical body
+# thickness (dimensions.thickness, hundreds of um), which comes from the KiCad
+# board stackup. The same value is declared across the ecosystem and MUST stay
+# in sync with it:
+#   - chiplet-studio/configs/stackups/intm4tm2.yaml  (attachment_surface_z: 13.83)
+#   - the interconnect PDK stackup fragments, which rebase onto it
+#   - chiplet-spec coord_frame_contract.md sections 3.2 / 3.4
+# If the interposer PDK ever ships a machine-readable BEOL-top descriptor under
+# INTERPOSER_PDK_ROOT, that is the seam to source this from (falling back here).
+SG13G2_ATTACHMENT_SURFACE_Z_UM = 13.83
+
 
 class GDSGenerator:
     """Generates GDS file from parsed HYP data using KLayout API."""
@@ -1889,7 +1905,7 @@ def _probe_outline_layers(gds_path: str,
 def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                         bbox: Tuple[float, float, float, float] = None,
                         connection_type: str = "",
-                        interposer_thickness: float = 13.83,
+                        attachment_surface_z: float = SG13G2_ATTACHMENT_SURFACE_Z_UM,
                         io_pads: Optional[List[Dict]] = None,
                         devices: Optional[List['Device']] = None,
                         die_connections: Optional[Dict[str, str]] = None,
@@ -1909,8 +1925,13 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
         connection_type: Connection stack ID (e.g. "cupillar_opt1"). When set,
                          injects connection_stacks section and sets connection
                          field on each die component.
-        interposer_thickness: BEOL stack top height in micrometers.
-                              For SG13G2: 13.83 (TopMetal2 top at 10.83 + 3.00).
+        attachment_surface_z: interposer die-attachment surface z (BEOL top) in
+                              micrometers -- the plane dies mount on, so each
+                              die's position.z = this + connection-stack height.
+                              Defaults to the SG13G2 process constant 13.83.
+                              Distinct from the interposer's physical body
+                              thickness (dimensions.thickness), which is left as
+                              the KiCad board-stackup value.
         io_pads: Optional list of placed I/O pad dicts (from add_io_pads).
                  When provided, injected under the interposer component as
                  an `io_pads:` block.
@@ -2007,8 +2028,14 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                 if 'dimensions' not in component:
                     component['dimensions'] = {}
 
-                # Set interposer thickness from BEOL stack height
-                component['dimensions']['thickness'] = interposer_thickness
+                # The die-attachment (BEOL-top) surface is a component-level
+                # field, decoupled from the physical body. dimensions.thickness
+                # is intentionally NOT overwritten here: it keeps the KiCad
+                # board-stackup value the writer emitted (the physical interposer
+                # body). Consumers read attachment_surface_z as the mount
+                # reference and fall back to dimensions.thickness only for legacy
+                # files that predate this split.
+                component['attachment_surface_z'] = attachment_surface_z
 
                 # Update width/height from bbox
                 if bbox:
@@ -2085,15 +2112,17 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     # interposer mesh is centered on its own GDS bbox.
                     component['anchor'] = 'bbox_center'
 
+                    body_t = component['dimensions'].get('thickness')
                     print(f"Updated interposer: layout={layout_ref}")
                     print(f"  dimensions: {dim_w:.2f} x {dim_h:.2f} um "
-                          f"({dim_src}), thickness={interposer_thickness} um")
+                          f"({dim_src}); body thickness={body_t} um (kept), "
+                          f"attachment_surface_z={attachment_surface_z} um")
                     print(f"  position: ({width/2.0:.2f}, {height/2.0:.2f}) um "
                           f"(bbox center, canonical GDS-bbox-corner frame)")
                     print(f"  anchor: bbox_center")
                 else:
                     print(f"Updated interposer layout path to: {layout_ref}")
-                    print(f"  thickness={interposer_thickness} um")
+                    print(f"  attachment_surface_z={attachment_surface_z} um")
 
                 if io_pads is not None:
                     # Per chiplet-studio/docs/coord_frame_contract.md
@@ -2251,15 +2280,15 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                 stack_height = sum(
                     layer.get('height', 0.0) for layer in stack.get('layers', [])
                 )
-                die_z = interposer_thickness + stack_height
+                die_z = attachment_surface_z + stack_height
                 if 'position' not in component:
                     component['position'] = {}
                 component['position']['z'] = die_z
-                print(f"  {component.get('id')}: z = {interposer_thickness} + "
+                print(f"  {component.get('id')}: z = {attachment_surface_z} + "
                       f"{stack_height} = {die_z} um (connection: {conn_id})")
             elif 'position' in component and component['position'].get('z', 0) == 0:
-                # No connection stack -- default z to interposer_thickness
-                component['position']['z'] = interposer_thickness
+                # No connection stack -- default z to the attachment surface.
+                component['position']['z'] = attachment_surface_z
 
             # Re-anchor die x/y to the GDS bbox corner. KiCad's exporter
             # writes positions relative to the PCB bbox, which doesn't

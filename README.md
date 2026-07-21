@@ -206,7 +206,7 @@ stamped onto a board that never declared one.
 
 This is **not** the interconnect thickness. A method's stack height
 (24–80 um across the shipped methods) comes from the interconnect PDK
-manifest and lands in `position.z = interposer_thickness +
+manifest and lands in `position.z = attachment_surface_z +
 stack_height`; it is fab data and deliberately not editable here. The
 die body extends upward from that seating plane and is independent of
 it.
