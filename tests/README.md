@@ -145,3 +145,56 @@ project under development):
 export CHIPLET_WRITER_BOARD=/path/to/board.kicad_pcb
 export HYPERLYNX_WRITER_BOARD=/path/to/board.kicad_pcb  # may be the same
 ```
+
+## GUI smoke tests (wxPython) — deferred, for the Docker image team
+
+The `ChipletExportDialog` in `dialog_chiplet_export.py` (the pcbnew action-plugin
+dialog) has **no automated test**. Its logic is covered indirectly by the pure
+helpers in `pipeline/orchestrator.py` and `pipeline/discovery.py`
+(`connection_method_specs`, `format_connection_label`,
+`describe_connection_method`, `describe_die_thickness_gaps`,
+`describe_interposer_body_default`, `preview_worker_python`, ...), but the wx
+plumbing itself — sizers, the removal of the "Canonical .chiplet" checkbox, the
+per-die grid, the connection-combo labels, the worker-python hint row, the
+`SetSizeHints` minimum width — is exercised by nobody. A regression there (a
+broken sizer, a symbol renamed in the orchestrator API the dialog imports) would
+ship undetected.
+
+This needs a **wxPython + display** environment, which the host worker venv
+(`.venv`) does not have. It is handed to the team that builds/tests the Docker
+images because the pieces already live there:
+
+- **`import wx` works in `kicad-builder` today** (wxPython **4.2.1** is in the
+  image). Only a virtual display is missing for constructing widgets.
+- **Level 1 — import smoke (runs green in `kicad-builder` right now).** Catches
+  import/syntax/symbol-wiring breakage without any display. Proven recipe:
+
+  ```bash
+  ROOT=/path/to/heterogenic_chip_design_project
+  docker run --rm -v $ROOT:$ROOT \
+    -e LD_LIBRARY_PATH=$ROOT/kicad/build/release/common:$ROOT/kicad/build/release/common/gal:$ROOT/kicad/build/release/pcbnew:$ROOT/kicad/build/release/api:$ROOT/kicad/build/release/pcbnew/python:$ROOT/kicad/build/release/3d-viewer/3d_cache/sg \
+    -e PYTHONPATH=$ROOT:$ROOT/kicad/build/release/pcbnew:$ROOT/kicad/build/release/pcbnew/python \
+    kicad-builder python3 -c "import wx, pcbnew; import chiplet_kicad_plugin.dialog_chiplet_export as d; assert hasattr(d, 'ChipletExportDialog')"
+  ```
+
+  Note: the dialog uses a **relative** import (`from .pipeline.orchestrator
+  import ...`), so it must be imported as `chiplet_kicad_plugin.dialog_chiplet_export`
+  with `$ROOT` (the parent of the checkout) on `PYTHONPATH`, **not** as a
+  top-level `import dialog_chiplet_export`. A benign
+  `action_plugin.cpp ... assert "PgmOrNull()" failed` line on stderr is expected
+  when `pcbnew` is imported outside the KiCad app and does not fail the smoke.
+
+- **Level 2 — headless construct smoke (needs one addition to the image).**
+  `kicad-builder` has **no `xvfb`** (`xvfb-run` is absent), so a `wx.App` +
+  `ChipletExportDialog(...)` cannot be constructed. The action item for the
+  Docker team is to add `xvfb` (`apt-get install -y xvfb`) to the image, then run
+  the construction under `xvfb-run -a python3 ...`, load the wire-bond demo board
+  (`kicad_designs/interposer_wire_bonding_demo/...`) via `pcbnew.LoadBoard`,
+  construct `ChipletExportDialog`, and assert the UX invariants from the dialog
+  cleanup: no "Canonical .chiplet" checkbox (`_cb_chiplet` gone), the connection
+  combo labels carry PDK specs (id stays the label prefix), the per-die grid has
+  header cells, the worker-python hint row is present, and the dialog's minimum
+  width did not grow versus a baseline.
+
+Until the image gains `xvfb`, wire Level 1 into the Docker test flow as-is — it
+is a real, green build-gate on the dialog today.
