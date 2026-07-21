@@ -3166,7 +3166,19 @@ def convert_hyp_to_gds(
                 with open(chiplet_file_path) as f:
                     chiplet_data = yaml.safe_load(f) or {}
                 for comp in chiplet_data.get('components', []):
-                    if comp.get('connection') or comp.get('orientation') == 'flip_chip':
+                    # The frame contract (coord_frame_contract.md 2.4) defines
+                    # only face_up and flip_chip; an absent field means face_up.
+                    # Reject a non-canonical token (a typo, or "face_down")
+                    # rather than silently treating it as face_up (un-mirrored):
+                    # this is an exporter, which 2.4 says MUST reject.
+                    orient = comp.get('orientation') or ''
+                    if orient not in ('', 'face_up', 'flip_chip'):
+                        raise ValueError(
+                            "component %r in %s has an unrecognized orientation "
+                            "%r; expected face_up or flip_chip (use flip_chip, "
+                            "not face_down)."
+                            % (comp.get('id'), chiplet_file_path, orient))
+                    if comp.get('connection') or orient == 'flip_chip':
                         flip_chip_refs.add(comp.get('id', ''))
             except (OSError, yaml.YAMLError) as exc:
                 print(f"Warning: could not read flip-chip orientation from "
