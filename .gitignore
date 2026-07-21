@@ -10,3 +10,6 @@ build/
 .coverage
 .DS_Store
 *.swp
+
+# Session continuity (local only, not tracked)
+SESSION_LOG.md
