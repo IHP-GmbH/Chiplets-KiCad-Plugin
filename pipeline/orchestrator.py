@@ -688,6 +688,40 @@ def describe_die_thickness_gaps(die_refs: List[str],
     return lines
 
 
+# An interposer's physical body (dimensions.thickness, from the KiCad board
+# stackup) plausibly sits in this range (um): thinned Si interposers are a few
+# hundred um, a full wafer ~750. The KiCad default FR-4 board (~1.6 mm) is the
+# classic "no real interposer stackup" tell.
+INTERPOSER_BODY_PLAUSIBLE_UM = (50.0, 1000.0)
+
+
+def describe_interposer_body_default(thickness_um: Optional[float]) -> List[str]:
+    """Warning lines about the interposer's physical body thickness.
+
+    dimensions.thickness on the interposer is the physical silicon body, taken
+    verbatim from the KiCad board stackup (GetBoardThickness). It is decoupled
+    from the die-attachment surface (attachment_surface_z), so an implausible
+    body no longer corrupts die z -- but a value near the ~1.6 mm FR-4 default
+    means the board ships a placeholder stackup, not a real interposer one.
+
+    Pure (no pcbnew) so the export path and the tests share one rule.
+    """
+    if thickness_um is None:
+        return []
+    low, high = INTERPOSER_BODY_PLAUSIBLE_UM
+    if low <= thickness_um <= high:
+        return []
+    return [
+        "WARNING: interposer physical body dimensions.thickness=%g um is "
+        "outside the plausible %g-%g um range -- it comes from the KiCad board "
+        "stackup, so a value near the 1.6 mm FR-4 default means the board has "
+        "no real interposer stackup. The die-attachment surface "
+        "(attachment_surface_z) is separate, so die z is unaffected; set a "
+        "realistic interposer thickness in Board Setup to model the body."
+        % (thickness_um, low, high)
+    ]
+
+
 def build_worker_env(options: ExportOptions,
                      base_env: Optional[Dict[str, str]] = None
                      ) -> Optional[Dict[str, str]]:
@@ -998,6 +1032,7 @@ def run_export(board, options, plugin_dir,
     from ..writers.chiplet_writer import (
         write_chiplet, write_io_pads_json, write_die_pin_lists,
         read_die_connections, read_die_thicknesses, list_die_refs,
+        _iu_to_um,
     )
     from ..writers.connection_stacks import validate_interconnect_ids
     from ..writers.hyperlynx_writer import write_hyperlynx
@@ -1164,6 +1199,17 @@ def run_export(board, options, plugin_dir,
                 _log(line)
         except Exception as exc:
             _log("Warning: die thickness check failed: %s" % exc)
+
+        # The interposer's physical body (dimensions.thickness) now survives to
+        # the .chiplet verbatim from the board stackup; flag an implausible
+        # value (e.g. the KiCad FR-4 default), which means no real interposer
+        # stackup was set. Cosmetic: die z uses attachment_surface_z, not this.
+        try:
+            body_iu = board.GetDesignSettings().GetBoardThickness()
+            for line in describe_interposer_body_default(_iu_to_um(body_iu)):
+                _log(line)
+        except Exception as exc:
+            _log("Warning: interposer body thickness check failed: %s" % exc)
 
         # Unknown per-die method ids fail the export here (manifest is the
         # source of truth) instead of degrading later in the worker or DRC.
