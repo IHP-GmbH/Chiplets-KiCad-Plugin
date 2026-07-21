@@ -388,15 +388,34 @@ def test_update_chiplet_die_thickness_without_connections(tmp_path):
 
 
 def test_update_chiplet_die_thickness_never_touches_interposer(tmp_path):
-    """The interposer's thickness encodes the attachment-surface z (the
-    z-mounting fallback surface) -- die_thicknesses only targets components
-    of type die, so an interposer entry is ignored by construction."""
+    """die_thicknesses only targets die components. The interposer keeps its
+    physical body (dimensions.thickness from the board stackup) untouched -- an
+    "interposer" entry in the map is ignored by construction -- and the
+    die-attachment surface is carried separately as attachment_surface_z."""
     data = _update_mixed(
         tmp_path, die_thicknesses={"interposer": 999.0, "U1": 750.0})
     interposer = next(c for c in data["components"]
                       if c.get("type") == "interposer")
-    assert interposer["dimensions"]["thickness"] == 13.83
+    # Physical body kept from the fixture (100.0): not the 999.0 map entry, and
+    # no longer overwritten by the attachment surface.
+    assert interposer["dimensions"]["thickness"] == 100.0
+    # The BEOL-top die-attachment surface is a separate component-level field.
+    assert interposer["attachment_surface_z"] == 13.83
     assert _die(data, "U1")["dimensions"]["thickness"] == 750.0
+
+
+def test_update_chiplet_emits_attachment_surface_z_and_keeps_body(tmp_path):
+    """The interposer emits attachment_surface_z (the die-attachment surface)
+    as a component-level field and keeps dimensions.thickness as the physical
+    body; a non-default surface flows through to each die's z."""
+    data = _update_mixed(
+        tmp_path, connection_type="cupillar_opt1", attachment_surface_z=20.0)
+    interposer = next(c for c in data["components"]
+                      if c.get("type") == "interposer")
+    assert interposer["attachment_surface_z"] == 20.0
+    assert interposer["dimensions"]["thickness"] == 100.0  # body left untouched
+    # die z = attachment_surface_z + stack (cupillar_opt1 = 28 + 16 = 44)
+    assert _die(data, "U1")["position"]["z"] == 20.0 + 44.0
 
 
 def test_update_chiplet_no_thickness_keeps_placeholder(tmp_path):
