@@ -35,13 +35,13 @@ if str(PLUGIN_ROOT.parent) not in sys.path:
 
 import pcbnew  # noqa: E402
 
-from chiplet_kicad_plugin.pipeline.discovery import (  # noqa: E402
+from chiplet_export.pipeline.discovery import (  # noqa: E402
     find_worker_python, find_hyp_to_gds,
 )
-from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
+from chiplet_export.pipeline.orchestrator import (  # noqa: E402
     ExportOptions, run_export, describe_assembly_drc, layout_dir, layout_path,
 )
-from chiplet_kicad_plugin.writers.chiplet_writer import (  # noqa: E402
+from chiplet_export.writers.chiplet_writer import (  # noqa: E402
     write_chiplet,
 )
 

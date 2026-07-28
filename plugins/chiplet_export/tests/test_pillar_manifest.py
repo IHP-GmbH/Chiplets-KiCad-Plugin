@@ -30,7 +30,7 @@ if str(PLUGIN_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT.parent))
 
 import hyp_to_gds as h  # noqa: E402
-from chiplet_kicad_plugin.tests.test_hyp_to_gds_decoupling import (  # noqa: E402
+from chiplet_export.tests.test_hyp_to_gds_decoupling import (  # noqa: E402
     MIXED_HYP, _write_pin_list)
 
 # Bump generation asserts real sibling-PDK content (bump_mirror in the

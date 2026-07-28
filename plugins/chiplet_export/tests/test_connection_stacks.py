@@ -19,14 +19,14 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT.parent))
 
-from chiplet_kicad_plugin.writers.connection_stacks import (  # noqa: E402
+from chiplet_export.writers.connection_stacks import (  # noqa: E402
     _manifest_reader,
     emit_connection_stacks_block,
     emit_interconnect_block,
     validate_interconnect_ids,
 )
 
-import chiplet_kicad_plugin.writers.connection_stacks as connection_stacks  # noqa: E402
+import chiplet_export.writers.connection_stacks as connection_stacks  # noqa: E402
 
 # Manifest-dependent tests need the interconnect PDK (env var or sibling
 # checkout). On a lone checkout (e.g. a bare CI runner) they skip; the

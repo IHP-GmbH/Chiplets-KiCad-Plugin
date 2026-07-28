@@ -7,6 +7,15 @@ on:
 jobs:
   tests:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # One entry per plugin under plugins/. Add a new plugin's directory
+        # name here to bring it into CI.
+        plugin: [chiplet_export]
+    defaults:
+      run:
+        working-directory: plugins/${{ matrix.plugin }}
     steps:
       - uses: actions/checkout@v4
 
@@ -14,6 +23,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+          cache-dependency-path: plugins/${{ matrix.plugin }}/requirements.txt
 
       - name: Install dependencies
         run: pip install -r requirements.txt pytest psutil

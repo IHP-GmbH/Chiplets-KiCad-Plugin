@@ -23,12 +23,12 @@ Some of the host-runnable suites still skip themselves when sibling ecosystem
 checkouts (the interconnect PDK, an SG13G2 PDK) are absent; they run
 everywhere but may report skips rather than passes.
 
-`conftest.py` aliases the checkout root as the `chiplet_kicad_plugin` package
-when the directory has a different name. A default clone lands in
-`Chiplets-KiCad-Plugin` and CI checkouts use the repo name (not a valid Python
-identifier); without the alias the absolute `chiplet_kicad_plugin.*` imports in
-the tests would not resolve. If you clone under the canonical
-`chiplet_kicad_plugin` name, the alias is a no-op.
+`conftest.py` puts the plugin package root (`plugins/chiplet_export`) on
+`sys.path` so the absolute `chiplet_export.*` imports and the top-level
+`import hyp_to_gds` resolve, and aliases that root as the `chiplet_export`
+package in `sys.modules` when the directory has a different name. The plugin
+dir is normally `chiplet_export` (also the KiCad symlink name), so the alias is
+usually a no-op; it only matters for oddly named checkouts.
 
 ## Layout
 
@@ -63,7 +63,7 @@ klayout-only suites need the worker venv's `klayout.db`, so run them through
 `.venv/bin/python`:
 
 ```bash
-cd chiplet_kicad_plugin
+cd plugins/chiplet_export
 .venv/bin/python -m pytest \
     tests/test_discovery.py \
     tests/test_runner.py \
@@ -104,7 +104,7 @@ docker run --rm \
   -e PYTHONPATH=$ROOT/kicad/build/release/pcbnew/python:/tmp/pytest_lib \
   kicad-builder bash -c "
     pip install --target /tmp/pytest_lib pytest pyyaml &&
-    cd $ROOT/chiplet_kicad_plugin &&
+    cd $ROOT/chiplet_kicad_plugin/plugins/chiplet_export &&
     python3 -m pytest tests/ -v --ignore=tests/regenerate_wirebond_demo.py \
                                 --ignore=tests/check_complete_gds_alignment.py
   "
@@ -122,8 +122,8 @@ Round-trip regression net (driver script + chiplet-studio gtests):
 #    stays available for boards still authored without an outline.
 docker run --rm -v $ROOT:$ROOT -e LD_LIBRARY_PATH=... -e PYTHONPATH=... \
   kicad-builder \
-  $ROOT/chiplet_kicad_plugin/.venv/bin/python \
-  $ROOT/chiplet_kicad_plugin/tests/regenerate_wirebond_demo.py \
+  $ROOT/chiplet_kicad_plugin/plugins/chiplet_export/.venv/bin/python \
+  $ROOT/chiplet_kicad_plugin/plugins/chiplet_export/tests/regenerate_wirebond_demo.py \
       --board $ROOT/adk-tools/examples/interposer_wire_bonding_demo/kicad/interposer_wire_bonding_demo.kicad_pcb \
       --connection cupillar_opt1 \
       --output-dir $ROOT/_tmp_regen
@@ -173,14 +173,14 @@ images because the pieces already live there:
   ROOT=/path/to/heterogenic_chip_design_project
   docker run --rm -v $ROOT:$ROOT \
     -e LD_LIBRARY_PATH=$ROOT/kicad/build/release/common:$ROOT/kicad/build/release/common/gal:$ROOT/kicad/build/release/pcbnew:$ROOT/kicad/build/release/api:$ROOT/kicad/build/release/pcbnew/python:$ROOT/kicad/build/release/3d-viewer/3d_cache/sg \
-    -e PYTHONPATH=$ROOT:$ROOT/kicad/build/release/pcbnew:$ROOT/kicad/build/release/pcbnew/python \
-    kicad-builder python3 -c "import wx, pcbnew; import chiplet_kicad_plugin.dialog_chiplet_export as d; assert hasattr(d, 'ChipletExportDialog')"
+    -e PYTHONPATH=$ROOT/chiplet_kicad_plugin/plugins:$ROOT/kicad/build/release/pcbnew:$ROOT/kicad/build/release/pcbnew/python \
+    kicad-builder python3 -c "import wx, pcbnew; import chiplet_export.dialog_chiplet_export as d; assert hasattr(d, 'ChipletExportDialog')"
   ```
 
   Note: the dialog uses a **relative** import (`from .pipeline.orchestrator
-  import ...`), so it must be imported as `chiplet_kicad_plugin.dialog_chiplet_export`
-  with `$ROOT` (the parent of the checkout) on `PYTHONPATH`, **not** as a
-  top-level `import dialog_chiplet_export`. A benign
+  import ...`), so it must be imported as `chiplet_export.dialog_chiplet_export`
+  with `$ROOT/chiplet_kicad_plugin/plugins` (the parent of the plugin package)
+  on `PYTHONPATH`, **not** as a top-level `import dialog_chiplet_export`. A benign
   `action_plugin.cpp ... assert "PgmOrNull()" failed` line on stderr is expected
   when `pcbnew` is imported outside the KiCad app and does not fail the smoke.
 

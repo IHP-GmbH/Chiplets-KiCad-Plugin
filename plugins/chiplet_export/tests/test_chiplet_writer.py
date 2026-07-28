@@ -33,7 +33,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT.parent))
 
-from chiplet_kicad_plugin.writers.chiplet_writer import write_chiplet  # noqa: E402
+from chiplet_export.writers.chiplet_writer import write_chiplet  # noqa: E402
 
 
 def _candidate_boards():
@@ -160,7 +160,7 @@ def test_writer_survives_board_without_text_vars(tmp_path):
 def test_die_connection_field_roundtrip(fixture_board_path):
     """list/read/write_die_connections operate on the die footprints'
     CONNECTION fields (in-memory board; nothing is saved here)."""
-    from chiplet_kicad_plugin.writers.chiplet_writer import (
+    from chiplet_export.writers.chiplet_writer import (
         list_die_refs, read_die_connections, write_die_connections)
 
     board = pcbnew.LoadBoard(fixture_board_path)
@@ -188,7 +188,7 @@ def test_invalid_orientation_field_is_a_hard_error(fixture_board_path, tmp_path)
     """A die footprint carrying a non-canonical ORIENTATION (a typo, or the
     non-canonical 'face_down') must fail loudly at export, not be silently
     emitted un-mirrored and without its connection stack."""
-    from chiplet_kicad_plugin.writers.chiplet_writer import _field_text
+    from chiplet_export.writers.chiplet_writer import _field_text
 
     board = pcbnew.LoadBoard(fixture_board_path)
     die = next((fp for fp in board.Footprints()
@@ -206,7 +206,7 @@ def test_invalid_orientation_field_is_a_hard_error(fixture_board_path, tmp_path)
 
 def test_write_die_connections_ignores_non_die_footprints(fixture_board_path):
     """Refs without a GDS_FILE field are never touched."""
-    from chiplet_kicad_plugin.writers.chiplet_writer import (
+    from chiplet_export.writers.chiplet_writer import (
         list_die_refs, write_die_connections)
 
     board = pcbnew.LoadBoard(fixture_board_path)
@@ -221,7 +221,7 @@ def test_write_die_connections_ignores_non_die_footprints(fixture_board_path):
 
 def test_parse_thickness_um():
     """Positive finite numbers pass; empty/garbage/non-positive are None."""
-    from chiplet_kicad_plugin.writers.chiplet_writer import parse_thickness_um
+    from chiplet_export.writers.chiplet_writer import parse_thickness_um
 
     assert parse_thickness_um("750") == 750.0
     assert parse_thickness_um(" 253.5 ") == 253.5
@@ -232,7 +232,7 @@ def test_parse_thickness_um():
 def test_die_thickness_field_roundtrip(fixture_board_path):
     """read/write_die_thicknesses operate on the die footprints'
     DIE_THICKNESS_UM fields (in-memory board; nothing is saved here)."""
-    from chiplet_kicad_plugin.writers.chiplet_writer import (
+    from chiplet_export.writers.chiplet_writer import (
         list_die_refs, read_die_thicknesses, write_die_thicknesses)
 
     board = pcbnew.LoadBoard(fixture_board_path)
@@ -258,7 +258,7 @@ def test_die_thickness_field_roundtrip(fixture_board_path):
 
 def test_read_die_thicknesses_skips_malformed(fixture_board_path, capsys):
     """A non-numeric field value warns and is skipped, never raises."""
-    from chiplet_kicad_plugin.writers.chiplet_writer import (
+    from chiplet_export.writers.chiplet_writer import (
         list_die_refs, read_die_thicknesses, write_die_thicknesses)
 
     board = pcbnew.LoadBoard(fixture_board_path)

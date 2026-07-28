@@ -19,7 +19,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT.parent))
 
-from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
+from chiplet_export.pipeline.orchestrator import (  # noqa: E402
     DEFAULT_INTERPOSER_ADAPTER,
     DEFAULT_INTERCONNECT_ADAPTER,
     DEPENDENCY_ROOT_MARKERS,
