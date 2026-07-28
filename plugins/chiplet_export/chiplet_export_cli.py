@@ -32,7 +32,7 @@ if str(PLUGIN_ROOT.parent) not in sys.path:
 
 import pcbnew  # noqa: E402
 
-from chiplet_kicad_plugin.pipeline.orchestrator import (  # noqa: E402
+from chiplet_export.pipeline.orchestrator import (  # noqa: E402
     ExportOptions, run_export, describe_assembly_drc,
 )
 

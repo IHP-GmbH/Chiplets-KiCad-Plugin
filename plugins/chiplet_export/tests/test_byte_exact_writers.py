@@ -41,10 +41,10 @@ if not hasattr(pcbnew, "ExportBoardToChipletFile") or \
         allow_module_level=True,
     )
 
-from chiplet_kicad_plugin.writers.chiplet_writer import (  # noqa: E402
+from chiplet_export.writers.chiplet_writer import (  # noqa: E402
     write_chiplet,
 )
-from chiplet_kicad_plugin.writers.hyperlynx_writer import (  # noqa: E402
+from chiplet_export.writers.hyperlynx_writer import (  # noqa: E402
     write_hyperlynx,
 )
 
