@@ -359,3 +359,9 @@ assert result.exit_code == 0 and not result.error
   the `_metadata.finalize_required` intermediate-frame marker.
 - `tests/README.md`: test layout, byte-exact parity, round-trip
   regression.
+
+## TODO
+
+- `hyp_to_gds.py`: CMIM placement currently snaps instance origins to the
+  IntM4TM2 5 nm grid using a literal `0.005` um value. Replace it with
+  technology-file discovery once the PDK exposes a stable source for the grid.

@@ -164,6 +164,58 @@ def write_io_pads_json(board, output_path):
     return len(pads_out)
 
 
+
+
+def write_cmim_devices_json(board, output_path):
+    """Extract cap_cmim footprints from `board` into a sidecar JSON.
+
+    Metadata extraction only. GDS geometry is generated later by hyp_to_gds.py.
+    Returns the number of CMIM devices written (0 -> no file).
+    """
+    import json
+
+    devices = []
+    for fp in list(board.Footprints()):
+        model = (_field_text(fp, "Model") or
+                 _field_text(fp, "Sim.Name")).strip()
+        if model != "cap_cmim":
+            continue
+
+        ref = fp.GetReference()
+        pos = fp.GetPosition()
+
+        w = _field_text(fp, "w").strip()
+        l = _field_text(fp, "l").strip()
+        m = _field_text(fp, "m", "1").strip() or "1"
+
+        if not w or not l:
+            missing = []
+            if not w:
+                missing.append("w")
+            if not l:
+                missing.append("l")
+            print("Warning: skipping CMIM %s: missing %s field(s)" %
+                  (ref, ", ".join(missing)), file=sys.stderr)
+            continue
+
+        devices.append({
+            "ref": ref,
+            "x_um": _iu_to_um(pos.x),
+            "y_um": -_iu_to_um(pos.y),
+            "w": w,
+            "l": l,
+            "m": m,
+        })
+
+    if not devices:
+        return 0
+
+    with open(output_path, "w") as f:
+        json.dump({"version": 1, "cmim_devices": devices}, f, indent=2)
+
+    return len(devices)
+
+
 def write_die_pin_lists(board, out_dir):
     """Extract die footprint pads into per-die pin_list JSON sidecars.
 

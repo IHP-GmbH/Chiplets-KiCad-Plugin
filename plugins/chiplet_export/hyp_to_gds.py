@@ -1067,6 +1067,126 @@ class GDSGenerator:
             print(f"Warning: Could not create via PCell: {e}")
             return None
 
+    def _bootstrap_intm4tm2_pcells(self) -> bool:
+        """Register the IntM4TM2 PCell library for headless PCell creation."""
+        root = _discover_path_var("INTERPOSER_PDK_ROOT")
+        if not root:
+            print("Warning: INTERPOSER_PDK_ROOT not found; cannot place CMIM PCells",
+                  file=sys.stderr)
+            return False
+
+        klayout_root = Path(root) / "libs.tech" / "klayout"
+        python_dir = klayout_root / "python"
+        cni_dir = python_dir / "pycell4klayout-api" / "source" / "python"
+
+        for entry in (str(python_dir), str(cni_dir)):
+            if entry not in sys.path:
+                sys.path.insert(0, entry)
+
+        try:
+            if "intm4tm2" not in db.Technology.technology_names():
+                tech = db.Technology.create_technology("intm4tm2")
+                lyt = klayout_root / "tech" / "intm4tm2.lyt"
+                if lyt.is_file():
+                    tech.load(str(lyt))
+
+            if "IntM4TM2" not in db.Library.library_names():
+                import intm4tm2_pycell_lib  # noqa: F401
+
+            self.layout.technology_name = "intm4tm2"
+            return True
+        except (Exception, SystemExit) as exc:
+            print(f"Warning: IntM4TM2 PCell bootstrap failed: {exc}",
+                  file=sys.stderr)
+            return False
+
+    def add_cmim_devices(self, cmim_devices_json: str) -> int:
+        """Place cap_cmim devices from a sidecar JSON using the IntM4TM2 PCell."""
+        path = Path(cmim_devices_json)
+        if not path.exists():
+            print(f"Warning: CMIM devices file not found: {cmim_devices_json}",
+                  file=sys.stderr)
+            return 0
+
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"Warning: could not read CMIM devices file {cmim_devices_json}: {exc}",
+                  file=sys.stderr)
+            return 0
+
+        devices = data.get("cmim_devices", []) if isinstance(data, dict) else []
+        if not devices:
+            print(f"  No cmim_devices found in {cmim_devices_json}")
+            return 0
+
+        if not self._bootstrap_intm4tm2_pcells():
+            return 0
+
+        group = self.layout.create_cell("CMIM_DEVICES")
+        self.routing_cell.insert(db.DCellInstArray(group, db.DTrans()))
+
+        placed = 0
+        for item in devices:
+            if not isinstance(item, dict):
+                continue
+
+            ref = item.get("ref", "?")
+            try:
+                x = float(item["x_um"])
+                y = float(item["y_um"])
+                w_m = float(item["w"])
+                l_m = float(item["l"])
+                m = int(float(item.get("m", "1")))
+            except (KeyError, TypeError, ValueError) as exc:
+                print(f"  Warning: skipping CMIM {ref}: invalid parameters ({exc})",
+                      file=sys.stderr)
+                continue
+
+            if w_m <= 0.0 or l_m <= 0.0 or m <= 0:
+                bad = []
+                if w_m <= 0.0:
+                    bad.append(f"w={w_m:g}")
+                if l_m <= 0.0:
+                    bad.append(f"l={l_m:g}")
+                if m <= 0:
+                    bad.append(f"m={m}")
+                print(f"  Warning: skipping CMIM {ref}: non-positive parameter(s) "
+                      f"({', '.join(bad)})", file=sys.stderr)
+                continue
+
+            params = {
+                "w": w_m,
+                "l": l_m,
+                "m": m,
+                "Calculate": "C",
+            }
+
+            cell = self.layout.create_cell("cmim", "IntM4TM2", params)
+            if cell is None:
+                print(f"  Warning: failed to create CMIM PCell for {ref}",
+                      file=sys.stderr)
+                continue
+
+            # w/l are in meters; placement is in micrometers. The cmim PCell
+            # owns the device geometry, so only the instance origin is snapped
+            # to the IntM4TM2 5 nm grid.
+            # TODO: replace the literal 0.005 um grid value with technology-file
+            # discovery once the PDK exposes a stable source for it.
+            x_ll = round((x - (w_m * 1e6) / 2.0) / 0.005) * 0.005
+            y_ll = round((y - (l_m * 1e6) / 2.0) / 0.005) * 0.005
+
+            group.insert(db.DCellInstArray(
+                cell,
+                db.DTrans(db.DVector(x_ll, y_ll))
+            ))
+
+            placed += 1
+            print(f"  Placed CMIM {ref} at ({x_ll:g}, {y_ll:g}) um")
+
+        return placed
+
     # Via layer name -> PDK_VIA_PARAMS key. 'Vn' covers the standard
     # vias (Via1..Via4); the two top vias have their own geometry class.
     _VIA_PARAM_KEY = {
@@ -2720,6 +2840,7 @@ def convert_hyp_to_gds(
     connection_type: str = "",
     cupillar_gds_path: Optional[str] = None,
     io_pads_json: Optional[str] = None,
+    cmim_devices_json: Optional[str] = None,
     annotate_boundaries: bool = False,
     boundary_viz_layer: Tuple[int, int] = (1000, 0),
     die_connections: Optional[Dict[str, str]] = None,
@@ -2773,6 +2894,8 @@ def convert_hyp_to_gds(
     print(f"Parsed {len(parser.padstacks)} padstack definitions")
     print(f"Parsed {len(parser.devices)} devices with GDS_FILE")
     print(f"Parsed {len(parser.pins)} pins")
+    if cmim_devices_json:
+        print(f"CMIM sidecar support active: {cmim_devices_json}")
     print(f"Units: {parser.units}")
     if parser.stackup_layers:
         print(f"Stackup (top→bottom): {' → '.join(parser.stackup_layers)}")
@@ -2791,8 +2914,12 @@ def convert_hyp_to_gds(
             print(f"  P={idx}: {' -> '.join(ps.layers)}")
 
     if not parser.segments and not parser.vias:
-        print("Warning: No geometry found in HYP file")
-        return False
+        if cmim_devices_json:
+            print("No trace/via geometry found in HYP file; continuing because "
+                  "--cmim-devices was provided.")
+        else:
+            print("Warning: No geometry found in HYP file")
+            return False
 
     # Count segments by layer
     if parser.segments:
@@ -3128,6 +3255,11 @@ def convert_hyp_to_gds(
                 "    python hyp_to_gds.py ... --io-pads io_pads.json"
                 % (len(standalone), shown), file=sys.stderr)
 
+    if cmim_devices_json:
+        print(f"\nAdding CMIM PCells from {cmim_devices_json}...")
+        placed_cmims = generator.add_cmim_devices(cmim_devices_json)
+        print(f"Placed {placed_cmims} CMIM PCell device(s)")
+
     # Write interposer GDS (routing + cu-pillars, without chiplet dies)
     generator.write(output_path)
     print(f"Interposer GDS file written to: {output_path}")
@@ -3376,6 +3508,12 @@ Examples:
              "injected under the interposer component."
     )
     parser.add_argument(
+        "--cmim-devices",
+        type=str,
+        metavar="JSON_FILE",
+        help="Sidecar JSON with cap_cmim footprint parameters for IntM4TM2 PCell placement."
+    )
+    parser.add_argument(
         "--annotate-boundaries",
         action="store_true",
         help="Also paint each chiplet boundary (and instance label) onto a "
@@ -3403,7 +3541,7 @@ Examples:
     # relative paths pass through untouched.
     for _attr in ("hyp_file", "output", "lyp", "tech_json",
                   "complete_output", "update_chiplet_file",
-                  "cupillar_gds", "io_pads"):
+                  "cupillar_gds", "io_pads", "cmim_devices"):
         setattr(args, _attr, _expand_path_vars(getattr(args, _attr)))
 
     # Determine output path (interposer-only GDS)
@@ -3506,6 +3644,7 @@ Examples:
         boundary_viz_layer=boundary_viz_layer,
         die_connections=die_connections,
         die_thicknesses=die_thicknesses,
+        cmim_devices_json=args.cmim_devices,
     )
 
     return 0 if success else 1
