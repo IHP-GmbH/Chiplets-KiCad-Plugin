@@ -11,17 +11,19 @@ installed independently.
 | Plugin | What it does |
 |--------|--------------|
 | [`plugins/chiplet_export`](plugins/chiplet_export/README.md) | pcbnew action plugin that drives the HYP -> GDS -> canonical `.chiplet` pipeline in one click. Produces the canonical `.chiplet`, the interposer GDS, the driving Hyperlynx `.hyp`, and optionally a complete-assembly GDS. Consumed by adk-tools as a submodule. |
+| [`plugins/resizer_passive_elements`](plugins/resizer_passive_elements/README.md) | pcbnew action plugin that resizes placed passive devices on the board. Today it covers `cap_cmim`: it regenerates each instance's footprint through the OpenIntM4TM2 `cmim_footprint_gen.py` from the `w`/`l` or `Capacitance` fields, then swaps it in preserving placement, nets and the technology fields the export flow reads. |
 
 ## Layout
 
 ```
 Chiplets-KiCad-Plugin/
 ├── plugins/
-│   └── chiplet_export/       one self-contained pcbnew plugin (Python package)
-│       ├── __init__.py       registers the ActionPlugin with pcbnew
-│       ├── ...               action, dialog, pipeline/, writers/, tests/
-│       ├── requirements.txt  that plugin's worker venv deps
-│       └── README.md         that plugin's docs
+│   ├── chiplet_export/       one self-contained pcbnew plugin (Python package)
+│   │   ├── __init__.py       registers the ActionPlugin with pcbnew
+│   │   ├── ...               action, dialog, pipeline/, writers/, tests/
+│   │   ├── requirements.txt  that plugin's worker venv deps
+│   │   └── README.md         that plugin's docs
+│   └── resizer_passive_elements/   same shape, one plugin per directory
 ├── .github/workflows/        CI, one matrix entry per plugin
 ├── LICENSE                   GPL-3.0-or-later, applies repo-wide
 └── README.md                 this file

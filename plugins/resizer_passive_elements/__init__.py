@@ -5,11 +5,11 @@ resizer passive elements plugin for KiCad pcbnew.
 Registers a single pcbnew.ActionPlugin under Tools > External Plugins
 ("resizer passive elements", category "Chiplet / resizer passive elements") that opens one window
 with a single "Run" button (chains Scan, Generate, Apply, Refresh) plus
-the shared log. See README.md for install/usage and
-resizer_passive_elements_spec.md for the full design.
+the shared log. See README.md for install/usage and ARCHITECTURE.md for
+the design.
 
 The import is wrapped in try/except (ImportError, AttributeError),
-mirroring Chiplets-KiCad-Plugin's __init__.py, so this package stays
+mirroring the sibling chiplet_export plugin's __init__.py, so this package stays
 importable on a host without a real pcbnew (tests, headless tooling) --
 ActionPlugin only exists inside a running pcbnew process.
 """

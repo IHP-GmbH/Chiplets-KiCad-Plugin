@@ -107,7 +107,7 @@ def _parse_capacitance_fF(text):
 
 
 def _footprints_of(board):
-    """board.Footprints() (the method the reference plugin actually uses),
+    """board.Footprints() (the method the sibling chiplet_export plugin actually uses),
     falling back to GetFootprints() for other pcbnew builds."""
     try:
         return list(board.Footprints())

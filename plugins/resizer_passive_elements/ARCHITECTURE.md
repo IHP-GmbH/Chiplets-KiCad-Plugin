@@ -279,8 +279,8 @@ text sprawls across the entire view. This bit the plugin's own
 `CMIM_GENERATED_FILE` provenance field (recording which generated file
 an instance's footprint came from), and the same issue applies to hidden
 machine-readable technology fields when they are created or refreshed.
-`_style_provenance_field()` fixes it the same way the reference
-`Chiplets-KiCad-Plugin` fixes its own machine-managed fields
+`_style_provenance_field()` fixes it the same way the sibling
+`chiplet_export` plugin fixes its own machine-managed fields
 (`writers/chiplet_writer.py`, `_style_managed_field`): move it to
 `F.Fab`, hide it, shrink its text.
 

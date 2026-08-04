@@ -36,9 +36,9 @@ def _load_generator_module(gen_script_path=None):
     if not gen_path or not os.path.isfile(gen_path):
         raise FileNotFoundError(
             "cmim_footprint_gen.py not found (set the \"cmim_footprint_gen.py\" "
-            'or "OpenIntM4TM2 root folder" field in the window, the {} '
-            "environment variable, or use a sibling checkout of "
-            "OpenIntM4TM2)".format(paths.REPO_ROOT_ENV_VAR)
+            'or "OpenIntM4TM2 root folder" field in the window, one of the {} '
+            "environment variables, or use a sibling checkout of the "
+            "interposer PDK)".format(" / ".join(paths.REPO_ROOT_ENV_VARS))
         )
     gen_path = str(Path(gen_path).resolve())
 
@@ -121,6 +121,21 @@ def _strip_visible_name_label(mod_path, name):
         handle.write(text[:line_start] + text[after:])
 
 
+def _max_side_um(gen, tech):
+    """Largest square side the device supports, or None if it cannot be derived.
+
+    Derived from the generator's own Cmax rather than hardcoded, so the bound
+    follows the PDK: cap_to_width(Cmax) is the side of the biggest square
+    cap_cmim, and no legitimate w/l exceeds it.
+    """
+    try:
+        _cmin_fF, cmax_fF = gen.cap_bounds_fF(tech)
+        side = float(gen.cap_to_width(cmax_fF, tech))
+    except Exception:
+        return None
+    return side if side > 0.0 else None
+
+
 def _generate_cap_cmim_footprint(params, tech, output_dir, on_log=None, gen_script_path=None):
     def log(message):
         if on_log is not None:
@@ -167,6 +182,22 @@ def _generate_cap_cmim_footprint(params, tech, output_dir, on_log=None, gen_scri
             "\"w\"/\"l\" field on the schematic symbol (remember it is "
             "stored in metres there, not micrometres).".format(
                 ref=reference, w=w_um, l=l_um, wmin=min_lw_um))
+        return None
+
+    # Upper bound, mirroring the Capacitance branch's cap_bounds_fF check.
+    # Without it a plausible typo runs away instead of erroring: "8.11" with
+    # no suffix reads as metres (board_reader._parse_um), i.e. 8.11e6 um, and
+    # the generator's via array then loops ~1e13 times inside the wx handler,
+    # freezing pcbnew with no way back.
+    max_lw_um = _max_side_um(gen, tech)
+    if max_lw_um is not None and (w_um > max_lw_um + 1e-9
+                                  or l_um > max_lw_um + 1e-9):
+        log("{ref}: ERROR: w={w:g}um l={l:g}um is above the device maximum "
+            "(Wmax={wmax:g}um, the square side at Cmax): the Vmim via array "
+            "would be generated cell by cell over that whole area. Check the "
+            "\"w\"/\"l\" field (a bare number is read as metres, so 8.11 "
+            "means 8.11e6 um; write 8.11um or 8.11e-6).".format(
+                ref=reference, w=w_um, l=l_um, wmax=max_lw_um))
         return None
 
     try:
@@ -332,7 +363,7 @@ def _style_provenance_field(footprint, field_name):
     KiCad creates a brand-new footprint field visible on F.SilkS at
     1.27 mm by default -- harmless on a normal PCB, but on these
     um-scale devices it renders as a giant label sprawling across the
-    whole view. Same fix as the reference Chiplets-KiCad-Plugin uses for
+    whole view. Same fix as the sibling chiplet_export plugin uses for
     its own machine-managed fields (writers/chiplet_writer.py,
     _style_managed_field): SWIG exposes GetFields() but not
     GetFieldByName(), so the field has to be looked up by name after
@@ -370,6 +401,16 @@ def _field_text(footprint, name):
         return None
     text = (text or "").strip()
     return text or None
+
+
+# Fields this plugin writes itself on every apply (see
+# _apply_cap_cmim_fields), plus the two KiCad identity fields. Everything
+# else on the replaced instance is carried over verbatim.
+_MANAGED_FIELDS = frozenset((
+    "Reference", "Value", "Footprint",
+    "Model", "Sim.Name", "w", "l", "m", "Capacitance",
+    "CMIM_GENERATED_FILE",
+))
 
 
 def _format_meters(value_um):
@@ -491,6 +532,18 @@ def apply_to_instance(board, footprint_obj, generated_mod_path, params=None, on_
     new_fp.SetOrientation(footprint_obj.GetOrientation())
     new_fp.SetLayer(footprint_obj.GetLayer())
 
+    # The KIID path is the link back to the schematic symbol. Dropping it
+    # detaches the instance: the next "Update PCB from Schematic" no longer
+    # recognises this footprint as the symbol's, so it re-adds the symbol and
+    # reports the resized part as an extra. Silent until that moment, which is
+    # exactly why it has to be carried over here.
+    for getter, setter in (("GetPath", "SetPath"),
+                           ("IsLocked", "SetLocked")):
+        try:
+            getattr(new_fp, setter)(getattr(footprint_obj, getter)())
+        except Exception:
+            pass
+
     # Technology-field text refresh runs BEFORE the visibility-carryover
     # loop below, deliberately: _apply_technology_fields() (via
     # _style_provenance_field) unconditionally HIDES every field it
@@ -511,6 +564,21 @@ def apply_to_instance(board, footprint_obj, generated_mod_path, params=None, on_
         old_field = old_fields_by_name.get(name)
         if old_field is not None and old_field.IsVisible():
             new_field.SetVisible(True)
+
+    # Fields the generated footprint knows nothing about, carried over rather
+    # than dropped: everything the symbol contributed (Datasheet, the Sim.*
+    # simulation model, licence headers) would otherwise disappear on the
+    # first resize. Only the fields this plugin owns are excluded, since
+    # _apply_technology_fields has just written the authoritative values.
+    new_field_names = {f.GetName() for f in new_fp.GetFields()}
+    for name, old_field in old_fields_by_name.items():
+        if name in _MANAGED_FIELDS or name in new_field_names:
+            continue
+        try:
+            new_fp.SetField(name, old_field.GetText())
+        except Exception:
+            continue
+        _style_provenance_field(new_fp, name)
 
     # Net connections, matched strictly by pad number -- never by index.
     for number, new_pad in new_pads.items():
