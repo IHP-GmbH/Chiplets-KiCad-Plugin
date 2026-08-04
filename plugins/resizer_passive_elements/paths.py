@@ -82,8 +82,20 @@ def _lookup_text_var(board, name):
         project = board.GetProject()
     except Exception:
         return ""
-    if project is None or not hasattr(project, "GetTextVars"):
+    if project is None:
         return ""
+    if not hasattr(project, "GetTextVars"):
+        # The real shape. PROJECT is wrapped in no KiCad version, but the
+        # opaque pointer is still a valid PROJECT* that SWIG passes back into
+        # a wrapped C++ function, so ExpandTextVars reaches the same map.
+        # Same leg as chiplet_export's writers/chiplet_writer._expand_text_var.
+        token = "${%s}" % name
+        try:
+            import pcbnew
+            value = str(pcbnew.ExpandTextVars(token, project))
+        except (ImportError, AttributeError, TypeError, NotImplementedError):
+            return ""
+        return "" if value == token else value
     try:
         text_vars = project.GetTextVars()
     except Exception:

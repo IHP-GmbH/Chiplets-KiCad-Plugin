@@ -78,17 +78,47 @@ def _lookup_property(board, name):
     return ""
 
 
+def _expand_text_var(project, name):
+    """Resolve one project text variable through pcbnew, or None.
+
+    SWIG never wrapped PROJECT (it is absent from every KiCad `.i` file, in
+    every version), so `GetProject()` hands Python an opaque object and calling
+    `GetTextVars()` on it is impossible. The pointer is still a valid typed
+    `PROJECT*` though, and SWIG passes it straight back into a wrapped C++
+    function, so ExpandTextVars reaches the very map the C++ exporter reads.
+
+    Project-only, like the C++ exporter and unlike BOARD::ResolveTextVar, which
+    is board-properties-first. An unset name comes back as the literal token,
+    and a value containing ${...} is not re-expanded, both matching the C++
+    side. Returns None when the name is unset or pcbnew cannot be asked.
+    """
+    if project is None:
+        return None
+    token = "${%s}" % name
+    try:
+        value = str(pcbnew.ExpandTextVars(token, project))
+    except (AttributeError, TypeError, NotImplementedError):
+        return None
+    return None if value == token else value
+
+
 def _lookup_text_var(board, name):
-    """Look `name` up in PROJECT.GetTextVars() ONLY (never BOARD.GetProperties()).
+    """Look `name` up in the PROJECT text variables ONLY (never BOARD.GetProperties()).
 
     The C++ exporter reads INTERPOSER_ADAPTER / INTERCONNECT_ADAPTER from the
     project text variables only; _lookup_property's GetProperties-first lookup
     would let a board property shadow the text variable and diverge from
     byte-exact parity. Returns "" when absent (caller applies any default).
+
+    Two legs: the direct map, for a binding that exposes it (no shipped KiCad
+    does, but a test double can and a future one might), then ExpandTextVars,
+    which is what actually resolves against a real board.
     """
     project = board.GetProject()
-    if project is None or not hasattr(project, "GetTextVars"):
+    if project is None:
         return ""
+    if not hasattr(project, "GetTextVars"):
+        return _expand_text_var(project, name) or ""
     try:
         text_vars = project.GetTextVars()
     except Exception:

@@ -64,11 +64,32 @@ def _probe_imports(python_path):
     return result.returncode == 0
 
 
+def _expand_text_var(project, name):
+    """Resolve one project text variable through pcbnew, or None.
+
+    SWIG never wrapped PROJECT, in any KiCad version, so `GetProject()` returns
+    an opaque object with no `GetTextVars`. The pointer is still a valid typed
+    `PROJECT*` that SWIG passes back into a wrapped C++ function, so this is
+    the leg that actually resolves anything on a real board. pcbnew is imported
+    lazily: this module is exercised headlessly by the test suite.
+    """
+    if project is None:
+        return None
+    token = "${%s}" % name
+    try:
+        import pcbnew
+        value = str(pcbnew.ExpandTextVars(token, project))
+    except (ImportError, AttributeError, TypeError, NotImplementedError):
+        return None
+    return None if value == token else value
+
+
 def _lookup_text_var(board, name):
     """Best-effort lookup of a KiCad project text variable.
 
     Mirrors the SWIG-map handling in writers/chiplet_writer.py so that
-    a missing or differently-shaped binding never crashes the plugin.
+    a missing or differently-shaped binding never crashes the plugin, then
+    falls back to ExpandTextVars, which is what works against real pcbnew.
     """
     if board is None:
         return None
@@ -81,7 +102,7 @@ def _lookup_text_var(board, name):
     try:
         text_vars = project.GetTextVars()
     except Exception:
-        return None
+        return _expand_text_var(project, name)
     try:
         if name in text_vars:
             return str(text_vars[name])
@@ -93,7 +114,7 @@ def _lookup_text_var(board, name):
                 return str(text_vars.at(name))
         except Exception:
             pass
-    return None
+    return _expand_text_var(project, name)
 
 
 def _venv_python(plugin_dir):

@@ -54,16 +54,19 @@ from chiplet_export.writers.hyperlynx_writer import (  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def _candidate_chiplet_boards():
-    project_root = PLUGIN_ROOT.parent
-    candidates = [
-        os.environ.get("CHIPLET_WRITER_BOARD"),
-        # adk-tools image / meta-repo layout: the demo ships under
-        # examples/ split into a kicad/ source dir and an outputs/ dir.
-        str(project_root / "examples"
-            / "interposer_wire_bonding_demo"
-            / "kicad"
-            / "interposer_wire_bonding_demo.kicad_pcb"),
-    ]
+    candidates = [os.environ.get("CHIPLET_WRITER_BOARD")]
+    # adk-tools image / meta-repo layout: the demos ship under examples/,
+    # each split into a kicad/ source dir and an outputs/ dir. Every ancestor
+    # is searched and every demo accepted: the plugin sits at
+    # <repo>/plugins/chiplet_export, so examples/ is three levels up, not one,
+    # and the image ships two_die_interposer rather than the wire-bond demo.
+    # Getting either of those wrong skips the whole parity guard silently,
+    # which is how it came to be inert in the shipping image.
+    for base in PLUGIN_ROOT.parents:
+        examples = base / "examples"
+        if examples.is_dir():
+            candidates.extend(
+                str(p) for p in sorted(examples.glob("*/kicad/*.kicad_pcb")))
     return [c for c in candidates if c]
 
 
@@ -161,6 +164,57 @@ def test_chiplet_byte_exact(tmp_path, chiplet_board_path):
         "Python chiplet writer returned False"
 
     _assert_byte_exact("chiplet", cpp_path, py_path)
+
+
+def test_chiplet_byte_exact_with_project_text_vars(tmp_path,
+                                                   chiplet_board_path):
+    """The parity that matters most, because it has no other guard.
+
+    INTERPOSER_ADAPTER and INTERCONNECT_ADAPTER are read from the project text
+    variables and from nowhere else, on both sides (export_chiplet.cpp reads
+    PROJECT::GetTextVars directly; the Python writer must not fall back to
+    board properties or a board property would shadow the variable and diverge).
+
+    No committed fixture sets either one, so the plain parity test above passes
+    for the uninteresting reason that both sides read nothing. This synthesises
+    a project that does set them. It caught a real divergence: SWIG never
+    wrapped PROJECT, so the Python lookup returned "" for years while the C++
+    exporter honoured the variables, and the .chiplet silently lost its
+    interposer adapter and its whole interconnect block.
+    """
+    project = tmp_path / "textvars"
+    project.mkdir()
+    board_file = project / "board.kicad_pcb"
+    board_file.write_bytes(Path(chiplet_board_path).read_bytes())
+    (project / "board.kicad_pro").write_text(
+        '{\n'
+        '  "board": {"design_settings": {}},\n'
+        '  "meta": {"filename": "board.kicad_pro", "version": 1},\n'
+        '  "text_variables": {\n'
+        '    "INTERPOSER_ADAPTER": "textvar_probe_adapter",\n'
+        '    "INTERCONNECT_ADAPTER": "ihp_cupillar"\n'
+        '  }\n'
+        '}\n'
+    )
+
+    cpp_path = tmp_path / "cpp_baseline.chiplet"
+    py_path = tmp_path / "python_port.chiplet"
+
+    # One LoadBoard per writer, each used immediately: a PROJECT* fetched from
+    # a board is invalidated by the next LoadBoard, and touching it afterwards
+    # takes the interpreter down with SIGSEGV rather than failing the test.
+    board = pcbnew.LoadBoard(str(board_file))
+    assert pcbnew.ExportBoardToChipletFile(board, str(cpp_path)) is True
+    baseline = cpp_path.read_text()
+    assert 'adapter: "textvar_probe_adapter"' in baseline, (
+        "the C++ exporter did not pick the text variable up; the fixture "
+        "project is not being loaded, so this test proves nothing")
+    assert "interconnect:" in baseline
+
+    board_py = pcbnew.LoadBoard(str(board_file))
+    assert write_chiplet(board_py, str(py_path)) is True
+
+    _assert_byte_exact("chiplet (project text variables)", cpp_path, py_path)
 
 
 def test_hyperlynx_byte_exact(tmp_path, hyperlynx_board_path):

@@ -170,10 +170,18 @@ just iterates whatever `find_supported_footprints()` returns.
 ### `paths.py`
 
 Resolution chain for `intm4tm2_tech.json` and `cmim_footprint_gen.py`:
-environment variable (`INTM4TM2_ROOT`) -> project text variable ->
-sibling checkout on disk -> hardcoded `/work/OpenIntM4TM2` Docker
-fallback. Also persists the dialog's four path fields as project text
-variables, so they only need to be set once per KiCad project.
+environment variable (`INTERPOSER_PDK_ROOT`, or its `INTM4TM2_ROOT` alias) ->
+the root saved from a previous session -> project text variable -> sibling
+checkout on disk (any ancestor directory holding `interposer/` or
+`OpenIntM4TM2/`) -> hardcoded `/work/OpenIntM4TM2` Docker fallback.
+
+The dialog's four path fields persist to a `.resizer_passive_elements.json`
+next to the board, not to project text variables: KiCad's Python bindings
+never wrapped `PROJECT`, so `board.GetProject()` returns an object with no
+`GetTextVars` and writing them is impossible from here. Reading them is
+possible through `pcbnew.ExpandTextVars`, which the sibling `chiplet_export`
+plugin uses; this plugin keeps the read leg for the roots and owns its own
+store for the rest.
 
 ### `action_resizer_passive_elements.py` / `__init__.py`
 
