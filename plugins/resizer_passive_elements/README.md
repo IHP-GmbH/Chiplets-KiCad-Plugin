@@ -122,7 +122,8 @@ Clicking **Run** does all of the following, in order, every time:
    had made `Capacitance` visible, it stays visible after the swap too.
    For `cap_cmim`, the technology field text is then written explicitly:
    `Model=cap_cmim`, `Sim.Name=cap_cmim` when needed, final `w`/`l` in
-   metres, `m`, and final `Capacitance`. This matters for GDS export:
+   metres, `m`, final `Capacitance` and `Nominal` (see *Naming* below).
+   This matters for GDS export:
    the resized footprint must still be recognizable as a parametric CMIM
    device, not just as visually correct pads. Afterwards, the `Footprint`
    shown in Footprint Properties for that instance will read the
@@ -134,12 +135,30 @@ Clicking **Run** does all of the following, in order, every time:
 4. **Refresh** -- forces a PCB editor redraw, in case a pad-size change
    from step 3 doesn't show up immediately.
 
+### Naming
+
 Generated filenames/footprint names are capacitance-keyed
 (`CMIM_<label>`, e.g. `CMIM_100fF.kicad_mod`, `CMIM_1p5pF.kicad_mod`),
 matching the display style of the official discrete-family footprints
-committed in `OpenIntM4TM2` (`CMIM_10fF` ... `CMIM_5pF`) -- deliberately
-*not* `cmim_footprint_gen.py`'s own dimension-keyed default
-(`footprint_name(w, l)`, e.g. `CMIM_8p11x8p11um`), which at the same
+committed in `OpenIntM4TM2` (`CMIM_10fF` ... `CMIM_5pF`).
+
+Which capacitance names the part is not a detail. The PDK keeps two separate
+properties and so does this plugin: `Nominal` is the round value the part is
+*called* (`100fF`) and `Capacitance` is what the drawn plate actually *is*
+(`99.96fF`). They differ because of the placement grid: the exact side for
+100 fF is 8.111807 um, the 5 nm grid forces 8.110, and that costs 0.044%.
+So `CMIM_100fF` really is the 100 fF part; naming it after its own recomputed
+value would rename it `CMIM_99p956fF` on the next run, and again after that.
+
+The rule: a part keeps its `Nominal` name for as long as `w`/`l` still are the
+grid-snapped square for that nominal. The moment you resize it, the label no
+longer describes the device, so it is dropped and the footprint is named for
+the capacitance it now has (a 10x10 um plate becomes `CMIM_151p6fF`, and the
+log says the nominal was dropped). A resized part never keeps the name of the
+value it used to have.
+
+The name is deliberately *not* `cmim_footprint_gen.py`'s own dimension-keyed
+default (`footprint_name(w, l)`, e.g. `CMIM_8p11x8p11um`), which at the same
 (tiny, plate-proportional) font size is almost twice as long and visibly
 overruns the device's outline. If the generator's raw output ever
 includes a `fp_text` label whose text is exactly the footprint's own

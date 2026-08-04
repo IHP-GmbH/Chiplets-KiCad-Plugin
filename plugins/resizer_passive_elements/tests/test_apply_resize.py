@@ -3,7 +3,16 @@
 
 The bound tests drive the real OpenIntM4TM2 generator (loaded by path, never
 vendored) and skip when the interposer PDK checkout is not resolvable.
+
+Naming follows the PDK's own two-property convention. `Nominal` is the round
+value a part is named for, `Capacitance` is what the drawn plate actually
+gives, and they differ by the placement grid: the exact width for 100 fF is
+8.111807 um, the 5 nm grid forces 8.110, and the result is 99.95575 fF. Naming
+from the recomputed value instead of the nominal is what renamed the stock
+CMIM_100fF part to CMIM_99p956fF on its second pass through the plugin.
 """
+import re
+
 import pytest
 
 from resizer_passive_elements import apply_resize, paths
@@ -135,6 +144,86 @@ def test_an_out_of_range_capacitance_is_rejected(tmp_path, tech):
 
     assert out is None
     assert any("out of range" in line for line in logged), logged
+
+
+@pytest.mark.parametrize("cap_fF,label", [
+    (100, "100fF"),
+    (5000, "5pF"),
+    (1500, "1.5pF"),      # the property keeps the dot; only the NAME swaps it
+])
+def test_nominal_label_keeps_the_decimal_point(cap_fF, label):
+    assert apply_resize._format_nominal_label(cap_fF) == label
+
+
+@needs_pdk
+def test_a_nominal_survives_only_while_it_describes_the_geometry(gen, tech):
+    live = apply_resize._live_nominal_fF
+
+    # 8.11 um square is the grid-snapped width for 100 fF: the label holds.
+    assert live(gen, tech, 100.0, 8.11, 8.11) == 100.0
+    # Resized: the part is no longer a 100 fF device, so the label must go.
+    assert live(gen, tech, 100.0, 10.0, 10.0) is None
+    # The nominal family is square only.
+    assert live(gen, tech, 100.0, 8.11, 12.0) is None
+    # Nothing to preserve.
+    assert live(gen, tech, None, 8.11, 8.11) is None
+    assert live(gen, tech, 0.0, 8.11, 8.11) is None
+
+
+@needs_pdk
+def test_a_stock_part_keeps_its_name_across_runs(tmp_path, tech):
+    """The plugin rewrites Capacitance with the recomputed value; that value
+    must not become the next run's name, or nothing is ever stable."""
+    params = {"reference": "C1", "model": "cap_cmim", "w_um": 8.11,
+              "l_um": 8.11, "capacitance_fF": 100.0, "nominal_fF": 100.0}
+    names = []
+
+    for _ in range(3):
+        out = apply_resize.generate_footprint_file(
+            params, tech, str(tmp_path), gen_script_path=GEN_SCRIPT)
+        names.append(out)
+        # feed back what _apply_cap_cmim_fields would stamp on the footprint
+        params = dict(params, capacitance_fF=params["capacitance_fF"],
+                      nominal_fF=params["nominal_fF"])
+
+    assert all(n.endswith("CMIM_100fF.kicad_mod") for n in names), names
+
+
+@needs_pdk
+def test_a_resized_part_is_named_for_what_it_now_is(tmp_path, tech):
+    # Stale Nominal left at 100fF while w/l describe a larger plate.
+    params = {"reference": "C1", "model": "cap_cmim", "w_um": 10.0,
+              "l_um": 10.0, "capacitance_fF": 100.0, "nominal_fF": 100.0}
+
+    out = apply_resize.generate_footprint_file(
+        params, tech, str(tmp_path), gen_script_path=GEN_SCRIPT)
+
+    assert out.endswith("CMIM_151p6fF.kicad_mod"), out
+    # The stale label is dropped rather than carried onto a different device.
+    assert params["nominal_fF"] is None
+
+
+@needs_pdk
+def test_the_generated_part_matches_the_committed_one(tmp_path, tech):
+    """Regenerating a family member must reproduce the PDK's own footprint."""
+    committed = (paths.Path(paths.discover_tech_json_path()).parents[3]
+                 / "kicad" / "footprints" / "intm4tm2.pretty"
+                 / "CMIM_100fF.kicad_mod")
+    if not committed.is_file():
+        pytest.skip("committed CMIM_100fF.kicad_mod not present")
+
+    out = apply_resize.generate_footprint_file(
+        {"reference": "C1", "model": "cap_cmim", "w_um": 8.11, "l_um": 8.11,
+         "capacitance_fF": 100.0, "nominal_fF": 100.0},
+        tech, str(tmp_path), gen_script_path=GEN_SCRIPT)
+
+    def properties(text):
+        return dict(re.findall(r'\(property "([^"]+)" "([^"]*)"', text))
+
+    generated = properties(paths.Path(out).read_text())
+    reference = properties(committed.read_text())
+    for key in ("Value", "Nominal", "Capacitance", "w", "l", "m"):
+        assert generated[key] == reference[key], key
 
 
 def test_an_unregistered_model_is_reported(tmp_path):

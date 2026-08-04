@@ -86,7 +86,7 @@ def test_parse_capacitance_tries_long_suffixes_first():
 
 def test_reads_a_well_formed_cap_cmim():
     fp = FakeFootprint({"Model": "cap_cmim", "w": "8.11e-6", "l": "8.11e-6",
-                        "Capacitance": "100 fF"})
+                        "Capacitance": "99.96fF", "Nominal": "100fF"})
     logged = []
 
     params = board_reader._read_cap_cmim_fields(fp, logged.append)
@@ -95,8 +95,20 @@ def test_reads_a_well_formed_cap_cmim():
     assert params["model"] == "cap_cmim"
     assert params["w_um"] == pytest.approx(8.11)
     assert params["l_um"] == pytest.approx(8.11)
+    # Nominal and Capacitance are different things and both are read: the
+    # part is called 100fF, the plate computes to 99.96fF.
+    assert params["nominal_fF"] == pytest.approx(100.0)
+    assert params["capacitance_fF"] == pytest.approx(99.96)
     assert params["footprint_obj"] is fp
     assert logged == []
+
+
+def test_a_missing_nominal_is_not_an_error():
+    params = board_reader._read_cap_cmim_fields(
+        FakeFootprint({"Model": "cap_cmim", "w": "8.11um", "l": "8.11um"}),
+        None)
+
+    assert params["nominal_fF"] is None
 
 
 @pytest.mark.parametrize("fields,expect_none", [

@@ -140,10 +140,17 @@ def _read_cap_cmim_fields(footprint, on_log):
     w_text = _field_text(footprint, "w")
     l_text = _field_text(footprint, "l")
     cap_text = _field_text(footprint, "Capacitance")
+    nominal_text = _field_text(footprint, "Nominal")
 
     w_um = _parse_um(w_text)
     l_um = _parse_um(l_text)
     capacitance_fF = _parse_capacitance_fF(cap_text)
+    # "Nominal" is the round value the part is named for ("100fF"), which the
+    # PDK deliberately keeps apart from "Capacitance", the value the drawn
+    # geometry actually gives ("99.96fF"): the exact width for 100 fF is
+    # 8.111807 um and the 5 nm placement grid forces 8.110, which is 0.044%
+    # low. Conflating the two is what renames a part nobody touched.
+    nominal_fF = _parse_capacitance_fF(nominal_text)
 
     if w_text is None:
         log('{}: warning: missing "w" field'.format(reference))
@@ -161,12 +168,17 @@ def _read_cap_cmim_fields(footprint, on_log):
         log('{}: warning: "Capacitance" field ("{}") could not be '
             'parsed as a number'.format(reference, cap_text))
 
+    if nominal_text is not None and nominal_fF is None:
+        log('{}: warning: "Nominal" field ("{}") could not be '
+            'parsed as a number'.format(reference, nominal_text))
+
     return {
         "reference": reference,
         "model": "cap_cmim",
         "w_um": w_um,
         "l_um": l_um,
         "capacitance_fF": capacitance_fF,
+        "nominal_fF": nominal_fF,
         "footprint_obj": footprint,
     }
 

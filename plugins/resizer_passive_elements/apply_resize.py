@@ -121,6 +121,46 @@ def _strip_visible_name_label(mod_path, name):
         handle.write(text[:line_start] + text[after:])
 
 
+def _format_nominal_label(cap_fF):
+    """The round-value label, e.g. 100 -> '100fF', 1500 -> '1.5pF'.
+
+    Same style as _format_cap_label but keeping the decimal point: the
+    generator's "Nominal" property reads '1.5pF' while the footprint NAME
+    substitutes the dot (CMIM_1p5pF), and the committed family follows both.
+    """
+    if cap_fF >= 1000.0:
+        value, unit = cap_fF / 1000.0, "pF"
+    else:
+        value, unit = float(cap_fF), "fF"
+    return "{:g}{}".format(round(value, 3), unit)
+
+
+def _live_nominal_fF(gen, tech, nominal_fF, w_um, l_um):
+    """`nominal_fF` if it still describes this geometry, else None.
+
+    The nominal is what the part is *called*; the geometry is what it *is*.
+    They agree only while nobody has changed w/l, so the claim is re-checked
+    against the generator every time: a square plate whose side is the
+    grid-snapped width for that nominal. A stale nominal (the user resized the
+    device but the field still says 100fF) must not name the new footprint,
+    and a matching one must not be discarded either, or every run renames the
+    stock CMIM_100fF part after its own recomputed 99.95575 fF.
+    """
+    if nominal_fF is None or nominal_fF <= 0.0:
+        return None
+    try:
+        grid = float(tech["grid"])
+        expected = float(gen.cap_to_width(nominal_fF, tech))
+    except Exception:
+        return None
+    tolerance = grid / 2.0
+    if abs(w_um - l_um) > tolerance:
+        return None            # the nominal family is square only
+    if abs(w_um - expected) > tolerance:
+        return None
+    return nominal_fF
+
+
 def _max_side_um(gen, tech):
     """Largest square side the device supports, or None if it cannot be derived.
 
@@ -201,17 +241,31 @@ def _generate_cap_cmim_footprint(params, tech, output_dir, on_log=None, gen_scri
         return None
 
     try:
-        cap_label_source = params.get("capacitance_fF")
-        if cap_label_source is None:
-            cap_label_source = gen.cmim_capacitance_fF(w_um, l_um, tech)
-        name = "CMIM_" + _format_cap_label(cap_label_source)
+        nominal_fF = _live_nominal_fF(gen, tech, params.get("nominal_fF"),
+                                      w_um, l_um)
+        params["_stale_nominal"] = (params.get("nominal_fF") is not None
+                                    and nominal_fF is None)
+        if nominal_fF is not None:
+            # Named for the round value, like the committed CMIM_10fF ...
+            # CMIM_5pF family, and the generator records it as a "Nominal"
+            # property next to the recomputed "Capacitance".
+            nominal_label = _format_nominal_label(nominal_fF)
+            name = "CMIM_" + nominal_label.replace(".", "p")
+        else:
+            # No nominal, or one the geometry no longer matches: name for what
+            # the plate actually is. A resized device must not keep the label
+            # of the value it used to have.
+            nominal_label = None
+            name = "CMIM_" + _format_cap_label(
+                gen.cmim_capacitance_fF(w_um, l_um, tech))
         out_path = os.path.join(output_dir, name + ".kicad_mod")
     except Exception as exc:
         log("{}: ERROR: {}".format(reference, exc))
         return None
 
     try:
-        gen.write_footprint(w_um, l_um, tech, out_path, name=name)
+        gen.write_footprint(w_um, l_um, tech, out_path, name=name,
+                            nominal=nominal_label)
     except Exception as exc:
         log("{}: ERROR: {}".format(reference, exc))
         return None
@@ -225,6 +279,7 @@ def _generate_cap_cmim_footprint(params, tech, output_dir, on_log=None, gen_scri
 
     params["w_um"] = w_um
     params["l_um"] = l_um
+    params["nominal_fF"] = nominal_fF
     if cap_fF_result is not None:
         params["capacitance_fF"] = cap_fF_result
 
@@ -232,8 +287,13 @@ def _generate_cap_cmim_footprint(params, tech, output_dir, on_log=None, gen_scri
         log("{}: generated {} (w={:g}um l={:g}um)".format(
             reference, out_path, w_um, l_um))
     else:
-        log("{}: generated {} (w={:g}um l={:g}um C={:.2f}fF)".format(
-            reference, out_path, w_um, l_um, cap_fF_result))
+        log("{}: generated {} (w={:g}um l={:g}um C={:.2f}fF{})".format(
+            reference, out_path, w_um, l_um, cap_fF_result,
+            ", nominal " + nominal_label if nominal_label else ""))
+        if params.get("_stale_nominal"):
+            log("{}: note: the \"Nominal\" field no longer matches w/l and was "
+                "dropped; the footprint is named for its actual "
+                "{:.2f}fF.".format(reference, cap_fF_result))
     return out_path
 
 
@@ -408,7 +468,7 @@ def _field_text(footprint, name):
 # else on the replaced instance is carried over verbatim.
 _MANAGED_FIELDS = frozenset((
     "Reference", "Value", "Footprint",
-    "Model", "Sim.Name", "w", "l", "m", "Capacitance",
+    "Model", "Sim.Name", "w", "l", "m", "Capacitance", "Nominal",
     "CMIM_GENERATED_FILE",
 ))
 
@@ -434,6 +494,13 @@ def _apply_cap_cmim_fields(old_fp, new_fp, params):
         fields["w"] = _format_meters(w_um)
     if l_um is not None:
         fields["l"] = _format_meters(l_um)
+    # Nominal survives only while it still describes w/l (_live_nominal_fF).
+    # Once it does not, the empty string is deliberate: leaving the old label
+    # in place is what let a resized device keep claiming a value it no longer
+    # has, and the round value cannot be recovered from the geometry.
+    nominal_fF = params.get("nominal_fF")
+    fields["Nominal"] = (_format_nominal_label(nominal_fF)
+                         if nominal_fF is not None else "")
     cap_fF = params.get("capacitance_fF")
     if cap_fF is not None:
         fields["Capacitance"] = _format_capacitance_fF(cap_fF)
