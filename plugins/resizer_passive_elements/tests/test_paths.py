@@ -156,3 +156,47 @@ def test_settings_are_written_as_readable_json(tmp_path):
 def test_discovery_never_raises_without_a_usable_board(board):
     assert isinstance(paths.discover_tech_json_path(board), str)
     assert isinstance(paths.discover_footprint_gen_path(board), str)
+
+
+class OpaqueProjectBoard:
+    """What SWIG really hands back: PROJECT is wrapped in no KiCad version, so
+    GetProject() returns a pointer with no methods at all."""
+
+    class _Opaque:
+        pass
+
+    def __init__(self, filename=""):
+        self._filename = filename
+        self._project = self._Opaque()
+
+    def GetFileName(self):
+        return self._filename
+
+    def GetProject(self):
+        return self._project
+
+
+def test_a_text_var_is_read_through_expand_text_vars(monkeypatch):
+    import sys
+
+    class FakePcbnew:
+        @staticmethod
+        def ExpandTextVars(token, project):
+            return "/from/text/var" if token == "${INTM4TM2_ROOT}" else token
+
+    monkeypatch.setitem(sys.modules, "pcbnew", FakePcbnew)
+
+    assert paths._lookup_text_var(OpaqueProjectBoard(), "INTM4TM2_ROOT") \
+        == "/from/text/var"
+    assert paths._lookup_text_var(OpaqueProjectBoard(), "NOPE") == ""
+
+
+def test_the_text_var_leg_degrades_without_pcbnew(monkeypatch):
+    import sys
+
+    class FakePcbnew:
+        pass
+
+    monkeypatch.setitem(sys.modules, "pcbnew", FakePcbnew)
+
+    assert paths._lookup_text_var(OpaqueProjectBoard(), "ANY") == ""

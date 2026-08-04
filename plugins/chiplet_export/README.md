@@ -283,7 +283,9 @@ The plugin tried every discovery step and none worked. Fix one of:
 - Set `KICAD_CHIPLET_PYTHON=/absolute/path/to/python` in the shell that
   launches KiCad.
 - Set `KICAD_CHIPLET_PYTHON` as a project text variable in
-  *Board Setup > Text Variables*.
+  *Board Setup > Text Variables*. This leg reads the project through
+  `pcbnew.ExpandTextVars`, since KiCad's Python bindings never wrapped
+  `PROJECT` and `board.GetProject().GetTextVars()` cannot be called at all.
 - Point the dialog's *Worker Python* field at one directly (takes effect
   without restarting KiCad; note a present-but-broken `.venv` wins over
   the project text variable, so this is the way past it).

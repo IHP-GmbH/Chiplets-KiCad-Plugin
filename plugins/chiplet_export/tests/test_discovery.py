@@ -46,6 +46,19 @@ class _FakeBoard:
         return self._project
 
 
+class _OpaqueProject:
+    """What SWIG really hands back: PROJECT is wrapped nowhere, in any KiCad
+    version, so GetProject() returns a pointer with no methods at all."""
+
+
+class _RealShapedBoard:
+    def __init__(self):
+        self._project = _OpaqueProject()
+
+    def GetProject(self):
+        return self._project
+
+
 @pytest.fixture(autouse=True)
 def _clear_env(monkeypatch):
     monkeypatch.delenv(discovery.WORKER_ENV_VAR, raising=False)
@@ -90,6 +103,59 @@ def test_project_text_var(tmp_path, monkeypatch):
     monkeypatch.setattr(discovery, "_venv_python", lambda d: None)
     board = _FakeBoard({discovery.WORKER_ENV_VAR: str(exe)})
     assert discovery.find_worker_python(tmp_path, board=board) == str(exe.resolve())
+
+
+def test_project_text_var_through_expand_text_vars(tmp_path, monkeypatch):
+    """The leg that actually fires against a real board.
+
+    `board.GetProject()` returns an object with no `GetTextVars`, because SWIG
+    has never wrapped PROJECT in any KiCad version. The pointer is still a
+    valid `PROJECT*` that SWIG passes back into a wrapped C++ function, so the
+    variable is reachable through `pcbnew.ExpandTextVars` and only through it.
+    """
+    exe = tmp_path / "py_from_expand"
+    _make_exe(exe)
+    monkeypatch.setattr(discovery, "_venv_python", lambda d: None)
+
+    calls = []
+
+    class _FakePcbnew:
+        @staticmethod
+        def ExpandTextVars(token, project):
+            calls.append((token, project))
+            if token == "${%s}" % discovery.WORKER_ENV_VAR:
+                return str(exe)
+            return token
+
+    monkeypatch.setitem(sys.modules, "pcbnew", _FakePcbnew)
+
+    board = _RealShapedBoard()
+    assert discovery.find_worker_python(tmp_path, board=board) \
+        == str(exe.resolve())
+    assert calls and calls[0][0] == "${%s}" % discovery.WORKER_ENV_VAR
+
+
+def test_unset_text_var_comes_back_as_the_literal_token(tmp_path, monkeypatch):
+    """ExpandTextVars echoes the token when the name is not defined."""
+    monkeypatch.setattr(discovery, "_venv_python", lambda d: None)
+
+    class _FakePcbnew:
+        @staticmethod
+        def ExpandTextVars(token, project):
+            return token
+
+    monkeypatch.setitem(sys.modules, "pcbnew", _FakePcbnew)
+
+    assert discovery._lookup_text_var(_RealShapedBoard(), "NOPE") is None
+
+
+def test_expand_text_var_survives_a_pcbnew_that_lacks_it(monkeypatch):
+    class _FakePcbnew:
+        pass
+
+    monkeypatch.setitem(sys.modules, "pcbnew", _FakePcbnew)
+
+    assert discovery._lookup_text_var(_RealShapedBoard(), "ANY") is None
 
 
 def test_project_text_var_swig_map_style(tmp_path, monkeypatch):
