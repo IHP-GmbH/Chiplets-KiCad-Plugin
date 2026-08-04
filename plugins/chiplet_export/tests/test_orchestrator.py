@@ -76,7 +76,9 @@ def test_defaults_emit_canonical_chiplet_and_interposer(tmp_path):
     # Other optional flags omitted. io_pads / pad_locations are injected by
     # run_export (board auto-extraction), not by the pure build_cli_args.
     for flag in ("-l", "--connection-type", "--io-pads",
-                 "--cupillar-gds", "--pad-locations", "--annotate-boundaries"):
+                 "--cupillar-gds", "--pad-locations", "--annotate-boundaries",
+                 "--cmim-devices"
+                 ):
         assert flag not in args
 
 
@@ -222,6 +224,12 @@ def test_worker_python_override_not_in_cli(tmp_path):
     # never injected into the script's own argv.
     assert "/usr/bin/python3.12" not in args
 
+
+def test_cmim_devices_passthrough(tmp_path):
+    opts = _opts(tmp_path)
+    opts.cmim_devices_json = "/etc/cmim_devices.json"
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
+    assert args[args.index("--cmim-devices") + 1] == "/etc/cmim_devices.json"
 
 # ---------------------------------------------------------------------------
 # ExportOptions / ExportResult defaults for ADK assembly DRC

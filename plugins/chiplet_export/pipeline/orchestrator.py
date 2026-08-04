@@ -146,6 +146,7 @@ class ExportOptions:
     connection_type: str = ""          # empty = no --connection-type
     lyp_override: str = ""             # empty = hyp_to_gds default (built-in IHP)
     io_pads_json: str = ""             # empty = auto-extract from board
+    cmim_devices_json: str = ""        # empty = auto-extract from board
     cupillar_gds: str = ""             # non-empty = pre-generated GDS override
     worker_python_override: str = ""   # empty = use discovery chain
     # Assembly DRC against the ADK deck. Runs after hyp_to_gds when a
@@ -890,6 +891,9 @@ def build_cli_args(hyp_to_gds_path: str,
     if options.io_pads_json:
         args += ["--io-pads", options.io_pads_json]
 
+    if options.cmim_devices_json:
+        args += ["--cmim-devices", options.cmim_devices_json]
+
     if options.cupillar_gds:
         args += ["--cupillar-gds", options.cupillar_gds]
 
@@ -1030,7 +1034,9 @@ def run_export(board, options, plugin_dir,
 
     from .runner import run_async
     from ..writers.chiplet_writer import (
-        write_chiplet, write_io_pads_json, write_die_pin_lists,
+        write_chiplet, write_io_pads_json,
+        write_cmim_devices_json,
+        write_die_pin_lists,
         read_die_connections, read_die_thicknesses, list_die_refs,
         _iu_to_um,
     )
@@ -1144,6 +1150,22 @@ def run_export(board, options, plugin_dir,
                 effective_io_pads = io_pads_auto
                 _log("Auto-extracted %d io_pad(s) from board" % n_io)
 
+        # Auto-extract cap_cmim device metadata from the board so hyp_to_gds can
+        # instantiate the real IntM4TM2 cmim PCell. A non-empty
+        # options.cmim_devices_json acts as an explicit override.
+        effective_cmim_devices = options.cmim_devices_json
+        if not effective_cmim_devices:
+            cmim_auto = os.path.join(tmpdir, "%s_cmim_devices.json" % board_name)
+            try:
+                n_cmim = write_cmim_devices_json(board, cmim_auto)
+            except Exception as exc:
+                n_cmim = 0
+                _log("Warning: CMIM auto-extraction failed: %s" % exc)
+
+            if n_cmim:
+                effective_cmim_devices = cmim_auto
+                _log("Auto-extracted %d cmim device(s) from board" % n_cmim)
+
         # Auto-extract die footprint pads so the Cu-pillar generator places
         # DRC-validated pillars under each flip-chip die (acts only when
         # connection_type names a cupillar stack). A user-supplied
@@ -1236,10 +1258,13 @@ def run_export(board, options, plugin_dir,
             hyp_final = ""
 
         effective_options = dataclasses.replace(
-            options, io_pads_json=effective_io_pads,
+            options,
+            io_pads_json=effective_io_pads,
+            cmim_devices_json=effective_cmim_devices,
             pad_locations=effective_pad_locs,
             die_connections=effective_die_conns,
             die_thicknesses=effective_die_thicks)
+
         cli = build_cli_args(hyp_to_gds, hyp_path, board_name, effective_options)
         command = [worker_py] + cli
 
