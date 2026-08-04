@@ -12,7 +12,7 @@ jobs:
       matrix:
         # One entry per plugin under plugins/. Add a new plugin's directory
         # name here to bring it into CI.
-        plugin: [chiplet_export]
+        plugin: [chiplet_export, resizer_passive_elements]
     defaults:
       run:
         working-directory: plugins/${{ matrix.plugin }}

@@ -2,27 +2,33 @@
 """
 Path discovery and persistence for the resizer passive elements plugin.
 
-Resolution chain (mirrors ``discover_dependency_root`` in the reference
-Chiplets-KiCad-Plugin, section 1.3 of the spec): environment variable ->
-project text variable -> sibling checkout on disk -> the hardcoded
-``/work/OpenIntM4TM2`` Docker bind-mount path (last resort) -> ""
-(nothing found). The first three are the "official" legs, tried first;
-the Docker path only kicks in when none of them resolves. This is used
-to find the *shared* ``OpenIntM4TM2`` checkout (for
-``intm4tm2_tech.json`` and ``cmim_footprint_gen.py``, both read-only,
-never copied or modified here).
+Resolution chain, following the same convention as ``discover_dependency_root``
+in the sibling ``chiplet_export`` plugin: environment variable -> project text
+variable -> sibling checkout on disk -> the hardcoded ``/work/OpenIntM4TM2``
+Docker bind-mount path (last resort) -> "" (nothing found). The first three are
+the "official" legs, tried first; the Docker path only kicks in when none of
+them resolves. This is used to find the *shared* interposer PDK checkout (for
+``intm4tm2_tech.json`` and ``cmim_footprint_gen.py``, both read-only, never
+copied or modified here).
 
-The two *local* settings the dialog exposes (tech.json override, output
-.pretty directory) are persisted separately as project text variables so
-the four buttons agree without re-asking the user every time.
+The local settings the dialog exposes (roots, tech.json override, output
+.pretty directory) are persisted next to the board so the four buttons agree
+without re-asking the user every time.
 """
 
+import json
 import os
 from pathlib import Path
 
-# Environment variable / project text variable naming the root of the
-# shared OpenIntM4TM2 checkout (the parent of "libs.tech").
-REPO_ROOT_ENV_VAR = "INTM4TM2_ROOT"
+# Environment variables / project text variables naming the root of the shared
+# interposer PDK checkout (the parent of "libs.tech"). INTERPOSER_PDK_ROOT is
+# the ecosystem-wide name, used by chiplet_export and by hyp_to_gds, and is
+# tried first so one variable configures every tool; INTM4TM2_ROOT stays
+# accepted as an alias.
+REPO_ROOT_ENV_VARS = ("INTERPOSER_PDK_ROOT", "INTM4TM2_ROOT")
+
+# Back-compat alias for callers that referenced the single-variable name.
+REPO_ROOT_ENV_VAR = REPO_ROOT_ENV_VARS[-1]
 
 # Project text variables the dialog reads/writes for its editable fields
 # (see dialog_log.py).
@@ -41,7 +47,11 @@ _TECH_JSON_RELATIVE = (
 _GEN_SCRIPT_RELATIVE = ("libs.tech", "kicad", "scripts", "cmim_footprint_gen.py")
 
 # Candidate directory names for the sibling-checkout leg of discovery.
-_SIBLING_NAMES = ("OpenIntM4TM2", "OpenIntM4TM2-main", "openintm4tm2")
+# "interposer" comes first: it is what the ecosystem checkout is actually
+# called, and it heads the same list in chiplet_export's
+# DEPENDENCY_ROOT_MARKERS.
+_SIBLING_NAMES = ("interposer", "OpenIntM4TM2", "OpenIntM4TM2-main",
+                  "openintm4tm2")
 
 # Last-resort hardcoded root, tried only after every "official" leg above
 # has failed: the conventional bind-mount path for OpenIntM4TM2 inside the
@@ -57,11 +67,14 @@ _DEFAULT_OUTPUT_DIRNAME = "local_footprints.pretty"
 def _lookup_text_var(board, name):
     """Best-effort read of a KiCad project text variable.
 
-    Mirrors the defensive std::map handling used throughout the reference
-    plugin (writers/chiplet_writer.py): the SWIG wrapper may expose the
-    map as dict-like or std::map-like, and some boards have no usable
-    PROJECT at all -- any of that yields "" rather than a raised
-    exception.
+    Mirrors the defensive std::map handling used throughout the sibling
+    chiplet_export plugin (writers/chiplet_writer.py): the SWIG wrapper may
+    expose the map as dict-like or std::map-like, and some boards have no
+    usable PROJECT at all -- any of that yields "" rather than a raised
+    exception. In KiCad 9 none of it fires: GetProject() returns an opaque
+    object with no GetTextVars, so this is a read that always comes back
+    empty. Kept as the forward-compatible leg; the working store is the
+    JSON written by save_path_overrides.
     """
     if board is None:
         return ""
@@ -92,10 +105,14 @@ def _lookup_text_var(board, name):
 
 
 def _sibling_roots():
-    """Candidate OpenIntM4TM2 checkout roots near this plugin's install dir."""
-    plugin_dir = Path(__file__).resolve().parent
-    bases = (plugin_dir.parent, plugin_dir.parent.parent, plugin_dir.parent.parent.parent)
-    for base in bases:
+    """Candidate interposer PDK checkout roots near this plugin's install dir.
+
+    Every ancestor is walked, not a fixed three levels: the plugin sits at
+    ``<repo>/plugins/<name>/`` and the checkout it is looking for can be a
+    sibling of the repo, of the ecosystem root above it, or of a Docker mount
+    point further up still. Same shape as _discover_path_var in hyp_to_gds.
+    """
+    for base in Path(__file__).resolve().parents:
         for name in _SIBLING_NAMES:
             yield base / name
 
@@ -106,13 +123,19 @@ def _resolve_repo_relative(relative_parts, board=None):
     hardcoded /work/OpenIntM4TM2 bind-mount path, tried last)."""
     candidate_roots = []
 
-    env_root = os.environ.get(REPO_ROOT_ENV_VAR)
-    if env_root:
-        candidate_roots.append(Path(env_root))
+    for var in REPO_ROOT_ENV_VARS:
+        env_root = os.environ.get(var)
+        if env_root:
+            candidate_roots.append(Path(env_root))
 
-    proj_root = _lookup_text_var(board, REPO_ROOT_ENV_VAR)
-    if proj_root:
-        candidate_roots.append(Path(proj_root))
+    saved_root = load_path_overrides(board)[0]
+    if saved_root:
+        candidate_roots.append(Path(saved_root))
+
+    for var in REPO_ROOT_ENV_VARS:
+        proj_root = _lookup_text_var(board, var)
+        if proj_root:
+            candidate_roots.append(Path(proj_root))
 
     candidate_roots.extend(_sibling_roots())
     candidate_roots.append(Path(_DOCKER_FALLBACK_ROOT))
@@ -147,8 +170,8 @@ def resolve_from_root(root_dir):
 
     Used to auto-fill the dialog's individual fields the moment the user
     points the "OpenIntM4TM2 root folder" field at a checkout -- handy
-    when neither INTM4TM2_ROOT nor a sibling checkout resolves (e.g. an
-    older Docker image that doesn't have OpenIntM4TM2 baked in yet, so
+    when neither the environment variables nor a sibling checkout resolve
+    (e.g. an older Docker image without the PDK baked in, so
     the checkout only exists at some path the user mounted by hand).
     """
     if not root_dir:
@@ -178,34 +201,69 @@ def discover_output_pretty_dir(board):
     return str(Path.home() / _DEFAULT_OUTPUT_DIRNAME)
 
 
-def save_path_overrides(board, root_dir, tech_json_path, gen_script_path, output_dir):
-    """Persist the dialog's four path fields as project text variables."""
+_SETTINGS_FILENAME = ".resizer_passive_elements.json"
+_SETTINGS_KEYS = (ROOT_DIR_TEXT_VAR, TECH_JSON_TEXT_VAR,
+                  GEN_SCRIPT_TEXT_VAR, OUTPUT_DIR_TEXT_VAR)
+
+
+def _settings_path(board):
+    """Where the dialog's path fields are persisted, next to the .kicad_pcb.
+
+    Project text variables would be the natural home, but KiCad's SWIG
+    bindings do not expose them: ``BOARD.GetProject()`` returns an opaque
+    SwigPyObject with no ``GetTextVars``, so both writing and reading them is
+    a no-op. A small JSON beside the board is the honest substitute; it is
+    per-project the same way text variables would have been.
+    """
     if board is None:
-        return
+        return None
     try:
-        project = board.GetProject()
+        board_file = board.GetFileName()
     except Exception:
-        return
-    if project is None or not hasattr(project, "GetTextVars"):
-        return
+        return None
+    if not board_file:
+        return None
+    return Path(board_file).resolve().parent / _SETTINGS_FILENAME
+
+
+def save_path_overrides(board, root_dir, tech_json_path, gen_script_path,
+                        output_dir, on_log=None):
+    """Persist the dialog's four path fields. True when they were written."""
+    path = _settings_path(board)
+    if path is None:
+        if on_log is not None:
+            on_log("note: paths not saved (the board has no file on disk yet)")
+        return False
+    values = dict(zip(_SETTINGS_KEYS,
+                      (root_dir or "", tech_json_path or "",
+                       gen_script_path or "", output_dir or "")))
     try:
-        text_vars = project.GetTextVars()
-        text_vars[ROOT_DIR_TEXT_VAR] = root_dir or ""
-        text_vars[TECH_JSON_TEXT_VAR] = tech_json_path or ""
-        text_vars[GEN_SCRIPT_TEXT_VAR] = gen_script_path or ""
-        text_vars[OUTPUT_DIR_TEXT_VAR] = output_dir or ""
-        if hasattr(project, "SetTextVars"):
-            project.SetTextVars(text_vars)
-    except Exception:
-        pass
+        with open(path, "w") as handle:
+            json.dump(values, handle, indent=2, sort_keys=True)
+    except OSError as exc:
+        if on_log is not None:
+            on_log("note: paths not saved to {}: {}".format(path, exc))
+        return False
+    return True
 
 
 def load_path_overrides(board):
     """Previously saved (root_dir, tech_json_path, gen_script_path,
     output_dir), each "" if unset."""
-    return (
-        _lookup_text_var(board, ROOT_DIR_TEXT_VAR),
-        _lookup_text_var(board, TECH_JSON_TEXT_VAR),
-        _lookup_text_var(board, GEN_SCRIPT_TEXT_VAR),
-        _lookup_text_var(board, OUTPUT_DIR_TEXT_VAR),
+    path = _settings_path(board)
+    values = {}
+    if path is not None:
+        try:
+            with open(path, "r") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                values = loaded
+        except (OSError, ValueError):
+            # ValueError covers both JSONDecodeError and the UnicodeDecodeError
+            # a non-UTF-8 file raises. This runs in the dialog constructor, so
+            # anything escaping here stops the window from opening at all.
+            values = {}
+    return tuple(
+        str(values.get(key, "") or "") or _lookup_text_var(board, key)
+        for key in _SETTINGS_KEYS
     )

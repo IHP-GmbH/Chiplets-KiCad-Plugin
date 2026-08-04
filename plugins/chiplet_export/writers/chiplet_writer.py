@@ -164,54 +164,145 @@ def write_io_pads_json(board, output_path):
     return len(pads_out)
 
 
+CMIM_MODEL = "cap_cmim"
+CMIM_SIDECAR_VERSION = 2
 
 
-def write_cmim_devices_json(board, output_path):
+def is_cmim(footprint):
+    """True when `footprint` is an interposer-integrated MIM capacitor.
+
+    Both spellings occur: the KiCad footprint library writes `Model`, the
+    schematic symbol carries `Sim.Name`, and a footprint that came through
+    "Update PCB from Schematic" has both.
+    """
+    model = (_field_text(footprint, "Model") or
+             _field_text(footprint, "Sim.Name")).strip()
+    return model == CMIM_MODEL
+
+
+def parse_length_um(text):
+    """'w'/'l' field text -> micrometres, or None if unparseable.
+
+    Two formats genuinely occur on a board and are only distinguishable by
+    the unit suffix, so both must be accepted:
+
+    - '8.11um' / '8.11u': what the PDK's own cmim_footprint_gen.py stamps
+      into every intm4tm2.pretty footprint (already micrometres).
+    - '8.11e-6' (bare, no suffix): how cap_cmim.kicad_sym stores w/l, in
+      METRES, which is what lands on the footprint instance after
+      "Update PCB from Schematic".
+
+    Mirrors resizer_passive_elements/board_reader.py:_parse_um. Keep the two
+    in step: a board round-tripped through that plugin ends up in the bare
+    metres form, a freshly placed library part in the 'um' form, and this
+    exporter has to read both.
+    """
+    if text is None:
+        return None
+    token = text.strip().lower()
+    if not token:
+        return None
+    if token.endswith("um"):
+        token, scale = token[:-2], 1.0
+    elif token.endswith("u"):
+        token, scale = token[:-1], 1.0
+    else:
+        scale = 1e6  # bare number: metres -> micrometres
+    try:
+        return float(token) * scale
+    except ValueError:
+        return None
+
+
+def write_cmim_devices_json(board, output_path, skipped=None):
     """Extract cap_cmim footprints from `board` into a sidecar JSON.
 
-    Metadata extraction only. GDS geometry is generated later by hyp_to_gds.py.
+    Metadata extraction only; the GDS geometry is generated later by
+    hyp_to_gds.py from the IntM4TM2 `cmim` PCell. Dimensions are normalised
+    to micrometres here (schema `w_um`/`l_um`, version 2) so the worker
+    never has to guess which of the two board conventions a field used.
+    Positions follow write_io_pads_json: micrometres, Y negated.
+
+    `skipped`, when given, collects the refs of cap_cmim footprints that could
+    not be described. The caller is expected to fail the export over them: a
+    device dropped here never reaches the worker, so the worker's own
+    "requested but not placed" guard cannot see it, and the run would ship an
+    interposer missing a capacitor the board says is there.
+
     Returns the number of CMIM devices written (0 -> no file).
     """
     import json
 
+    def _skip(ref, reason):
+        print("Warning: skipping CMIM %s: %s" % (ref, reason),
+              file=sys.stderr)
+        if skipped is not None:
+            skipped.append(str(ref))
+
     devices = []
     for fp in list(board.Footprints()):
-        model = (_field_text(fp, "Model") or
-                 _field_text(fp, "Sim.Name")).strip()
-        if model != "cap_cmim":
+        if not is_cmim(fp):
             continue
 
         ref = fp.GetReference()
         pos = fp.GetPosition()
 
-        w = _field_text(fp, "w").strip()
-        l = _field_text(fp, "l").strip()
-        m = _field_text(fp, "m", "1").strip() or "1"
+        w_text = _field_text(fp, "w").strip()
+        l_text = _field_text(fp, "l").strip()
+        m_text = _field_text(fp, "m", "1").strip() or "1"
 
-        if not w or not l:
-            missing = []
-            if not w:
-                missing.append("w")
-            if not l:
-                missing.append("l")
-            print("Warning: skipping CMIM %s: missing %s field(s)" %
-                  (ref, ", ".join(missing)), file=sys.stderr)
+        missing = [n for n, t in (("w", w_text), ("l", l_text)) if not t]
+        if missing:
+            _skip(ref, "missing %s field(s)" % ", ".join(missing))
             continue
+
+        w_um = parse_length_um(w_text)
+        l_um = parse_length_um(l_text)
+        bad = []
+        if w_um is None:
+            bad.append('w="%s"' % w_text)
+        if l_um is None:
+            bad.append('l="%s"' % l_text)
+        if bad:
+            _skip(ref, "unparseable %s" % ", ".join(bad))
+            continue
+
+        try:
+            m = int(float(m_text))
+        except ValueError:
+            _skip(ref, 'unparseable m="%s"' % m_text)
+            continue
+
+        if w_um <= 0.0 or l_um <= 0.0 or m <= 0:
+            _skip(ref, "non-positive parameter(s) (w=%g um, l=%g um, m=%d)"
+                  % (w_um, l_um, m))
+            continue
+
+        # Y is negated for the GDS frame, so the rotation sense flips with it.
+        # A rotated rectangular cap_cmim is real: the PDK's generator emits
+        # CMIM_<w>x<l>um parts, and placing one unrotated draws it 90 degrees
+        # off in the fabrication GDS.
+        try:
+            rotation_deg = -float(fp.GetOrientationDegrees()) % 360.0
+        except Exception:
+            rotation_deg = 0.0
 
         devices.append({
             "ref": ref,
             "x_um": _iu_to_um(pos.x),
             "y_um": -_iu_to_um(pos.y),
-            "w": w,
-            "l": l,
+            "w_um": w_um,
+            "l_um": l_um,
             "m": m,
+            "rotation_deg": rotation_deg,
         })
 
     if not devices:
         return 0
 
     with open(output_path, "w") as f:
-        json.dump({"version": 1, "cmim_devices": devices}, f, indent=2)
+        json.dump({"version": CMIM_SIDECAR_VERSION,
+                   "cmim_devices": devices}, f, indent=2)
 
     return len(devices)
 
@@ -490,6 +581,15 @@ def write_chiplet(board, output_path):
                     % (footprint.GetReference(), io_class)
                 )
             io_pads.append(footprint)
+            continue
+
+        if is_cmim(footprint):
+            # An interposer-integrated MIM capacitor is not a die: its geometry
+            # is drawn into the interposer GDS from the IntM4TM2 PCell
+            # (write_cmim_devices_json -> hyp_to_gds --cmim-devices), so it has
+            # no layout of its own and no die thickness. Emitting it as a
+            # component would ship dimensions.thickness 0.0, which the ADK
+            # 3Dblox export rejects outright (chiplet2dbx _require_dimension).
             continue
 
         gds_file = _field_text(footprint, "GDS_FILE")

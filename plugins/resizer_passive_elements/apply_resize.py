@@ -36,9 +36,9 @@ def _load_generator_module(gen_script_path=None):
     if not gen_path or not os.path.isfile(gen_path):
         raise FileNotFoundError(
             "cmim_footprint_gen.py not found (set the \"cmim_footprint_gen.py\" "
-            'or "OpenIntM4TM2 root folder" field in the window, the {} '
-            "environment variable, or use a sibling checkout of "
-            "OpenIntM4TM2)".format(paths.REPO_ROOT_ENV_VAR)
+            'or "OpenIntM4TM2 root folder" field in the window, one of the {} '
+            "environment variables, or use a sibling checkout of the "
+            "interposer PDK)".format(" / ".join(paths.REPO_ROOT_ENV_VARS))
         )
     gen_path = str(Path(gen_path).resolve())
 
@@ -121,6 +121,65 @@ def _strip_visible_name_label(mod_path, name):
         handle.write(text[:line_start] + text[after:])
 
 
+def _format_nominal_label(cap_fF):
+    """The round-value label, e.g. 100 -> '100fF', 1500 -> '1.5pF'.
+
+    Same style as _format_cap_label but keeping the decimal point: the
+    generator's "Nominal" property reads '1.5pF' while the footprint NAME
+    substitutes the dot (CMIM_1p5pF), and the committed family follows both.
+    """
+    if cap_fF >= 1000.0:
+        value, unit = cap_fF / 1000.0, "pF"
+    else:
+        value, unit = float(cap_fF), "fF"
+    return "{:g}{}".format(round(value, 3), unit)
+
+
+def _live_nominal_fF(gen, tech, nominal_fF, w_um, l_um):
+    """`nominal_fF` if it still describes this geometry, else None.
+
+    The nominal is what the part is *called*; the geometry is what it *is*.
+    They agree only while nobody has changed w/l, so the claim is re-checked
+    against the generator every time: a square plate whose side is the
+    grid-snapped width for that nominal. A stale nominal (the user resized the
+    device but the field still says 100fF) must not name the new footprint,
+    and a matching one must not be discarded either, or every run renames the
+    stock CMIM_100fF part after its own recomputed 99.95575 fF.
+    """
+    if nominal_fF is None or nominal_fF <= 0.0:
+        return None
+    try:
+        grid = float(tech["grid"])
+        expected = float(gen.cap_to_width(nominal_fF, tech))
+    except Exception:
+        return None
+    tolerance = grid / 2.0
+    if abs(w_um - l_um) > tolerance:
+        return None            # the nominal family is square only
+    if abs(w_um - expected) > tolerance:
+        return None
+    return nominal_fF
+
+
+def _over_max_capacitance(gen, tech, w_um, l_um):
+    """(capacitance, Cmax) when w/l exceed the device maximum, else None.
+
+    The bound is on the capacitance, not on the side. What runs away is the
+    generator's via array, whose cell count scales with w*l, and what the PDK
+    actually specifies is cmim_maxC (8 pF); a legitimate rectangle such as
+    100 x 50 um is 7512 fF and must keep working, while the metres/micrometres
+    mix-up that asks for 8.11e6 um is 9.9e13 fF and must not reach the loop.
+    """
+    try:
+        _cmin_fF, cmax_fF = gen.cap_bounds_fF(tech)
+        cap_fF = float(gen.cmim_capacitance_fF(w_um, l_um, tech))
+    except Exception:
+        return None
+    if cap_fF > cmax_fF + 1e-6:
+        return cap_fF, cmax_fF
+    return None
+
+
 def _generate_cap_cmim_footprint(params, tech, output_dir, on_log=None, gen_script_path=None):
     def log(message):
         if on_log is not None:
@@ -169,18 +228,48 @@ def _generate_cap_cmim_footprint(params, tech, output_dir, on_log=None, gen_scri
                 ref=reference, w=w_um, l=l_um, wmin=min_lw_um))
         return None
 
+    # Upper bound, mirroring the Capacitance branch's cap_bounds_fF check.
+    # Without it a plausible typo runs away instead of erroring: "8.11" with
+    # no suffix reads as metres (board_reader._parse_um), i.e. 8.11e6 um, and
+    # the generator's via array then loops ~1e13 times inside the wx handler,
+    # freezing pcbnew with no way back.
+    over = _over_max_capacitance(gen, tech, w_um, l_um)
+    if over is not None:
+        cap_fF, cmax_fF = over
+        log("{ref}: ERROR: w={w:g}um l={l:g}um is {c:.4g}fF, above the device "
+            "maximum Cmax={cmax:g}fF: the Vmim via array would be generated "
+            "cell by cell over that whole area. Check the \"w\"/\"l\" field "
+            "(a bare number is read as metres, so 8.11 means 8.11e6 um; write "
+            "8.11um or 8.11e-6).".format(
+                ref=reference, w=w_um, l=l_um, c=cap_fF, cmax=cmax_fF))
+        return None
+
     try:
-        cap_label_source = params.get("capacitance_fF")
-        if cap_label_source is None:
-            cap_label_source = gen.cmim_capacitance_fF(w_um, l_um, tech)
-        name = "CMIM_" + _format_cap_label(cap_label_source)
+        nominal_fF = _live_nominal_fF(gen, tech, params.get("nominal_fF"),
+                                      w_um, l_um)
+        params["_stale_nominal"] = (params.get("nominal_fF") is not None
+                                    and nominal_fF is None)
+        if nominal_fF is not None:
+            # Named for the round value, like the committed CMIM_10fF ...
+            # CMIM_5pF family, and the generator records it as a "Nominal"
+            # property next to the recomputed "Capacitance".
+            nominal_label = _format_nominal_label(nominal_fF)
+            name = "CMIM_" + nominal_label.replace(".", "p")
+        else:
+            # No nominal, or one the geometry no longer matches: name for what
+            # the plate actually is. A resized device must not keep the label
+            # of the value it used to have.
+            nominal_label = None
+            name = "CMIM_" + _format_cap_label(
+                gen.cmim_capacitance_fF(w_um, l_um, tech))
         out_path = os.path.join(output_dir, name + ".kicad_mod")
     except Exception as exc:
         log("{}: ERROR: {}".format(reference, exc))
         return None
 
     try:
-        gen.write_footprint(w_um, l_um, tech, out_path, name=name)
+        gen.write_footprint(w_um, l_um, tech, out_path, name=name,
+                            nominal=nominal_label)
     except Exception as exc:
         log("{}: ERROR: {}".format(reference, exc))
         return None
@@ -194,6 +283,7 @@ def _generate_cap_cmim_footprint(params, tech, output_dir, on_log=None, gen_scri
 
     params["w_um"] = w_um
     params["l_um"] = l_um
+    params["nominal_fF"] = nominal_fF
     if cap_fF_result is not None:
         params["capacitance_fF"] = cap_fF_result
 
@@ -201,8 +291,13 @@ def _generate_cap_cmim_footprint(params, tech, output_dir, on_log=None, gen_scri
         log("{}: generated {} (w={:g}um l={:g}um)".format(
             reference, out_path, w_um, l_um))
     else:
-        log("{}: generated {} (w={:g}um l={:g}um C={:.2f}fF)".format(
-            reference, out_path, w_um, l_um, cap_fF_result))
+        log("{}: generated {} (w={:g}um l={:g}um C={:.2f}fF{})".format(
+            reference, out_path, w_um, l_um, cap_fF_result,
+            ", nominal " + nominal_label if nominal_label else ""))
+        if params.get("_stale_nominal"):
+            log("{}: note: the \"Nominal\" field no longer matches w/l and was "
+                "dropped; the footprint is named for its actual "
+                "{:.2f}fF.".format(reference, cap_fF_result))
     return out_path
 
 
@@ -332,7 +427,7 @@ def _style_provenance_field(footprint, field_name):
     KiCad creates a brand-new footprint field visible on F.SilkS at
     1.27 mm by default -- harmless on a normal PCB, but on these
     um-scale devices it renders as a giant label sprawling across the
-    whole view. Same fix as the reference Chiplets-KiCad-Plugin uses for
+    whole view. Same fix as the sibling chiplet_export plugin uses for
     its own machine-managed fields (writers/chiplet_writer.py,
     _style_managed_field): SWIG exposes GetFields() but not
     GetFieldByName(), so the field has to be looked up by name after
@@ -357,6 +452,20 @@ def _style_provenance_field(footprint, field_name):
         pass
 
 
+def _set_field_visible(footprint, field_name):
+    """Re-show a field after _style_provenance_field hid it. Never raises.
+
+    Same by-name lookup: SWIG exposes GetFields() but no GetFieldByName().
+    """
+    try:
+        for candidate in footprint.GetFields():
+            if candidate.GetName() == field_name:
+                candidate.SetVisible(True)
+                return
+    except Exception:
+        pass
+
+
 def _field_text(footprint, name):
     try:
         has_field = footprint.HasField(name)
@@ -370,6 +479,16 @@ def _field_text(footprint, name):
         return None
     text = (text or "").strip()
     return text or None
+
+
+# Fields this plugin writes itself on every apply (see
+# _apply_cap_cmim_fields), plus the two KiCad identity fields. Everything
+# else on the replaced instance is carried over verbatim.
+_MANAGED_FIELDS = frozenset((
+    "Reference", "Value", "Footprint",
+    "Model", "Sim.Name", "w", "l", "m", "Capacitance", "Nominal",
+    "CMIM_GENERATED_FILE",
+))
 
 
 def _format_meters(value_um):
@@ -393,6 +512,13 @@ def _apply_cap_cmim_fields(old_fp, new_fp, params):
         fields["w"] = _format_meters(w_um)
     if l_um is not None:
         fields["l"] = _format_meters(l_um)
+    # Nominal survives only while it still describes w/l (_live_nominal_fF).
+    # Once it does not, the empty string is deliberate: leaving the old label
+    # in place is what let a resized device keep claiming a value it no longer
+    # has, and the round value cannot be recovered from the geometry.
+    nominal_fF = params.get("nominal_fF")
+    fields["Nominal"] = (_format_nominal_label(nominal_fF)
+                         if nominal_fF is not None else "")
     cap_fF = params.get("capacitance_fF")
     if cap_fF is not None:
         fields["Capacitance"] = _format_capacitance_fF(cap_fF)
@@ -491,6 +617,18 @@ def apply_to_instance(board, footprint_obj, generated_mod_path, params=None, on_
     new_fp.SetOrientation(footprint_obj.GetOrientation())
     new_fp.SetLayer(footprint_obj.GetLayer())
 
+    # The KIID path is the link back to the schematic symbol. Dropping it
+    # detaches the instance: the next "Update PCB from Schematic" no longer
+    # recognises this footprint as the symbol's, so it re-adds the symbol and
+    # reports the resized part as an extra. Silent until that moment, which is
+    # exactly why it has to be carried over here.
+    for getter, setter in (("GetPath", "SetPath"),
+                           ("IsLocked", "SetLocked")):
+        try:
+            getattr(new_fp, setter)(getattr(footprint_obj, getter)())
+        except Exception:
+            pass
+
     # Technology-field text refresh runs BEFORE the visibility-carryover
     # loop below, deliberately: _apply_technology_fields() (via
     # _style_provenance_field) unconditionally HIDES every field it
@@ -511,6 +649,31 @@ def apply_to_instance(board, footprint_obj, generated_mod_path, params=None, on_
         old_field = old_fields_by_name.get(name)
         if old_field is not None and old_field.IsVisible():
             new_field.SetVisible(True)
+
+    # Fields the generated footprint has no value for, carried over rather
+    # than dropped: everything the symbol contributed (Datasheet, the Sim.*
+    # simulation model, licence headers) would otherwise disappear on the
+    # first resize. The test is emptiness, not presence: KiCad materialises
+    # the mandatory fields (Datasheet among them) on every footprint it
+    # loads, so a name check alone would skip exactly the field this is for.
+    # Fields this plugin owns are excluded, since _apply_technology_fields has
+    # just written the authoritative values.
+    for name, old_field in old_fields_by_name.items():
+        if name in _MANAGED_FIELDS or _field_text(new_fp, name) is not None:
+            continue
+        old_text = old_field.GetText()
+        if not (old_text or "").strip():
+            continue
+        try:
+            new_fp.SetField(name, old_text)
+        except Exception:
+            continue
+        _style_provenance_field(new_fp, name)
+        # A field the user had on show stays on show: _style_provenance_field
+        # hides everything it touches, and the visibility carry-over above has
+        # already run, so nothing else would put it back.
+        if old_field.IsVisible():
+            _set_field_visible(new_fp, name)
 
     # Net connections, matched strictly by pad number -- never by index.
     for number, new_pad in new_pads.items():

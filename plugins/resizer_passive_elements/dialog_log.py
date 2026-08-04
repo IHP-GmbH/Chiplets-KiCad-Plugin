@@ -338,5 +338,6 @@ class ResizerPassiveElementsDialog(wx.Dialog):
         if (root, tech, gen, out) != (
                 self._initial_root, self._initial_tech,
                 self._initial_gen, self._initial_out):
-            paths.save_path_overrides(self._board, root, tech, gen, out)
+            paths.save_path_overrides(self._board, root, tech, gen, out,
+                                      on_log=self.log)
         self.EndModal(wx.ID_CLOSE)

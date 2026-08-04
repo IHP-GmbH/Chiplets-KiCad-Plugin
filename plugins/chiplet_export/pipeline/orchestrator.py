@@ -1156,11 +1156,29 @@ def run_export(board, options, plugin_dir,
         effective_cmim_devices = options.cmim_devices_json
         if not effective_cmim_devices:
             cmim_auto = os.path.join(tmpdir, "%s_cmim_devices.json" % board_name)
+            cmim_skipped = []
             try:
-                n_cmim = write_cmim_devices_json(board, cmim_auto)
+                n_cmim = write_cmim_devices_json(board, cmim_auto,
+                                                 skipped=cmim_skipped)
             except Exception as exc:
                 n_cmim = 0
                 _log("Warning: CMIM auto-extraction failed: %s" % exc)
+
+            if cmim_skipped:
+                # Symmetric with the worker's "requested but not placed" guard:
+                # a cap_cmim on the board that cannot even be described would
+                # otherwise vanish from every artifact on a run that exits 0.
+                return ExportResult(
+                    error=(
+                        "%d cap_cmim footprint(s) could not be exported: %s.\n"
+                        "Check their w/l/m fields: a bare number is read as "
+                        "metres (how the symbol library stores it) and a "
+                        "'um'/'u' suffix as micrometres (how the footprint "
+                        "library does). The per-device cause is on the run "
+                        "log."
+                        % (len(cmim_skipped), ", ".join(cmim_skipped))
+                    ),
+                )
 
             if n_cmim:
                 effective_cmim_devices = cmim_auto

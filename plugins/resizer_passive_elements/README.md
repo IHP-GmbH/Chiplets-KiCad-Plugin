@@ -13,11 +13,9 @@ footprint in the same run. The replacement preserves placement, nets,
 and the technology metadata needed by the GDS/PCell exporter, so the
 generated file, the board view, and the export contract stay aligned.
 
-See `resizer_passive_elements_spec.md` (one directory up) for the full design
-rationale and acceptance criteria this proof of concept was built
-against, and **`ARCHITECTURE.md`** for a deep dive into how the code is
-put together -- in particular, exactly how to add support for a new
-device type (resistor, inductor, ...) once its PCell/generator exists.
+See **`ARCHITECTURE.md`** for a deep dive into how the code is put together --
+in particular, exactly how to add support for a new device type (resistor,
+inductor, ...) once its PCell/generator exists.
 
 ## Status
 
@@ -62,12 +60,17 @@ plugin needs to *find* two files from the shared `OpenIntM4TM2` checkout
 -- `intm4tm2_tech.json` and `cmim_footprint_gen.py` -- and tries, for
 each, in this order (first hit wins):
 
-1. Environment variable `INTM4TM2_ROOT` (set in the ADK-Tools Docker
-   image as `/opt/adk-tools/OpenIntM4TM2`).
-2. KiCad project text variable `INTM4TM2_ROOT`
-   (`Board Setup > Text Variables`).
-3. A sibling checkout on disk, e.g. `OpenIntM4TM2/` next to (or one/two
-   levels above) wherever this plugin is installed.
+1. Environment variable `INTERPOSER_PDK_ROOT`, the ecosystem-wide name also
+   used by `chiplet_export` and `hyp_to_gds`, so one variable configures every
+   tool. `INTM4TM2_ROOT` stays accepted as an alias (it is what the ADK-Tools
+   Docker image sets, as `/opt/adk-tools/OpenIntM4TM2`). A variable that is
+   set but does not contain the file falls through to the next leg rather
+   than failing the lookup.
+2. The root saved from a previous session (see *Saved settings* below), then
+   the same names as KiCad project text variables.
+3. A sibling checkout on disk: any ancestor directory of the install
+   location containing `interposer/` (the ecosystem's own checkout name) or
+   `OpenIntM4TM2/`.
 4. Hardcoded last resort: `/work/OpenIntM4TM2` (the project's Docker
    bind-mount convention). Only used once 1-3 all fail.
 
@@ -119,7 +122,8 @@ Clicking **Run** does all of the following, in order, every time:
    had made `Capacitance` visible, it stays visible after the swap too.
    For `cap_cmim`, the technology field text is then written explicitly:
    `Model=cap_cmim`, `Sim.Name=cap_cmim` when needed, final `w`/`l` in
-   metres, `m`, and final `Capacitance`. This matters for GDS export:
+   metres, `m`, final `Capacitance` and `Nominal` (see *Naming* below).
+   This matters for GDS export:
    the resized footprint must still be recognizable as a parametric CMIM
    device, not just as visually correct pads. Afterwards, the `Footprint`
    shown in Footprint Properties for that instance will read the
@@ -131,12 +135,30 @@ Clicking **Run** does all of the following, in order, every time:
 4. **Refresh** -- forces a PCB editor redraw, in case a pad-size change
    from step 3 doesn't show up immediately.
 
+### Naming
+
 Generated filenames/footprint names are capacitance-keyed
 (`CMIM_<label>`, e.g. `CMIM_100fF.kicad_mod`, `CMIM_1p5pF.kicad_mod`),
 matching the display style of the official discrete-family footprints
-committed in `OpenIntM4TM2` (`CMIM_10fF` ... `CMIM_5pF`) -- deliberately
-*not* `cmim_footprint_gen.py`'s own dimension-keyed default
-(`footprint_name(w, l)`, e.g. `CMIM_8p11x8p11um`), which at the same
+committed in `OpenIntM4TM2` (`CMIM_10fF` ... `CMIM_5pF`).
+
+Which capacitance names the part is not a detail. The PDK keeps two separate
+properties and so does this plugin: `Nominal` is the round value the part is
+*called* (`100fF`) and `Capacitance` is what the drawn plate actually *is*
+(`99.96fF`). They differ because of the placement grid: the exact side for
+100 fF is 8.111807 um, the 5 nm grid forces 8.110, and that costs 0.044%.
+So `CMIM_100fF` really is the 100 fF part; naming it after its own recomputed
+value would rename it `CMIM_99p956fF` on the next run, and again after that.
+
+The rule: a part keeps its `Nominal` name for as long as `w`/`l` still are the
+grid-snapped square for that nominal. The moment you resize it, the label no
+longer describes the device, so it is dropped and the footprint is named for
+the capacitance it now has (a 10x10 um plate becomes `CMIM_151p6fF`, and the
+log says the nominal was dropped). A resized part never keeps the name of the
+value it used to have.
+
+The name is deliberately *not* `cmim_footprint_gen.py`'s own dimension-keyed
+default (`footprint_name(w, l)`, e.g. `CMIM_8p11x8p11um`), which at the same
 (tiny, plate-proportional) font size is almost twice as long and visibly
 overruns the device's outline. If the generator's raw output ever
 includes a `fp_text` label whose text is exactly the footprint's own
@@ -156,7 +178,7 @@ the same treatment for a different reason: KiCad creates any brand-new
 footprint field visible on F.SilkS at 1.27 mm by default, which on these
 um-scale devices renders as a giant label sprawling across the view.
 `apply_resize._style_provenance_field()` moves it to F.Fab, hides it, and
-shrinks its text -- the same fix the reference Chiplets-KiCad-Plugin uses
+shrinks its text -- the same fix the sibling chiplet_export plugin uses
 for its own machine-managed fields. The hidden `Model`, `Sim.Name`, `w`,
 `l`, `m`, and `Capacitance` fields are also styled this way after they
 are refreshed, because they are machine-readable export metadata rather
@@ -182,12 +204,29 @@ than board artwork.
   touched by the root-folder auto-fill (it isn't part of the shared
   checkout). Change it only if you deliberately want output elsewhere.
 
-Whichever values are in these four fields when you close the window are
-saved as project text variables (`CMIM_INTM4TM2_ROOT_DIR`,
-`CMIM_TECH_JSON`, `CMIM_GEN_SCRIPT`, `CMIM_OUTPUT_DIR`) and pre-fill the
-window next time you open it, so you only configure this once per
-project -- including on a Docker image where auto-discovery can't find
-the checkout on its own.
+### Saved settings
+
+Whichever values are in these four fields when you close the window are saved
+to `.resizer_passive_elements.json` next to the open `.kicad_pcb`, and
+pre-fill the window next time you open it, so you only configure this once per
+project -- including on a Docker image where auto-discovery can't find the
+checkout on its own. The saved root also feeds the discovery chain above.
+
+The file holds absolute, machine-local paths, so it is worth adding both it
+and the output folder to the project's `.gitignore`:
+
+```gitignore
+.resizer_passive_elements.json
+local_footprints.pretty/
+```
+
+Project text variables would be the natural home for this, and the plugin
+still reads them (`CMIM_INTM4TM2_ROOT_DIR`, `CMIM_TECH_JSON`,
+`CMIM_GEN_SCRIPT`, `CMIM_OUTPUT_DIR`), but KiCad's Python bindings do not
+expose them: `BOARD.GetProject()` hands back an opaque object with no
+`GetTextVars`, so writing them would be a silent no-op. If the board has never
+been saved to disk there is nowhere to put the file, and the window says so in
+the log instead of pretending the settings were kept.
 
 ## What it deliberately does not do (out of scope for this PoC)
 
@@ -270,9 +309,9 @@ lookup at that point.
 
 **"cmim_footprint_gen.py not found" / "could not load intm4tm2_tech.json"**
 
-The `OpenIntM4TM2` checkout wasn't found. Set `INTM4TM2_ROOT` (env var or
-project text variable) to the checkout root, or fill in the
-`intm4tm2_tech.json` field by hand in the window.
+The interposer PDK checkout wasn't found. Set `INTERPOSER_PDK_ROOT` (or its
+`INTM4TM2_ROOT` alias) to the checkout root, or fill in the
+`intm4tm2_tech.json` field by hand in the window; the window remembers it.
 
 **"ERROR: ... geometry cannot be computed"** (Scan/Generate/Apply)
 
