@@ -161,19 +161,23 @@ def _live_nominal_fF(gen, tech, nominal_fF, w_um, l_um):
     return nominal_fF
 
 
-def _max_side_um(gen, tech):
-    """Largest square side the device supports, or None if it cannot be derived.
+def _over_max_capacitance(gen, tech, w_um, l_um):
+    """(capacitance, Cmax) when w/l exceed the device maximum, else None.
 
-    Derived from the generator's own Cmax rather than hardcoded, so the bound
-    follows the PDK: cap_to_width(Cmax) is the side of the biggest square
-    cap_cmim, and no legitimate w/l exceeds it.
+    The bound is on the capacitance, not on the side. What runs away is the
+    generator's via array, whose cell count scales with w*l, and what the PDK
+    actually specifies is cmim_maxC (8 pF); a legitimate rectangle such as
+    100 x 50 um is 7512 fF and must keep working, while the metres/micrometres
+    mix-up that asks for 8.11e6 um is 9.9e13 fF and must not reach the loop.
     """
     try:
         _cmin_fF, cmax_fF = gen.cap_bounds_fF(tech)
-        side = float(gen.cap_to_width(cmax_fF, tech))
+        cap_fF = float(gen.cmim_capacitance_fF(w_um, l_um, tech))
     except Exception:
         return None
-    return side if side > 0.0 else None
+    if cap_fF > cmax_fF + 1e-6:
+        return cap_fF, cmax_fF
+    return None
 
 
 def _generate_cap_cmim_footprint(params, tech, output_dir, on_log=None, gen_script_path=None):
@@ -229,15 +233,15 @@ def _generate_cap_cmim_footprint(params, tech, output_dir, on_log=None, gen_scri
     # no suffix reads as metres (board_reader._parse_um), i.e. 8.11e6 um, and
     # the generator's via array then loops ~1e13 times inside the wx handler,
     # freezing pcbnew with no way back.
-    max_lw_um = _max_side_um(gen, tech)
-    if max_lw_um is not None and (w_um > max_lw_um + 1e-9
-                                  or l_um > max_lw_um + 1e-9):
-        log("{ref}: ERROR: w={w:g}um l={l:g}um is above the device maximum "
-            "(Wmax={wmax:g}um, the square side at Cmax): the Vmim via array "
-            "would be generated cell by cell over that whole area. Check the "
-            "\"w\"/\"l\" field (a bare number is read as metres, so 8.11 "
-            "means 8.11e6 um; write 8.11um or 8.11e-6).".format(
-                ref=reference, w=w_um, l=l_um, wmax=max_lw_um))
+    over = _over_max_capacitance(gen, tech, w_um, l_um)
+    if over is not None:
+        cap_fF, cmax_fF = over
+        log("{ref}: ERROR: w={w:g}um l={l:g}um is {c:.4g}fF, above the device "
+            "maximum Cmax={cmax:g}fF: the Vmim via array would be generated "
+            "cell by cell over that whole area. Check the \"w\"/\"l\" field "
+            "(a bare number is read as metres, so 8.11 means 8.11e6 um; write "
+            "8.11um or 8.11e-6).".format(
+                ref=reference, w=w_um, l=l_um, c=cap_fF, cmax=cmax_fF))
         return None
 
     try:
@@ -448,6 +452,20 @@ def _style_provenance_field(footprint, field_name):
         pass
 
 
+def _set_field_visible(footprint, field_name):
+    """Re-show a field after _style_provenance_field hid it. Never raises.
+
+    Same by-name lookup: SWIG exposes GetFields() but no GetFieldByName().
+    """
+    try:
+        for candidate in footprint.GetFields():
+            if candidate.GetName() == field_name:
+                candidate.SetVisible(True)
+                return
+    except Exception:
+        pass
+
+
 def _field_text(footprint, name):
     try:
         has_field = footprint.HasField(name)
@@ -632,20 +650,30 @@ def apply_to_instance(board, footprint_obj, generated_mod_path, params=None, on_
         if old_field is not None and old_field.IsVisible():
             new_field.SetVisible(True)
 
-    # Fields the generated footprint knows nothing about, carried over rather
+    # Fields the generated footprint has no value for, carried over rather
     # than dropped: everything the symbol contributed (Datasheet, the Sim.*
     # simulation model, licence headers) would otherwise disappear on the
-    # first resize. Only the fields this plugin owns are excluded, since
-    # _apply_technology_fields has just written the authoritative values.
-    new_field_names = {f.GetName() for f in new_fp.GetFields()}
+    # first resize. The test is emptiness, not presence: KiCad materialises
+    # the mandatory fields (Datasheet among them) on every footprint it
+    # loads, so a name check alone would skip exactly the field this is for.
+    # Fields this plugin owns are excluded, since _apply_technology_fields has
+    # just written the authoritative values.
     for name, old_field in old_fields_by_name.items():
-        if name in _MANAGED_FIELDS or name in new_field_names:
+        if name in _MANAGED_FIELDS or _field_text(new_fp, name) is not None:
+            continue
+        old_text = old_field.GetText()
+        if not (old_text or "").strip():
             continue
         try:
-            new_fp.SetField(name, old_field.GetText())
+            new_fp.SetField(name, old_text)
         except Exception:
             continue
         _style_provenance_field(new_fp, name)
+        # A field the user had on show stays on show: _style_provenance_field
+        # hides everything it touches, and the visibility carry-over above has
+        # already run, so nothing else would put it back.
+        if old_field.IsVisible():
+            _set_field_visible(new_fp, name)
 
     # Net connections, matched strictly by pad number -- never by index.
     for number, new_pad in new_pads.items():

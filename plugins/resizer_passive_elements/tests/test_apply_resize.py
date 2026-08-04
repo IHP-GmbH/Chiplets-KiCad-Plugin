@@ -67,21 +67,30 @@ def test_managed_fields_cover_everything_the_plugin_writes():
 
 
 @needs_pdk
-def test_max_side_comes_from_the_pdk_not_a_literal(gen, tech):
-    max_um = apply_resize._max_side_um(gen, tech)
+def test_the_bound_is_on_capacitance_not_on_the_side(gen, tech):
+    over = apply_resize._over_max_capacitance
 
-    assert max_um is not None
+    # What runs away is the via array, whose cell count scales with w*l, and
+    # what the PDK specifies is Cmax. A tall thin rectangle is in spec.
+    assert over(gen, tech, 100.0, 50.0) is None      # 7512 fF
+    assert over(gen, tech, 200.0, 20.0) is None      # 6018 fF
+    assert over(gen, tech, 8.11, 8.11) is None
+    # The square at Cmax is the boundary, but only for a square.
     _cmin, cmax = gen.cap_bounds_fF(tech)
-    assert max_um == pytest.approx(gen.cap_to_width(cmax, tech))
-    assert tech["minLW_um"] < max_um < 1000.0
+    side = gen.cap_to_width(cmax, tech)
+    assert over(gen, tech, side, side) is None
+    assert over(gen, tech, side * 1.1, side * 1.1) is not None
+    # The metres/micrometres mix-up, the case this exists for.
+    cap_fF, cmax_fF = over(gen, tech, 8.11e6, 8.11e6)
+    assert cap_fF > cmax_fF
 
 
-def test_max_side_degrades_to_none_on_a_broken_generator():
+def test_the_bound_degrades_to_none_on_a_broken_generator():
     class Broken:
         def cap_bounds_fF(self, _tech):
             raise RuntimeError("no bounds")
 
-    assert apply_resize._max_side_um(Broken(), {}) is None
+    assert apply_resize._over_max_capacitance(Broken(), {}, 1.0, 1.0) is None
 
 
 @needs_pdk
@@ -101,6 +110,22 @@ def test_an_oversized_w_is_rejected_instead_of_hanging(tmp_path, tech):
     assert out is None
     assert any("above the device maximum" in line for line in logged), logged
     assert not list(tmp_path.iterdir()), "nothing should have been written"
+
+
+@needs_pdk
+def test_an_in_spec_rectangle_still_generates(tmp_path, tech):
+    # 100 x 50 um is 7512 fF, inside Cmax: bounding by the square side at Cmax
+    # (72.975 um) would reject it, which the pre-fix plugin did not.
+    logged = []
+    params = {"reference": "C1", "model": "cap_cmim",
+              "w_um": 100.0, "l_um": 50.0}
+
+    out = apply_resize.generate_footprint_file(
+        params, tech, str(tmp_path), on_log=logged.append,
+        gen_script_path=GEN_SCRIPT)
+
+    assert out is not None, logged
+    assert params["capacitance_fF"] == pytest.approx(7512.0, rel=1e-4)
 
 
 @needs_pdk

@@ -258,7 +258,10 @@ def load_path_overrides(board):
                 loaded = json.load(handle)
             if isinstance(loaded, dict):
                 values = loaded
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
+            # ValueError covers both JSONDecodeError and the UnicodeDecodeError
+            # a non-UTF-8 file raises. This runs in the dialog constructor, so
+            # anything escaping here stops the window from opening at all.
             values = {}
     return tuple(
         str(values.get(key, "") or "") or _lookup_text_var(board, key)

@@ -212,6 +212,14 @@ pre-fill the window next time you open it, so you only configure this once per
 project -- including on a Docker image where auto-discovery can't find the
 checkout on its own. The saved root also feeds the discovery chain above.
 
+The file holds absolute, machine-local paths, so it is worth adding both it
+and the output folder to the project's `.gitignore`:
+
+```gitignore
+.resizer_passive_elements.json
+local_footprints.pretty/
+```
+
 Project text variables would be the natural home for this, and the plugin
 still reads them (`CMIM_INTM4TM2_ROOT_DIR`, `CMIM_TECH_JSON`,
 `CMIM_GEN_SCRIPT`, `CMIM_OUTPUT_DIR`), but KiCad's Python bindings do not

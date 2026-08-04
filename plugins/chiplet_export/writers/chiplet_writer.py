@@ -214,7 +214,7 @@ def parse_length_um(text):
         return None
 
 
-def write_cmim_devices_json(board, output_path):
+def write_cmim_devices_json(board, output_path, skipped=None):
     """Extract cap_cmim footprints from `board` into a sidecar JSON.
 
     Metadata extraction only; the GDS geometry is generated later by
@@ -223,9 +223,21 @@ def write_cmim_devices_json(board, output_path):
     never has to guess which of the two board conventions a field used.
     Positions follow write_io_pads_json: micrometres, Y negated.
 
+    `skipped`, when given, collects the refs of cap_cmim footprints that could
+    not be described. The caller is expected to fail the export over them: a
+    device dropped here never reaches the worker, so the worker's own
+    "requested but not placed" guard cannot see it, and the run would ship an
+    interposer missing a capacitor the board says is there.
+
     Returns the number of CMIM devices written (0 -> no file).
     """
     import json
+
+    def _skip(ref, reason):
+        print("Warning: skipping CMIM %s: %s" % (ref, reason),
+              file=sys.stderr)
+        if skipped is not None:
+            skipped.append(str(ref))
 
     devices = []
     for fp in list(board.Footprints()):
@@ -241,8 +253,7 @@ def write_cmim_devices_json(board, output_path):
 
         missing = [n for n, t in (("w", w_text), ("l", l_text)) if not t]
         if missing:
-            print("Warning: skipping CMIM %s: missing %s field(s)" %
-                  (ref, ", ".join(missing)), file=sys.stderr)
+            _skip(ref, "missing %s field(s)" % ", ".join(missing))
             continue
 
         w_um = parse_length_um(w_text)
@@ -253,22 +264,28 @@ def write_cmim_devices_json(board, output_path):
         if l_um is None:
             bad.append('l="%s"' % l_text)
         if bad:
-            print("Warning: skipping CMIM %s: unparseable %s" %
-                  (ref, ", ".join(bad)), file=sys.stderr)
+            _skip(ref, "unparseable %s" % ", ".join(bad))
             continue
 
         try:
             m = int(float(m_text))
         except ValueError:
-            print('Warning: skipping CMIM %s: unparseable m="%s"' %
-                  (ref, m_text), file=sys.stderr)
+            _skip(ref, 'unparseable m="%s"' % m_text)
             continue
 
         if w_um <= 0.0 or l_um <= 0.0 or m <= 0:
-            print("Warning: skipping CMIM %s: non-positive parameter(s) "
-                  "(w=%g um, l=%g um, m=%d)" % (ref, w_um, l_um, m),
-                  file=sys.stderr)
+            _skip(ref, "non-positive parameter(s) (w=%g um, l=%g um, m=%d)"
+                  % (w_um, l_um, m))
             continue
+
+        # Y is negated for the GDS frame, so the rotation sense flips with it.
+        # A rotated rectangular cap_cmim is real: the PDK's generator emits
+        # CMIM_<w>x<l>um parts, and placing one unrotated draws it 90 degrees
+        # off in the fabrication GDS.
+        try:
+            rotation_deg = -float(fp.GetOrientationDegrees()) % 360.0
+        except Exception:
+            rotation_deg = 0.0
 
         devices.append({
             "ref": ref,
@@ -277,6 +294,7 @@ def write_cmim_devices_json(board, output_path):
             "w_um": w_um,
             "l_um": l_um,
             "m": m,
+            "rotation_deg": rotation_deg,
         })
 
     if not devices:

@@ -86,6 +86,38 @@ def test_unusable_footprints_are_skipped_and_write_no_file(tmp_path, fields):
     assert not out.exists()
 
 
+def test_a_footprint_that_cannot_be_described_is_reported_to_the_caller(
+        tmp_path):
+    """The worker's "requested but not placed" guard cannot see this one.
+
+    A device dropped during extraction never reaches the sidecar, so unless
+    the refs come back here the export would exit 0 with the capacitor
+    missing from every artifact.
+    """
+    # The micro sign is the realistic way to get here: it looks right in the
+    # field editor and is not the "um"/"u" the two libraries actually write.
+    board = _board_with_cmim({"Model": "cap_cmim", "w": "8.11 µm",
+                              "l": "8.11um"})
+    skipped = []
+
+    assert write_cmim_devices_json(board, str(tmp_path / "cmim.json"),
+                                   skipped=skipped) == 0
+    assert skipped == ["C1"]
+
+
+def test_orientation_is_recorded_for_the_gds_frame(tmp_path):
+    board = _board_with_cmim({"Model": "cap_cmim", "w": "20um", "l": "5um"})
+    board.Footprints()[0].SetOrientationDegrees(90.0)
+    out = tmp_path / "cmim.json"
+
+    assert write_cmim_devices_json(board, str(out)) == 1
+
+    # Y is negated for the GDS frame, so the rotation sense flips with it: a
+    # rectangular part placed unrotated would be drawn 90 degrees off.
+    device = json.loads(out.read_text())["cmim_devices"][0]
+    assert device["rotation_deg"] == pytest.approx(270.0)
+
+
 def test_non_cmim_footprints_write_no_sidecar(tmp_path):
     out = tmp_path / "cmim.json"
     board = _board_with_cmim({"Model": "cap_rfcmim", "w": "1um", "l": "1um"})

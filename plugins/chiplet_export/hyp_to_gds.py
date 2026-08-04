@@ -474,10 +474,40 @@ UNMAPPED_FAIL_FRACTION = 0.5
 PILLAR_MANIFEST_SCHEMA = "adk-pillar-manifest"
 PILLAR_MANIFEST_VERSION = "1.0.0"
 
-# Placement grid of the IntM4TM2 technology, in micrometers. Only used when
-# the PDK checkout cannot be resolved; the live value is techParams.grid in
-# intm4tm2_pycell_lib/intm4tm2_tech.json (see _intm4tm2_grid_um).
-_INTM4TM2_GRID_FALLBACK_UM = 0.005
+# IntM4TM2 constants for the cmim device, used only when the PDK checkout
+# cannot be resolved; the live values are techParams in
+# intm4tm2_pycell_lib/intm4tm2_tech.json (see GDSGenerator._intm4tm2_tech).
+_INTM4TM2_TECH_FALLBACK = {
+    "grid_um": 0.005,            # placement grid
+    "min_lw_um": 1.14,           # cmim_minLW
+    "max_lw_um": 1000.0,         # cmim_maxLW
+    "max_c_fF": 8000.0,          # cmim_maxC
+    "area_fF_per_um2": 1.5,      # cmim_caspec
+    "perim_fF_per_um": 0.04,     # cmim_cpspec
+}
+
+# SI suffixes as the interposer PDK writes its tech values ("1.14u", "8p").
+_SI_SUFFIX = {
+    "y": 1e-24, "z": 1e-21, "a": 1e-18, "f": 1e-15, "p": 1e-12,
+    "n": 1e-9, "u": 1e-6, "m": 1e-3, "k": 1e3, "M": 1e6, "G": 1e9, "T": 1e12,
+}
+
+
+def _si_num(value) -> float:
+    """Parse a tech value that may be a number or an SI-suffixed string.
+
+    Mirrors _num() in the PDK's cmim_footprint_gen.py: 0.36 -> 0.36,
+    "1.5m" -> 1.5e-3, "8p" -> 8e-12, "1.14u" -> 1.14e-6.
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        raise ValueError("empty tech value")
+    suffix = text[-1]
+    if suffix in _SI_SUFFIX and not suffix.isdigit():
+        return float(text[:-1]) * _SI_SUFFIX[suffix]
+    return float(text)
 
 # Interposer die-attachment surface z (a.k.a. BEOL top), in micrometers: the
 # plane dies mount on, in the interposer's local frame. For SG13G2 it is the top
@@ -588,8 +618,9 @@ class GDSGenerator:
         # proxies these came from and every held handle with them, while the
         # cells themselves survive and stay reachable by index.
         self._via_cells: Dict[str, int] = {}
-        # IntM4TM2 placement grid (um), resolved from the PDK on first use.
-        self._grid_um: Optional[float] = None
+        # IntM4TM2 device constants (grid, dimension and capacitance
+        # limits), resolved from the PDK on first use.
+        self._intm4tm2_tech_cache: Optional[Dict[str, float]] = None
         self._via_group_cells: Dict[str, db.Cell] = {}  # metal_pair -> group cell
         self._boundary_records: List[dict] = []  # chiplet boundaries -> manifest
         # As-drawn Cu-pillar records -> <stem>.pillars.json. None means the
@@ -1120,30 +1151,72 @@ class GDSGenerator:
                   file=sys.stderr)
             return False
 
-    def _intm4tm2_grid_um(self) -> float:
-        """Placement grid of the interposer technology, in micrometers.
+    def _intm4tm2_tech(self) -> Dict[str, float]:
+        """Interposer technology constants used to place and bound a cmim.
 
-        Read from the PCell library's own tech parameters so the value stays
-        the PDK's to define; _INTM4TM2_GRID_FALLBACK_UM applies only when the
-        checkout cannot be resolved.
+        Read from the PCell library's own tech parameters so the numbers stay
+        the PDK's to define; _INTM4TM2_TECH_FALLBACK applies only when the
+        checkout cannot be resolved. Keys: grid_um, min_lw_um, max_lw_um,
+        max_c_fF, area_fF_per_um2, perim_fF_per_um. The two capacitance
+        coefficients follow load_tech in cmim_footprint_gen.py.
         """
-        if self._grid_um is not None:
-            return self._grid_um
-        grid = _INTM4TM2_GRID_FALLBACK_UM
+        if self._intm4tm2_tech_cache is not None:
+            return self._intm4tm2_tech_cache
+        tech = dict(_INTM4TM2_TECH_FALLBACK)
         root = _discover_path_var("INTERPOSER_PDK_ROOT")
         if root:
             tech_json = (Path(root) / "libs.tech" / "klayout" / "python" /
                          "intm4tm2_pycell_lib" / "intm4tm2_tech.json")
             try:
                 with open(tech_json, "r") as f:
-                    value = float(json.load(f)["techParams"]["grid"])
-                if value > 0.0:
-                    grid = value
+                    params = json.load(f)["techParams"]
+                loaded = {
+                    "grid_um": _si_num(params["grid"]),
+                    "min_lw_um": _si_num(params["cmim_minLW"]) * 1e6,
+                    "max_lw_um": _si_num(params["cmim_maxLW"]) * 1e6,
+                    "max_c_fF": _si_num(params["cmim_maxC"]) * 1e15,
+                    "area_fF_per_um2": _si_num(params["cmim_caspec"]) * 1e3,
+                    "perim_fF_per_um": _si_num(params["cmim_cpspec"]) * 1e9,
+                }
+                if all(v > 0.0 for v in loaded.values()):
+                    tech = loaded
             except (OSError, json.JSONDecodeError, KeyError, TypeError,
                     ValueError):
                 pass
-        self._grid_um = grid
-        return grid
+        self._intm4tm2_tech_cache = tech
+        return tech
+
+    def _cmim_out_of_range(self, tech: Dict[str, float], w_um: float,
+                           l_um: float, m: int) -> str:
+        """Why this cmim cannot be built, or "" when it can.
+
+        The PCell must never be asked for a plate it rejects. It does not
+        signal refusal by returning None: it hands back a nameless, empty cell
+        that would be written into the GDS as an empty STRNAME record, which
+        makes the whole file unreadable. Worse, a w/l large enough to pass its
+        own coercion sends its via loop, which is O(w*l), into an unbounded
+        allocation. Both are the same input class, so both are refused here.
+
+        The capacitance is what actually bounds the device (the loop count
+        scales with the product, not the side), so an in-spec rectangle such
+        as 100 x 50 um stays legal while the metres/micrometres mix-up that
+        asks for 8.11e6 um does not.
+        """
+        for name, value in (("w", w_um), ("l", l_um)):
+            if not math.isfinite(value):
+                return "%s=%r is not a finite number" % (name, value)
+            if value < tech["min_lw_um"]:
+                return ("%s=%g um is below the device minimum %g um"
+                        % (name, value, tech["min_lw_um"]))
+            if value > tech["max_lw_um"]:
+                return ("%s=%g um is above the device maximum %g um"
+                        % (name, value, tech["max_lw_um"]))
+        cap_fF = m * (w_um * l_um * tech["area_fF_per_um2"]
+                      + 2.0 * (w_um + l_um) * tech["perim_fF_per_um"])
+        if cap_fF > tech["max_c_fF"]:
+            return ("%g x %g um (m=%d) is %.4g fF, above the device maximum "
+                    "%.4g fF" % (w_um, l_um, m, cap_fF, tech["max_c_fF"]))
+        return ""
 
     def add_cmim_devices(self, devices: List[Dict]) -> Tuple[int, List[str]]:
         """Place cap_cmim devices from a sidecar entry list via the IntM4TM2 PCell.
@@ -1161,7 +1234,8 @@ class GDSGenerator:
         if not self._bootstrap_intm4tm2_pcells():
             return 0, refs
 
-        grid = self._intm4tm2_grid_um()
+        tech = self._intm4tm2_tech()
+        grid = tech["grid_um"]
         group = None
         placed = 0
         skipped: List[str] = []
@@ -1199,6 +1273,13 @@ class GDSGenerator:
                 skipped.append(str(ref))
                 continue
 
+            out_of_range = self._cmim_out_of_range(tech, w_um, l_um, m)
+            if out_of_range:
+                print(f"  Warning: skipping CMIM {ref}: {out_of_range}",
+                      file=sys.stderr)
+                skipped.append(str(ref))
+                continue
+
             # The PCell takes its dimensions in meters (Numeric(w) * 1e6 in
             # the library's setupParams); the sidecar carries micrometers.
             params = {
@@ -1209,9 +1290,16 @@ class GDSGenerator:
             }
 
             cell = self.layout.create_cell("cmim", "IntM4TM2", params)
-            if cell is None:
-                print(f"  Warning: failed to create CMIM PCell for {ref}",
-                      file=sys.stderr)
+            # Not just None: a PCell that refuses its parameters hands back a
+            # nameless empty cell, which the GDS writer emits as an empty
+            # STRNAME record and makes the whole file unreadable. The range
+            # guard above should have caught every such input; this is the
+            # backstop that keeps a broken cell out of the layout regardless.
+            if cell is None or not cell.name or cell.bbox().empty():
+                print(f"  Warning: failed to create CMIM PCell for {ref} "
+                      f"({w_um:g} x {l_um:g} um, m={m})", file=sys.stderr)
+                if cell is not None:
+                    self.layout.delete_cell(cell.cell_index())
                 skipped.append(str(ref))
                 continue
 
@@ -1219,21 +1307,33 @@ class GDSGenerator:
             # draws that plate from its own origin (Box(0, 0, w, l)), so the
             # instance origin is the plate's lower-left corner. Only that origin
             # is snapped: the PCell owns the device geometry.
-            x_ll = round((x - w_um / 2.0) / grid) * grid
-            y_ll = round((y - l_um / 2.0) / grid) * grid
+            angle = 0.0
+            try:
+                angle = float(item.get("rotation_deg", 0.0))
+            except (TypeError, ValueError):
+                angle = 0.0
+            # Rotation is about the plate center, so offset the lower-left
+            # corner in the rotated frame (same convention as the die
+            # placement path, which also uses DCplxTrans about the anchor).
+            trans = db.DCplxTrans(1.0, angle, False, db.DVector(x, y)) * \
+                db.DCplxTrans(1.0, 0.0, False,
+                              db.DVector(-w_um / 2.0, -l_um / 2.0))
+            if not angle:
+                trans = db.DCplxTrans(
+                    1.0, 0.0, False,
+                    db.DVector(round((x - w_um / 2.0) / grid) * grid,
+                               round((y - l_um / 2.0) / grid) * grid))
 
             if group is None:
                 group = self.layout.create_cell("CMIM_DEVICES")
                 self.routing_cell.insert(db.DCellInstArray(group, db.DTrans()))
 
-            group.insert(db.DCellInstArray(
-                cell,
-                db.DTrans(db.DVector(x_ll, y_ll))
-            ))
+            group.insert(db.DCellInstArray(cell, trans))
 
             placed += 1
-            print(f"  Placed CMIM {ref} at ({x_ll:g}, {y_ll:g}) um "
-                  f"({w_um:g} x {l_um:g} um)")
+            print(f"  Placed CMIM {ref} at ({x:g}, {y:g}) um "
+                  f"({w_um:g} x {l_um:g} um" +
+                  (f", {angle:g} deg)" if angle else ")"))
 
         return placed, skipped
 
@@ -2906,33 +3006,55 @@ def _parse_length_um(value) -> Optional[float]:
 
 
 def _cmim_length_um(item: Dict, name: str) -> float:
-    """Read `<name>_um` (schema v2), falling back to the v1 `<name>` string."""
+    """Read `<name>_um` (schema v2), falling back to the v1 `<name>` key.
+
+    Under the v1 key the board's own convention applies to numbers as well as
+    to strings: a bare value is metres. Reading it as micrometres there would
+    make a hand-written sidecar differ by 1e6 on nothing but JSON quoting.
+    """
     for key in (name + "_um", name):
-        if key in item:
-            value = _parse_length_um(item[key])
-            if value is None:
-                raise ValueError('unparseable %s=%r' % (key, item[key]))
-            return value
+        if key not in item:
+            continue
+        raw = item[key]
+        if (key == name and not isinstance(raw, bool)
+                and isinstance(raw, (int, float))):
+            value = float(raw) * 1e6
+        else:
+            value = _parse_length_um(raw)
+        if value is None:
+            raise ValueError('unparseable %s=%r' % (key, raw))
+        return value
     raise KeyError(name + "_um")
 
 
-def load_cmim_devices(cmim_devices_json: str) -> List[Dict]:
-    """Read the cap_cmim sidecar. Returns [] (with a warning) when unusable."""
+def load_cmim_devices(cmim_devices_json: str) -> Optional[List[Dict]]:
+    """Read the cap_cmim sidecar.
+
+    Returns the device list, [] when the file is well formed but declares no
+    devices, and None when it could not be read at all. The caller must treat
+    None as fatal: a sidecar was requested, so "the file is garbage" is not
+    the same answer as "this board has no capacitors".
+    """
     path = Path(cmim_devices_json)
     if not path.exists():
         print(f"Warning: CMIM devices file not found: {cmim_devices_json}",
               file=sys.stderr)
-        return []
+        return None
 
     try:
         with open(path, "r") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         print(f"Warning: could not read CMIM devices file "
               f"{cmim_devices_json}: {exc}", file=sys.stderr)
-        return []
+        return None
 
-    devices = data.get("cmim_devices", []) if isinstance(data, dict) else []
+    if not isinstance(data, dict):
+        print(f"Warning: CMIM devices file {cmim_devices_json} is not a JSON "
+              f"object", file=sys.stderr)
+        return None
+
+    devices = data.get("cmim_devices", [])
     if not devices:
         print(f"  No cmim_devices found in {cmim_devices_json}")
         return []
@@ -3029,7 +3151,14 @@ def convert_hyp_to_gds(
     # into a successful one).
     cmim_devices: List[Dict] = []
     if cmim_devices_json:
-        cmim_devices = load_cmim_devices(cmim_devices_json)
+        loaded = load_cmim_devices(cmim_devices_json)
+        if loaded is None:
+            print("\nERROR: --cmim-devices was given but the sidecar could "
+                  "not be read (see the warning above). Refusing to write an "
+                  "interposer without the capacitors it declares.",
+                  file=sys.stderr)
+            return False
+        cmim_devices = loaded
         print(f"Parsed {len(cmim_devices)} cap_cmim device(s) from "
               f"{cmim_devices_json}")
 
