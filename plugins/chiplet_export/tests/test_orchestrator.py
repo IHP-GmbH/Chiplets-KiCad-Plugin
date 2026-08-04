@@ -231,6 +231,7 @@ def test_cmim_devices_passthrough(tmp_path):
     args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
     assert args[args.index("--cmim-devices") + 1] == "/etc/cmim_devices.json"
 
+
 # ---------------------------------------------------------------------------
 # ExportOptions / ExportResult defaults for ADK assembly DRC
 # ---------------------------------------------------------------------------

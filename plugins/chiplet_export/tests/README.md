@@ -8,12 +8,14 @@ needs, so "just run pytest" only covers part of the suite.
   Python bundled with KiCad, i.e. inside the `kicad-builder` Docker image.
   When `pcbnew` is missing, `pytest.importorskip("pcbnew")` skips those tests
   cleanly instead of failing. Files: `test_chiplet_writer.py`,
-  `test_hyperlynx_writer.py`, `test_byte_exact_writers.py`.
+  `test_hyperlynx_writer.py`, `test_byte_exact_writers.py`,
+  `test_cmim_extraction.py`.
 - **Need the `klayout.db` module** (GDS geometry generation), but not
   `pcbnew`: run on the host once the worker venv is on the path. They guard
   themselves with `pytest.importorskip("klayout.db")`. Files:
   `test_io_pads.py`, `test_via_geometry.py`, `test_boundary_annotations.py`,
-  `test_pillar_manifest.py` (this one also needs the sibling PDK checkouts).
+  `test_cmim_devices.py`, `test_pillar_manifest.py` (the last two also need
+  the sibling PDK checkouts).
 - **Stdlib + pytest only**: run anywhere. Files: `test_discovery.py`,
   `test_runner.py`, `test_orchestrator.py`, `test_connection_stacks.py`,
   `test_layer_guard.py`, `test_hyp_to_gds_decoupling.py`,
@@ -39,10 +41,12 @@ usually a no-op; it only matters for oddly named checkouts.
 | `test_byte_exact_writers.py` (2) | Byte-exact diff: `write_chiplet` / `write_hyperlynx` output vs the C++ exporters `pcbnew.ExportBoardToChipletFile` / `ExportBoardToHyperlynxFile`. |
 | `test_discovery.py` (23) | Worker Python / hyp_to_gds.py discovery chain (env var, `.venv`, project text var, PATH probe with klayout+yaml import); the not-found message names `.venv`, `pip install -r requirements.txt` and which legs are actually probed; plus `preview_worker_python`, the probe-free variant the dialog shows as a hint (it must never spawn the import probe on the UI thread). |
 | `test_runner.py` (8) | Async subprocess runner: line-by-line stdout/stderr callbacks, exit code propagation, cancel via `threading.Event`, env/cwd plumbing. |
-| `test_orchestrator.py` (76) | The pure helpers in `pipeline/orchestrator.py` that the dialog cannot exercise otherwise: `build_cli_args`, `build_adk_drc_argv`, `build_worker_env`, `load_interposer_adapter` / `load_interconnect_adapter`, `available_connection_types`, `connection_method_specs` + `format_connection_label` / `describe_connection_method` (the manifest-sourced dropdown labels; a method id must stay its label's prefix, and a missing manifest must degrade to bare ids rather than invent numbers), `describe_die_thickness_gaps`, `describe_interposer_body_default` (the interposer physical-body plausibility warning: the body now survives from the board stackup, so a value near the FR-4 default is flagged), `discover_dependency_root`, `discover_interposer_lyp`, `derive_interconnect_methods` + `write_ixn_methods_sidecar`, `_read_component_connections`, `describe_assembly_drc`, and `ExportOptions` / `ExportResult` DRC defaults. |
+| `test_orchestrator.py` (77) | The pure helpers in `pipeline/orchestrator.py` that the dialog cannot exercise otherwise: `build_cli_args` (including the `--cmim-devices` passthrough), `build_adk_drc_argv`, `build_worker_env`, `load_interposer_adapter` / `load_interconnect_adapter`, `available_connection_types`, `connection_method_specs` + `format_connection_label` / `describe_connection_method` (the manifest-sourced dropdown labels; a method id must stay its label's prefix, and a missing manifest must degrade to bare ids rather than invent numbers), `describe_die_thickness_gaps`, `describe_interposer_body_default` (the interposer physical-body plausibility warning: the body now survives from the board stackup, so a value near the FR-4 default is flagged), `discover_dependency_root`, `discover_interposer_lyp`, `derive_interconnect_methods` + `write_ixn_methods_sidecar`, `_read_component_connections`, `describe_assembly_drc`, and `ExportOptions` / `ExportResult` DRC defaults. |
 | `test_connection_stacks.py` (9) | `writers/connection_stacks.py`: the manifest-driven connection-stack block must reproduce the literal the writer used to hardcode (and export_chiplet.cpp still emits), plus interconnect-id validation against the manifest. Skips without the interconnect PDK manifest. |
 | `test_hyp_to_gds_decoupling.py` (37) | hyp_to_gds connection-stack tables decoupled from the interconnect PDK manifest: the manifest-sourced tables must reproduce the prior IHP literals exactly while the vendor demo method becomes selectable. Skips without the manifest. |
 | `test_io_pads.py` (6) | I/O pad geometry in `hyp_to_gds.GDSGenerator.add_io_pads` (TopMetal2 squares, `io_class` dispatch that skips `flipped_bump` / `tsv_bump`, invalid-size skip, missing file) plus `update_chiplet_file` io_pads injection and layout-ref relativization. |
+| `test_cmim_devices.py` (19) | Worker side of the `cap_cmim` path: the w/l unit contract (a `um`/`u` suffix means micrometres, a bare number means metres, and every convention must land on the same plate), sidecar loading, IntM4TM2 `cmim` PCell placement (plate centred on the footprint position, origin snapped to `techParams.grid`), unplaceable devices reported to the caller rather than skipped, no empty group cell left behind, and the regression that SG13G2 via PCells survive the intm4tm2 technology rebind (with `db.Cell` handles in the via cache, `write()` died in `Cell.flatten`). Skips without the interposer PDK. |
+| `test_cmim_extraction.py` (11) | Board side of the same path: `is_cmim` on both the `Model` and `Sim.Name` spelling, `write_cmim_devices_json` normalising every field convention to `w_um`/`l_um` in the io_pads frame (micrometres, Y negated), unusable footprints skipped with no file written, and a round trip of the exporter's own sidecar back through the worker's reader. |
 | `test_via_geometry.py` (5) | SG13G2 via PCell bootstrap (must come up when a PDK and PCell deps are present; a silent rectangle fallback is a regression) and the JSON-honoring `_create_simple_via` rectangle fallback that reads `PDK_VIA_PARAMS`. Skips without an SG13G2 PDK. |
 | `test_boundary_annotations.py` (6) | The opt-in, viewer-only boundary annotation layer in hyp_to_gds: off by default, one polygon + one label per boundary when on, never the legacy 190/0 fab layer, and the boundary manifest left untouched. |
 | `test_layer_guard.py` (3) | Loud guard for unmapped board layers: fails the conversion when more than `UNMAPPED_FAIL_FRACTION` of trace elements sit on unmapped layers, tolerates stray layers below the threshold with one aggregate warning. |
@@ -75,6 +79,7 @@ cd plugins/chiplet_export
     tests/test_io_pads.py \
     tests/test_via_geometry.py \
     tests/test_boundary_annotations.py \
+    tests/test_cmim_devices.py \
     tests/test_pillar_manifest.py -v
 ```
 

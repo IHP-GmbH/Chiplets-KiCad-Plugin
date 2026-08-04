@@ -187,6 +187,37 @@ environment variables: `INTERPOSER_PDK_ROOT`, `INTERCONNECT_PDK_ROOT`,
   the die's connection is a cu-pillar stack. A pre-generated cu-pillar GDS,
   typically from `bump_mirror.py`, can be supplied through the headless
   `ExportOptions.cupillar_gds`.
+- *Integrated MIM capacitors*: auto-extracted from the board's `cap_cmim`
+  footprints and drawn into the interposer GDS from the IntM4TM2 `cmim`
+  PCell. See *Integrated passives* below.
+
+### Integrated passives (cap_cmim)
+
+A footprint whose `Model` (or `Sim.Name`) field is `cap_cmim` is an
+interposer-integrated MIM capacitor, not a die. On Run its parameters are
+extracted into a `<board>_cmim_devices.json` sidecar and passed to the worker
+as `--cmim-devices`, which instantiates the IntM4TM2 `cmim` PCell at each
+footprint position. The device therefore has no `layout:` of its own and does
+not appear as a component in the `.chiplet`: its geometry is part of the
+interposer.
+
+Read from the footprint: `w`, `l` (plate dimensions) and `m` (multiplier,
+default 1). Both board conventions for `w`/`l` are accepted, because both
+genuinely occur: a `um`/`u` suffix (`57.68um`, what the PDK's own
+`cmim_footprint_gen.py` stamps into the `intm4tm2.pretty` footprints) means
+micrometres, and a bare number (`5.768e-5`, how `cap_cmim.kicad_sym` stores
+it) means metres. The sidecar normalises both to micrometres in `w_um`/`l_um`.
+
+The footprint position is the centre of the MIM plate; the PCell draws that
+plate from its own origin, so the placed instance sits at the plate's
+lower-left corner, snapped to the technology grid (`techParams.grid` of the
+interposer PDK).
+
+This path needs the interposer PDK: `INTERPOSER_PDK_ROOT` must resolve, since
+the PCell comes from `libs.tech/klayout/python/intm4tm2_pycell_lib`. A device
+that cannot be placed (PDK unavailable, or `w`/`l` the PCell rejects) **fails
+the export** naming the refs, rather than shipping an interposer GDS with a
+capacitor silently missing.
 
 ### Per-die settings
 
@@ -313,8 +344,9 @@ plugins/chiplet_export/
 │                              kicad_interposer_hyperlynx_to_gds project
 │                              and extended with plugin-specific flags:
 │                              --annotate-boundaries, --die-connections,
-│                              manifest-sourced --connection-type, the
-│                              .boundaries.json / .pillars.json sidecars)
+│                              --cmim-devices, manifest-sourced
+│                              --connection-type, the .boundaries.json /
+│                              .pillars.json sidecars)
 ├── tests/                     pytest suite (see tests/README.md)
 └── requirements.txt           Worker venv deps
 
@@ -359,9 +391,3 @@ assert result.exit_code == 0 and not result.error
   the `_metadata.finalize_required` intermediate-frame marker.
 - `tests/README.md`: test layout, byte-exact parity, round-trip
   regression.
-
-## TODO
-
-- `hyp_to_gds.py`: CMIM placement currently snaps instance origins to the
-  IntM4TM2 5 nm grid using a literal `0.005` um value. Replace it with
-  technology-file discovery once the PDK exposes a stable source for the grid.
