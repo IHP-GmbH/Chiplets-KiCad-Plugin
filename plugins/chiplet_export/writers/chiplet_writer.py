@@ -842,6 +842,22 @@ def write_chiplet(board, output_path):
                 pcbnew.B_CrtYd if footprint.GetLayer() == pcbnew.B_Cu
                 else pcbnew.F_CrtYd
             )
+            # Courtyard caches are built lazily: a headless pcbnew.LoadBoard()
+            # leaves them empty while the live GUI editor keeps them warm, so die
+            # width/height silently depended on GUI-vs-headless run context
+            # (GetBoundingBox fallback vs courtyard.BBox()). Force the build so
+            # both paths deterministically take the courtyard branch.
+            try:
+                footprint.BuildCourtyardCaches()
+            except Exception as exc:
+                # Do not swallow silently: the headless CLI relies solely on
+                # this call for deterministic die geometry, so a failure (e.g. a
+                # KiCad-fork rebase that shifts the binding) would silently
+                # revert width/height to the text-inflated GetBoundingBox
+                # fallback and reintroduce the GUI-vs-headless divergence.
+                print("WARNING: %s: BuildCourtyardCaches failed (%s); die "
+                      "width/height fall back to the footprint bounding box"
+                      % (ref, exc), file=sys.stderr)
             courtyard = footprint.GetCourtyard(courtyard_layer)
             if not courtyard.IsEmpty():
                 fp_bbox = courtyard.BBox()
