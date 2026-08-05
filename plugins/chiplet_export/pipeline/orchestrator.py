@@ -962,10 +962,15 @@ def _write_outputs_manifest(output_dir, board_name):
          "interposer layout (referenced by the .chiplet)"),
         ("layout/%s_interposer.boundaries.json" % board_name,
          "chiplet-boundary manifest for the interposer GDS"),
+        ("layout/%s_interposer.pillars.json" % board_name,
+         "cu-pillar manifest for the interposer GDS (per-pillar geometry "
+         "and connection method; present when a cu-pillar stack is used)"),
         ("layout/%s_complete.gds" % board_name,
          "full assembly layout (interposer + dies)"),
         ("layout/%s_complete.boundaries.json" % board_name,
          "chiplet-boundary manifest for the complete GDS"),
+        ("layout/%s_complete.pillars.json" % board_name,
+         "cu-pillar manifest for the complete GDS"),
         ("layout/%s_complete.ixn_methods.json" % board_name,
          "per-method interconnect scoping sidecar for the assembly DRC"),
     ]
