@@ -1,4 +1,10 @@
 # Worker venv dependencies for hyp_to_gds.py.
 # Install into a venv outside of KiCad's bundled Python. See README.md.
-klayout>=0.28
-PyYAML>=6.0
+#
+# The floors are the versions this plugin is actually exercised against: the
+# ones the adk-tools image pins (ARG KLAYOUT_PIP and ARG PYYAML_PIP in its
+# Dockerfile), which are also what the host install page tells a user to
+# create. An older KLayout may well work, but nothing here has ever run
+# against one, so 0.28 was a floor nobody had tested.
+klayout>=0.30.5
+PyYAML>=6.0.3
