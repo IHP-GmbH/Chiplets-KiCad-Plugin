@@ -146,6 +146,23 @@ def _assert_byte_exact(label, baseline_path, candidate_path):
     )
 
 
+def _build_courtyards(board):
+    """Warm the lazily-built footprint courtyard caches.
+
+    A headless ``pcbnew.LoadBoard`` leaves these caches empty while the KiCad GUI
+    editor keeps them warm. Both the C++ exporter and ``write_chiplet`` derive a
+    die's width/height from ``GetCourtyard()``, which reads this cache, so a cold
+    cache silently falls back to ``GetBoundingBox`` (a larger, silk/fab-text
+    polluted box). ``write_chiplet`` now builds the cache itself so its die
+    geometry is context-independent; the C++ baseline does not, so the parity
+    tests build it on both boards to compare the real (courtyard) die outline
+    rather than the cold-cache fallback that no GUI user ever sees.
+    """
+    for fp in board.Footprints():
+        fp.BuildCourtyardCaches()
+    return board
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -155,11 +172,11 @@ def test_chiplet_byte_exact(tmp_path, chiplet_board_path):
     cpp_path = tmp_path / "cpp_baseline.chiplet"
     py_path = tmp_path / "python_port.chiplet"
 
-    board = pcbnew.LoadBoard(chiplet_board_path)
+    board = _build_courtyards(pcbnew.LoadBoard(chiplet_board_path))
     assert pcbnew.ExportBoardToChipletFile(board, str(cpp_path)) is True, \
         "C++ chiplet exporter returned False"
 
-    board_py = pcbnew.LoadBoard(chiplet_board_path)
+    board_py = _build_courtyards(pcbnew.LoadBoard(chiplet_board_path))
     assert write_chiplet(board_py, str(py_path)) is True, \
         "Python chiplet writer returned False"
 
@@ -203,7 +220,10 @@ def test_chiplet_byte_exact_with_project_text_vars(tmp_path,
     # One LoadBoard per writer, each used immediately: a PROJECT* fetched from
     # a board is invalidated by the next LoadBoard, and touching it afterwards
     # takes the interpreter down with SIGSEGV rather than failing the test.
-    board = pcbnew.LoadBoard(str(board_file))
+    # Courtyards warmed on both, as in every other parity test here: the C++
+    # baseline does not build them itself, so without this the comparison is
+    # against the cold-cache bounding-box fallback that no GUI user ever sees.
+    board = _build_courtyards(pcbnew.LoadBoard(str(board_file)))
     assert pcbnew.ExportBoardToChipletFile(board, str(cpp_path)) is True
     baseline = cpp_path.read_text()
     assert 'adapter: "textvar_probe_adapter"' in baseline, (
@@ -215,6 +235,28 @@ def test_chiplet_byte_exact_with_project_text_vars(tmp_path,
     assert write_chiplet(board_py, str(py_path)) is True
 
     _assert_byte_exact("chiplet (project text variables)", cpp_path, py_path)
+
+def test_chiplet_die_dims_context_independent(tmp_path, chiplet_board_path):
+    """write_chiplet emits the same die geometry from a cold or warm courtyard
+    cache -- the GUI-vs-headless determinism fix.
+
+    Before the fix, a fresh headless ``LoadBoard`` (cold cache) fell back to
+    ``GetBoundingBox`` (e.g. 801x3359 for the demo dies) while the GUI (warm
+    cache) used the courtyard (770x2606), so the shipped .chiplet depended on
+    where it was produced. ``write_chiplet`` now builds the cache itself, so both
+    boards must yield byte-identical output; a regression that drops the internal
+    ``BuildCourtyardCaches`` would diverge here.
+    """
+    cold = tmp_path / "cold.chiplet"
+    warm = tmp_path / "warm.chiplet"
+
+    board_cold = pcbnew.LoadBoard(chiplet_board_path)  # cold: no _build_courtyards
+    assert write_chiplet(board_cold, str(cold)) is True
+
+    board_warm = _build_courtyards(pcbnew.LoadBoard(chiplet_board_path))
+    assert write_chiplet(board_warm, str(warm)) is True
+
+    _assert_byte_exact("chiplet context-independence (cold vs warm)", cold, warm)
 
 
 def test_hyperlynx_byte_exact(tmp_path, hyperlynx_board_path):
@@ -266,7 +308,7 @@ def test_chiplet_byte_exact_multi_tech(tmp_path, chiplet_board_path):
         board = pcbnew.LoadBoard(chiplet_board_path)
         _add_die_footprint(board, "ZZZ1", "zzz_tech.lyp", "ZZZ1.gds", 1.0, 1.0)
         _add_die_footprint(board, "AAA1", "aaa_tech.lyp", "AAA1.gds", 2.0, 2.0)
-        return board
+        return _build_courtyards(board)
 
     assert pcbnew.ExportBoardToChipletFile(prep(), str(cpp_path)) is True
     assert write_chiplet(prep(), str(py_path)) is True
@@ -293,7 +335,7 @@ def test_chiplet_byte_exact_hostile_names(tmp_path, chiplet_board_path):
         board = pcbnew.LoadBoard(chiplet_board_path)
         _add_die_footprint(board, hostile_ref, "sg13g2.lyp", hostile_gds,
                            1.0, 1.0)
-        return board
+        return _build_courtyards(board)
 
     assert pcbnew.ExportBoardToChipletFile(prep(), str(cpp_path)) is True
     assert write_chiplet(prep(), str(py_path)) is True
@@ -321,7 +363,7 @@ def test_chiplet_byte_exact_bare_boundary(tmp_path, chiplet_board_path,
     def prep():
         board = pcbnew.LoadBoard(chiplet_board_path)
         _add_die_footprint(board, boundary_ref, "sg13g2.lyp", "x.gds", 1.0, 1.0)
-        return board
+        return _build_courtyards(board)
 
     assert pcbnew.ExportBoardToChipletFile(prep(), str(cpp_path)) is True
     assert write_chiplet(prep(), str(py_path)) is True
