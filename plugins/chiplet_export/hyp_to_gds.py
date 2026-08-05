@@ -491,8 +491,19 @@ UNMAPPED_FAIL_FRACTION = 0.5
 # <stem>.pillars.json sidecar contract (as-drawn Cu-pillar/bump centers).
 # Readers exact-match the version string (same policy as the boundary
 # manifest); bump producers and readers together.
+#
+# 1.1.0 adds the optional "methods" block: the per-method attachment rules the
+# pillars were placed and checked against, keyed by method id, with the same
+# field names the assembly DRC uses (IXN_spacing, IXN_pitch, IXN_pad_size).
+# It belongs here rather than in a sidecar of its own because those numbers are
+# what drives auto-resolve, so they are the reason a record carries
+# moved_by_auto_resolve. It also makes the carrier self-describing: the
+# interposer GDS has the pad openings but nothing in it says which attachment
+# method they belong to, and the deck that checks bump-to-bump rules per method
+# is the assembly one, which needs the die boundaries the carrier does not
+# carry.
 PILLAR_MANIFEST_SCHEMA = "adk-pillar-manifest"
-PILLAR_MANIFEST_VERSION = "1.0.0"
+PILLAR_MANIFEST_VERSION = "1.1.0"
 
 # IntM4TM2 constants for the cmim device, used only when the PDK checkout
 # cannot be resolved; the live values are techParams in
@@ -689,6 +700,9 @@ class GDSGenerator:
         # rebases them into the canonical GDS-bbox-corner frame (see
         # _write_pillar_manifest and _pillar_frame_origin).
         self._pillar_records: Optional[List[dict]] = None
+        # Per-method attachment rules the pillars were checked against ->
+        # the manifest's "methods" block (see record_interconnect_rules).
+        self._pillar_method_rules: Optional[Dict[str, dict]] = None
         # Lower-left corner (x_min, y_min, um) of the interposer top-cell
         # bbox, captured at the FIRST pillar-manifest write (the interposer
         # GDS write, before chiplet instances are added). Manifest x/y are
@@ -2482,6 +2496,24 @@ class GDSGenerator:
             rec["y_um"] = round(self._snap_um(rec["y_um"]), 6)
         self._pillar_records.extend(records)
 
+    def record_interconnect_rules(self, method: str, spacing_um: float,
+                                  pitch_um: float, pad_size_um: float) -> None:
+        """Record the attachment rules one method's pillars were checked against.
+
+        These are the numbers auto-resolve enforces, so recording them is what
+        makes moved_by_auto_resolve explainable after the fact. They travel in
+        the pillar manifest's "methods" block; the interconnect PDK stays the
+        authority, and a consumer that has both can tell a stale artifact from
+        a current one.
+        """
+        if self._pillar_method_rules is None:
+            self._pillar_method_rules = {}
+        self._pillar_method_rules[method] = {
+            "IXN_spacing": float(spacing_um),
+            "IXN_pitch": float(pitch_um),
+            "IXN_pad_size": float(pad_size_um),
+        }
+
     def _write_pillar_manifest(self, output_path: str) -> Optional[Path]:
         """Write the <stem>.pillars.json sidecar with the as-drawn
         Cu-pillar/bump centers (canonical interposer GDS-bbox-corner frame,
@@ -2524,6 +2556,7 @@ class GDSGenerator:
             "generator": "hyp_to_gds.py",
             "assembly_gds": out.name,
             "units": "um",
+            "methods": dict(sorted((self._pillar_method_rules or {}).items())),
             "pillars": pillars,
         }
         with manifest_path.open("w") as fh:
@@ -4102,6 +4135,10 @@ def convert_hyp_to_gds(
                 m_params = (bm.DrcParams.from_body_diameter(m_diameter)
                             if m_in_table else bm.DrcParams())
                 try:
+                    m_fab = im.fab_params(m)
+                except KeyError:
+                    m_fab = {}
+                try:
                     m_pr = im.pitch_rules(m)
                 except KeyError:
                     m_pr = {}
@@ -4112,6 +4149,16 @@ def convert_hyp_to_gds(
                 if m_pr.get("IXN_spacing") is not None:
                     m_params.min_spacing_um = m_pr["IXN_spacing"]
                     m_overrode = True
+                # The pad size the pre-DRC reasons about has to be the pad size
+                # that gets drawn, and the drawn one comes from fab_params
+                # (CuPillarGenerator below is handed the same number). Without
+                # this, an out-of-table method kept the Option-2 fallback of 40
+                # um while drawing a 35 um opening, and auto_resolve, which
+                # targets max(pitch, diameter + spacing), pushed for 55 um where
+                # the method asks for 50. In-table methods declare the table's
+                # own opening, so this is a no-op for them.
+                if m_fab.get("passiv_opening_um") is not None:
+                    m_params.diameter_um = m_fab["passiv_opening_um"]
                 if not m_in_table:
                     if m_overrode:
                         print(f"  Note: {m} body diameter {m_diameter} um is "
@@ -4126,13 +4173,9 @@ def convert_hyp_to_gds(
                               f"{m_params.min_spacing_um} um).",
                               file=sys.stderr)
                 m_bodies = im.layers_3d(m)
-                # Fab pad geometry travels with the method too: diameters
-                # outside the IHP Table 6.1 (vendor methods) draw their
-                # manifest-declared passivation opening.
-                try:
-                    m_fab = im.fab_params(m)
-                except KeyError:
-                    m_fab = {}
+                # Fab pad geometry travels with the method too (m_fab above):
+                # diameters outside the IHP Table 6.1 (vendor methods) draw
+                # their manifest-declared passivation opening.
                 print(f"\nGenerating Cu-pillars (connection={m}, "
                       f"body diameter={m_diameter} um, "
                       f"pitch {m_params.min_pitch_um} um / spacing "
@@ -4145,6 +4188,11 @@ def convert_hyp_to_gds(
                         bodies=m_bodies,
                         passiv_opening_um=m_fab.get("passiv_opening_um")),
                     m_params, m_diameter)
+                # The numbers this method's bumps are placed and auto-resolved
+                # against travel with the drawn pads, in the pillar manifest.
+                generator.record_interconnect_rules(
+                    m, m_params.min_spacing_um, m_params.min_pitch_um,
+                    m_params.diameter_um)
             device_map = {dev.ref: dev for dev in parser.devices}
             total_pillars = 0
             device_reports = {}

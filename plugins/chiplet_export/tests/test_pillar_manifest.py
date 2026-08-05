@@ -106,7 +106,7 @@ def _drawn_centers(gds_path, ref):
 def test_manifest_constants_pinned():
     """Readers exact-match these strings; bump both sides together."""
     assert h.PILLAR_MANIFEST_SCHEMA == "adk-pillar-manifest"
-    assert h.PILLAR_MANIFEST_VERSION == "1.0.0"
+    assert h.PILLAR_MANIFEST_VERSION == "1.1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ def test_bump_path_writes_manifest_with_header(tmp_path, monkeypatch):
         connection_type="cupillar_opt1")
     m = _manifest(out)
     assert m["schema"] == "adk-pillar-manifest"
-    assert m["version"] == "1.0.0"
+    assert m["version"] == "1.1.0"
     assert m["generator"] == "hyp_to_gds.py"
     assert m["assembly_gds"] == out.name
     assert m["units"] == "um"
@@ -137,6 +137,45 @@ def test_bump_path_writes_manifest_with_header(tmp_path, monkeypatch):
     u1 = [(p["x_um"], p["y_um"]) for p in m["pillars"]
           if p["device_ref"] == "U1"]
     assert sorted(u1) == [(100.0, 500.0), (300.0, 500.0)]
+
+
+def test_manifest_records_the_rules_the_bumps_were_checked_against(
+        tmp_path, monkeypatch):
+    """The 1.1.0 "methods" block. Without it the carrier GDS and its sidecar
+    say which method each pad belongs to but not what that method allows, so
+    nothing beside the GDS explains why a bump moved, or lets a reader tell
+    which pad-to-pad rule applies. The interposer deck cannot help: it derives
+    a pad from the UBM mask, which every method that lands on the IHP anchor
+    shares."""
+    out = _convert(
+        tmp_path, monkeypatch,
+        {"U1": _write_pin_list(tmp_path, "U1")},
+        name="rules", connection_type="cupillar_opt1")
+    methods = _manifest(out)["methods"]
+
+    assert set(methods) == {"cupillar_opt1"}
+    # PacTech Table 6.1 Option 1, as the interconnect manifest declares it.
+    assert methods["cupillar_opt1"] == {
+        "IXN_spacing": 40.0, "IXN_pitch": 75.0, "IXN_pad_size": 35.0}
+
+
+def test_out_of_table_method_records_the_opening_it_draws(
+        tmp_path, monkeypatch):
+    """IXN_pad_size has to be the opening that gets drawn, not a fallback.
+
+    A method outside IHP Table 6.1 kept DrcParams' Option-2 default of 40 um
+    while drawing the 35 um opening its fab_params declare, and auto-resolve
+    targets max(pitch, pad_size + spacing), so it pushed for 55 um where the
+    method asks for 50.
+    """
+    out = _convert(
+        tmp_path, monkeypatch,
+        {"U1": _write_pin_list(tmp_path, "U1")},
+        name="vendor", connection_type="vendorx_microbump")
+    methods = _manifest(out)["methods"]
+
+    assert methods["vendorx_microbump"] == {
+        "IXN_spacing": 15.0, "IXN_pitch": 50.0, "IXN_pad_size": 35.0}
 
 
 def test_no_bump_path_writes_no_manifest(tmp_path, monkeypatch):
