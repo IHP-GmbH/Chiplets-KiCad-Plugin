@@ -3317,7 +3317,53 @@ def convert_hyp_to_gds(
             per_method = {}
             for m in methods_in_use:
                 m_diameter = _connection_to_body_diameter(m)
-                m_params = bm.DrcParams.from_body_diameter(m_diameter)
+                # A method's declared pitch_rules are authoritative over the
+                # body-diameter table lookup. from_body_diameter maps an IHP
+                # Table 6.1 body diameter (35/44/49/54) to that row's
+                # pitch/spacing and returns the Option-2 defaults (pitch 80 /
+                # spacing 40) for any other diameter -- so a vendor fine-pitch
+                # method (vendorx, body 40 um) or a solder bump (body 80 um) was
+                # checked against 80/40 instead of its real manifest spec. That
+                # let auto-resolve spread vendorx's native 70 um bumps toward 80
+                # (landing ~72 nm short -> a phantom cu-pillar DRC error) while
+                # the assembly DRC, which reads the manifest, passed the same
+                # geometry at the real 50 um pitch. Honor the manifest's
+                # pitch_rules when the method declares them; keep the
+                # body-diameter fab geometry (diameter, enclosure). In-table
+                # methods declare the same numbers, so this is a no-op for them.
+                #
+                # For an out-of-table diameter take the Option-2 fallback fields
+                # directly rather than via from_body_diameter(), so its "using
+                # Option 2 defaults" stderr warning does not fire -- that message
+                # is misleading once the manifest pitch_rules below supersede
+                # those defaults. An accurate note is emitted afterwards.
+                m_in_table = bm.CUPILLAR_TABLE_6_1.get(m_diameter) is not None
+                m_params = (bm.DrcParams.from_body_diameter(m_diameter)
+                            if m_in_table else bm.DrcParams())
+                try:
+                    m_pr = im.pitch_rules(m)
+                except KeyError:
+                    m_pr = {}
+                m_overrode = False
+                if m_pr.get("IXN_pitch") is not None:
+                    m_params.min_pitch_um = m_pr["IXN_pitch"]
+                    m_overrode = True
+                if m_pr.get("IXN_spacing") is not None:
+                    m_params.min_spacing_um = m_pr["IXN_spacing"]
+                    m_overrode = True
+                if not m_in_table:
+                    if m_overrode:
+                        print(f"  Note: {m} body diameter {m_diameter} um is "
+                              f"outside IHP Table 6.1; using its manifest "
+                              f"pitch/spacing ({m_params.min_pitch_um}/"
+                              f"{m_params.min_spacing_um} um).")
+                    else:
+                        print(f"  Warning: {m} body diameter {m_diameter} um is "
+                              f"outside IHP Table 6.1 and declares no "
+                              f"pitch_rules; using Option 2 defaults "
+                              f"({m_params.min_pitch_um}/"
+                              f"{m_params.min_spacing_um} um).",
+                              file=sys.stderr)
                 m_bodies = im.layers_3d(m)
                 # Fab pad geometry travels with the method too: diameters
                 # outside the IHP Table 6.1 (vendor methods) draw their
@@ -3327,7 +3373,9 @@ def convert_hyp_to_gds(
                 except KeyError:
                     m_fab = {}
                 print(f"\nGenerating Cu-pillars (connection={m}, "
-                      f"body diameter={m_diameter} um) with DRC validation...")
+                      f"body diameter={m_diameter} um, "
+                      f"pitch {m_params.min_pitch_um} um / spacing "
+                      f"{m_params.min_spacing_um} um) with DRC validation...")
                 print("  3D bodies: " + ", ".join(
                     f"{name} ({lnum}/{ldt})" for name, lnum, ldt in m_bodies))
                 per_method[m] = (
