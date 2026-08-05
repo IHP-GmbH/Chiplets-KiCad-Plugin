@@ -251,6 +251,14 @@ def test_complete_manifest_reuses_interposer_frame_origin(tmp_path):
                 "y_um": float(y), "size_x_um": 100.0, "size_y_um": 100.0,
                 "net": "N"}
 
+    # An explicit outline sets the frame, the way a real carrier's prBoundary
+    # does. Leaving it to the pad's own bbox made this a pad-geometry test by
+    # accident: the pad comes from a PDK PyCell whose octagon is one grid step
+    # taller than wide, which moved the expected origin by 5 nm.
+    import klayout.db as db
+    gen.top_cell.shapes(gen.layout.layer(235, 0)).insert(
+        db.DBox(-200.0, -200.0, 200.0, 200.0))
+
     io1 = tmp_path / "io1.json"
     io1.write_text(json.dumps({"io_pads": [_pad("J1", 0, 0)]}))
     gen.add_io_pads(str(io1))
@@ -262,9 +270,10 @@ def test_complete_manifest_reuses_interposer_frame_origin(tmp_path):
     interposer = tmp_path / "frame_interposer.gds"
     gen.write(str(interposer))
     m1 = _manifest(interposer)
-    # J1 spans (-50,-50)..(50,50): that corner rebases (100,50) to (150,100).
-    assert (m1["pillars"][0]["x_um"], m1["pillars"][0]["y_um"]) == (150.0,
-                                                                    100.0)
+    # The outline's lower left is (-200,-200), so (100,50) rebases to
+    # (300,250).
+    assert (m1["pillars"][0]["x_um"], m1["pillars"][0]["y_um"]) == (300.0,
+                                                                    250.0)
     # Grow the bbox toward the lower left, as merged chiplet artwork could.
     io2 = tmp_path / "io2.json"
     io2.write_text(json.dumps({"io_pads": [_pad("J2", -500, -500)]}))

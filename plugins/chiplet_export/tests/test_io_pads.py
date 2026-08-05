@@ -10,7 +10,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from hyp_to_gds import GDSGenerator, LayerMap, update_chiplet_file  # noqa: E402
+from hyp_to_gds import (GDSGenerator, LayerMap,  # noqa: E402
+                        MANUFACTURING_GRID_NM, update_chiplet_file)
 
 # Interposer LYP via the ecosystem discovery convention (env -> PDK
 # env/walk); the .lyp belongs to the interposer PDK, not the plugin.
@@ -40,7 +41,7 @@ def _read_top_cell(gds_path: Path):
     return layout, layout.top_cell()
 
 
-def test_add_io_pads_creates_topmetal2_squares(tmp_path):
+def test_add_io_pads_places_pads_on_topmetal2(tmp_path):
     gen = _make_generator()
     pads = {
         "io_pads": [
@@ -65,18 +66,22 @@ def test_add_io_pads_creates_topmetal2_squares(tmp_path):
     layer_idx = layout.find_layer(*TM2_LAYER)
     assert layer_idx is not None, "TopMetal2 (134/0) layer missing in output"
 
-    boxes = [s.box for s in top.shapes(layer_idx).each() if s.is_box()]
-    assert len(boxes) == 2
+    # Shape-agnostic on purpose: the pad geometry belongs to the PDK's
+    # bondpad PyCell (an octagon today), so this pins where the pads are and
+    # how big, not what they look like.
+    pads = [s.polygon.bbox() for s in top.shapes(layer_idx).each()]
+    assert len(pads) == 2
 
     # Coordinates are in DBU (1 DBU = 1 nm) -> 100 um = 100_000 nm
     centers = sorted(((b.left + b.right) // 2, (b.bottom + b.top) // 2)
-                      for b in boxes)
+                      for b in pads)
     assert centers == [(0, 0), (200_000, 50_000)]
 
-    # Each box must be 100 um x 100 um
-    for b in boxes:
+    # Each pad must span 100 um, to within the grid step the PyCell adds to
+    # each side of its octagon's minor axis (rady + 0.005).
+    for b in pads:
         assert (b.right - b.left) == 100_000
-        assert (b.top - b.bottom) == 100_000
+        assert abs((b.top - b.bottom) - 100_000) <= 2 * MANUFACTURING_GRID_NM
 
 
 def test_io_class_dispatch_skips_reserved(tmp_path):
