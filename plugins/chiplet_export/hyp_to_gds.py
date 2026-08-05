@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -3392,6 +3393,7 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
             # readers anchor a relative layout) rather than the process CWD.
             die_gds = ''
             ref = component.get('id', '')
+            dev = None
             if devices is not None:
                 dev = next((d for d in devices
                             if d.ref == ref and getattr(d, 'gds_file', '')),
@@ -3407,6 +3409,39 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                 die_top_cell = _read_gds_top_cell(die_gds)
                 if die_top_cell:
                     component['top_cell'] = die_top_cell
+
+            # Self-contained die GDS. The die layout is a board-relative path
+            # (e.g. ../chiplets/die.gds) copied verbatim from the board; it
+            # resolves from the shipped example layout but dangles when the
+            # output is regenerated into an unrelated directory, so the viewer
+            # then renders an empty die box. If the recorded layout does not
+            # resolve against the .chiplet's OWN directory (where readers anchor
+            # a relative layout), bundle the die GDS next to the output and
+            # point at it, so a moved/regenerated bundle still renders. When it
+            # already resolves (the shipped demo, whose ../chiplets/ sibling
+            # exists), leave it untouched: no 34 MB copy, no machine path, and
+            # byte-stable for the reproducibility gate. Only real die devices
+            # (dev is not None) are bundled; the interposer GDS is colocated.
+            if dev is not None and die_gds and os.path.isfile(die_gds):
+                out_dir = chiplet_file.resolve().parent
+                recorded = component.get('layout', '')
+                resolves = False
+                if recorded and "${" not in recorded:
+                    cand = (recorded if os.path.isabs(recorded)
+                            else os.path.normpath(
+                                os.path.join(str(out_dir), recorded)))
+                    resolves = os.path.isfile(cand)
+                if not resolves:
+                    bundle_dir = out_dir / "chiplets"
+                    bundle_dir.mkdir(parents=True, exist_ok=True)
+                    dest = bundle_dir / os.path.basename(die_gds)
+                    if os.path.realpath(die_gds) != os.path.realpath(str(dest)):
+                        shutil.copy2(die_gds, dest)
+                    component['layout'] = os.path.join(
+                        "chiplets", os.path.basename(die_gds))
+                    print(f"  {ref}: bundled die GDS -> {component['layout']} "
+                          f"(self-contained; ../chiplets not reachable from "
+                          f"the output dir)")
 
         # Strip the intermediate-frame marker emitted by KiCad's
         # exporter (see kicad/pcbnew/exporters/export_chiplet.cpp).

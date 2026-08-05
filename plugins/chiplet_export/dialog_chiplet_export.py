@@ -347,57 +347,90 @@ class ChipletExportDialog(wx.Dialog):
         self._die_thick_ctrls = {}
         die_refs = self._die_refs()
         if die_refs:
+            # Interconnect method: the primary per-die choice. It drives the
+            # die's 3D bodies, connection stack and DRC numbers, and is saved
+            # to the footprint's CONNECTION field. One row per die footprint.
             die_box = wx.StaticBoxSizer(
                 wx.VERTICAL, panel,
-                "Per-die settings (saved to the footprint's CONNECTION / "
-                "DIE_THICKNESS_UM fields)")
-            die_grid = wx.FlexGridSizer(rows=len(die_refs) + 1, cols=4,
-                                        vgap=2, hgap=8)
-            die_grid.AddGrowableCol(1, 1)
-            # Column headers: two unrelated quantities share each row, and
-            # without them "thickness" next to a connection dropdown reads as
-            # the thickness OF that connection.
-            for header in ("Die", "Interconnect method", "",
-                           "Die thickness (um)"):
-                die_grid.Add(_muted(panel, header), 0,
-                             wx.ALIGN_CENTER_VERTICAL)
+                "Per-die interconnect method (saved to the footprint's "
+                "CONNECTION field)")
+            conn_grid = wx.FlexGridSizer(rows=len(die_refs) + 1, cols=2,
+                                         vgap=2, hgap=8)
+            conn_grid.AddGrowableCol(1, 1)
+            for header in ("Die", "Interconnect method"):
+                conn_grid.Add(_muted(panel, header), 0,
+                              wx.ALIGN_CENTER_VERTICAL)
             board_conns = self._board_die_connections()
-            board_thicks = self._board_die_thicknesses()
             for ref in die_refs:
-                die_grid.Add(wx.StaticText(panel, label="%s:" % ref),
-                             0, wx.ALIGN_CENTER_VERTICAL)
+                conn_grid.Add(wx.StaticText(panel, label="%s:" % ref),
+                              0, wx.ALIGN_CENTER_VERTICAL)
                 ctrl = wx.Choice(panel)
                 ctrl.Bind(wx.EVT_CHOICE,
                           lambda _e, r=ref: self._refresh_die_tooltip(r))
                 self._die_conn_ctrls[ref] = ctrl
                 self._set_die_choice_items(ref, board_conns.get(ref, ""))
-                die_grid.Add(ctrl, 1, wx.EXPAND)
-                die_grid.Add(wx.StaticText(panel, label="die Si thickness:"),
-                             0, wx.ALIGN_CENTER_VERTICAL)
-                thick = wx.TextCtrl(panel, size=wx.Size(90, -1))
+                conn_grid.Add(ctrl, 1, wx.EXPAND)
+            die_box.Add(conn_grid, 0, wx.EXPAND | wx.ALL, 4)
+            die_box.Add(
+                _muted(panel,
+                       "Interconnect stack heights (24-80 um) come from the "
+                       "interconnect PDK manifest and are not editable here.",
+                       shrinkable=True),
+                0, wx.EXPAND | wx.ALL, 4)
+            outer.Add(die_box, 0, wx.EXPAND | wx.ALL, 8)
+
+            # Silicon die-body thickness lives in a collapsed advanced pane.
+            # It is a 3D-only quantity (written to dimensions.thickness for the
+            # 3Dblox export and the Chiplet Studio render); it does NOT change
+            # the 2D GDS, the die footprint, the placement or the DRC. Next to
+            # the interconnect method it read as "the thickness of that
+            # connection", so it is tucked away and opened only by users who
+            # care about the 3D body height. Pre-filled from each footprint's
+            # DIE_THICKNESS_UM field.
+            self._thick_pane = wx.CollapsiblePane(
+                panel,
+                label="3D / advanced -- silicon die-body thickness",
+                style=wx.CP_DEFAULT_STYLE | wx.CP_NO_TLW_RESIZE)
+            self._thick_pane.Collapse(True)
+            self.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                      self._on_thick_pane_changed, self._thick_pane)
+            tp = self._thick_pane.GetPane()
+            tp_sizer = wx.BoxSizer(wx.VERTICAL)
+            tp_sizer.Add(
+                _muted(tp,
+                       "3D body only: written to dimensions.thickness for the "
+                       "3Dblox export and the Chiplet Studio render. Does not "
+                       "affect the 2D GDS, the die footprint, the placement or "
+                       "the DRC. Interconnect stack heights are a separate "
+                       "axis (above) -- do not add them here.",
+                       shrinkable=True),
+                0, wx.EXPAND | wx.ALL, 4)
+            thick_grid = wx.FlexGridSizer(rows=len(die_refs), cols=2,
+                                          vgap=2, hgap=8)
+            board_thicks = self._board_die_thicknesses()
+            for ref in die_refs:
+                thick_grid.Add(
+                    wx.StaticText(tp,
+                                  label="%s die Si thickness (um):" % ref),
+                    0, wx.ALIGN_CENTER_VERTICAL)
+                thick = wx.TextCtrl(tp, size=wx.Size(90, -1))
                 thick.SetValue(board_thicks.get(ref, ""))
-                # A hint, not a value: GetValue() stays empty, so an
-                # untouched field is never stamped onto the footprint of a
-                # board that never declared a thickness.
+                # A hint, not a value: GetValue() stays empty, so an untouched
+                # field is never stamped onto the footprint of a board that
+                # never declared a thickness.
                 thick.SetHint("750")
                 thick.SetToolTip(
                     "Physical thickness of the silicon die body in "
                     "micrometers, written to dimensions.thickness. 750 is a "
                     "standard SG13G2 die. Empty exports 0.0, which the ADK "
                     "3Dblox export rejects and which Chiplet Studio renders "
-                    "as a 200 um body. Interconnect stack heights are a "
-                    "separate axis -- do not add them here.")
+                    "as a 200 um body.")
                 self._die_thick_ctrls[ref] = thick
-                die_grid.Add(thick, 0)
-            die_box.Add(die_grid, 0, wx.EXPAND | wx.ALL, 4)
-            die_box.Add(
-                _muted(panel,
-                       "Interconnect stack heights (24-80 um) come from the "
-                       "interconnect PDK manifest and are not editable here; "
-                       "the thickness column is the silicon die body.",
-                       shrinkable=True),
-                0, wx.EXPAND | wx.ALL, 4)
-            outer.Add(die_box, 0, wx.EXPAND | wx.ALL, 8)
+                thick_grid.Add(thick, 0)
+            tp_sizer.Add(thick_grid, 0, wx.EXPAND | wx.ALL, 4)
+            tp.SetSizer(tp_sizer)
+            outer.Add(self._thick_pane, 0,
+                      wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         # Worker Python: one line, pre-filled with what discovery resolved, so
         # it reports provenance instead of sitting there as an empty box. Left
@@ -457,8 +490,16 @@ class ChipletExportDialog(wx.Dialog):
         # detail line and tooltips need one explicit pass at build time.
         self._on_conn_selected()
 
+        self._panel = panel
         panel.SetSizer(outer)
         outer.SetSizeHints(self)
+
+    def _on_thick_pane_changed(self, _event):
+        """Re-flow the dialog when the 3D/advanced thickness pane toggles.
+
+        CP_NO_TLW_RESIZE keeps the window size put; the log area (proportion 1)
+        absorbs the delta, so the layout just reflows in place."""
+        self._panel.Layout()
 
     def _default_out_dir(self):
         if self._board is not None:
