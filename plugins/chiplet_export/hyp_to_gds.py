@@ -41,6 +41,26 @@ except ImportError:
 # so the production GDS stays free of synthetic geometry.
 
 
+# Manufacturing grid of the IntM4TM2 interposer process, in nanometers.
+#
+# The interposer PDK's own deck is the authority: rule_decks/3_1_offgrid.drc
+# defines GRID = 5.nm and runs in the default deck set, so every vertex this
+# exporter draws has to sit on it or the carrier fails its foundry DRC. The
+# value is duplicated here rather than parsed out of a Ruby deck at import
+# time; tests/test_manufacturing_grid.py pins the two together and fails if
+# the deck moves.
+#
+# The companion constraint comes from rule_decks/3_2_angle.drc: Metal4,
+# Metal5, TopMetal1 and TopMetal2 accept only 0/45/90 degree edges. On-grid
+# and exactly-45 cannot both hold for the *outline* of a diagonal wire of an
+# arbitrary width (the perpendicular offset is width/(2*sqrt(2)), irrational
+# for any round width), which is why traces are emitted fractured, one
+# on-grid quad per segment, instead of as one path polygon. Both angle and
+# offgrid rules read the raw, as-drawn polygons, so each quad is judged on
+# its own and the merged copper is unaffected.
+MANUFACTURING_GRID_NM = 5
+
+
 @dataclass
 class TraceSegment:
     """Represents a single trace segment from the HYP file."""
@@ -471,8 +491,19 @@ UNMAPPED_FAIL_FRACTION = 0.5
 # <stem>.pillars.json sidecar contract (as-drawn Cu-pillar/bump centers).
 # Readers exact-match the version string (same policy as the boundary
 # manifest); bump producers and readers together.
+#
+# 1.1.0 adds the optional "methods" block: the per-method attachment rules the
+# pillars were placed and checked against, keyed by method id, with the same
+# field names the assembly DRC uses (IXN_spacing, IXN_pitch, IXN_pad_size).
+# It belongs here rather than in a sidecar of its own because those numbers are
+# what drives auto-resolve, so they are the reason a record carries
+# moved_by_auto_resolve. It also makes the carrier self-describing: the
+# interposer GDS has the pad openings but nothing in it says which attachment
+# method they belong to, and the deck that checks bump-to-bump rules per method
+# is the assembly one, which needs the die boundaries the carrier does not
+# carry.
 PILLAR_MANIFEST_SCHEMA = "adk-pillar-manifest"
-PILLAR_MANIFEST_VERSION = "1.0.0"
+PILLAR_MANIFEST_VERSION = "1.1.0"
 
 # IntM4TM2 constants for the cmim device, used only when the PDK checkout
 # cannot be resolved; the live values are techParams in
@@ -599,16 +630,55 @@ class GDSGenerator:
                   f"using defaults", file=sys.stderr)
             return dict(GDSGenerator._DEFAULT_VIA_PARAMS)
 
+    @staticmethod
+    def _load_notch_space(tech_json_path: Optional[str] = None) -> Dict[str, float]:
+        """Load the minimum-space values the notch heal fills to.
+
+        Same file and same failure policy as _load_via_params: a missing file
+        or a missing key falls back to _DEFAULT_NOTCH_SPACE rather than
+        aborting, because a heal that does not run leaves the layout exactly
+        as it was and the carrier DRC still reports what it finds.
+        """
+        defaults = dict(GDSGenerator._DEFAULT_NOTCH_SPACE)
+        if tech_json_path is None:
+            return defaults
+        try:
+            with open(tech_json_path, 'r') as f:
+                rules = json.load(f).get('rules', {})
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"Warning: could not load notch-space rules from "
+                  f"{tech_json_path}: {e}, using defaults", file=sys.stderr)
+            return defaults
+        missing = [k for k in defaults if k not in rules]
+        if missing:
+            print(f"Warning: {tech_json_path} missing keys {missing} for the "
+                  f"notch heal, using defaults for those", file=sys.stderr)
+        return {k: float(rules.get(k, v)) for k, v in defaults.items()}
+
     def __init__(self, layer_map: LayerMap, cell_name: str = "INTERPOSER", units: str = "ENGLISH",
                  stackup_order: List[str] = None, tech_json_path: Optional[str] = None,
                  annotate_boundaries: bool = False,
-                 boundary_viz_layer: Tuple[int, int] = (1000, 0)):
+                 boundary_viz_layer: Tuple[int, int] = (1000, 0),
+                 grid_nm: int = MANUFACTURING_GRID_NM):
         self.layer_map = layer_map
         self.units = units
         self.stackup_order = stackup_order or []  # Layer order from HYP STACKUP (top to bottom)
         self.PDK_VIA_PARAMS = self._load_via_params(tech_json_path)
+        self.PDK_NOTCH_SPACE = self._load_notch_space(tech_json_path)
         self.layout = db.Layout()
         self.layout.dbu = 0.001  # 1 DBU = 1 nm (0.001 um) - Changed from 0.0001 to match standard GDS
+        # Manufacturing grid in database units. 0 (or 1) disables snapping,
+        # which is only ever useful for debugging what the raw conversion
+        # produced; every real export has to be on grid.
+        self.grid_dbu = max(0, int(round(grid_nm * 0.001 / self.layout.dbu)))
+        # Cells whose geometry is NOT ours to move: imported chiplet dies and
+        # everything they instantiate. A third-party die is delivered as-is,
+        # so the grid pass leaves both its shapes and its placement alone.
+        self._foreign_cells: set = set()
+        # Trace segments that are neither orthogonal nor 45 degrees; they
+        # cannot be drawn legally on this process and the count drives a
+        # warning at write() rather than a silent reshaping.
+        self._odd_angle_segments = 0
         self.top_cell = self.layout.create_cell(cell_name)
         self.routing_cell = self.layout.create_cell(f"{cell_name}_ROUTING")
         self.top_cell.insert(db.DCellInstArray(self.routing_cell, db.DTrans()))
@@ -630,6 +700,9 @@ class GDSGenerator:
         # rebases them into the canonical GDS-bbox-corner frame (see
         # _write_pillar_manifest and _pillar_frame_origin).
         self._pillar_records: Optional[List[dict]] = None
+        # Per-method attachment rules the pillars were checked against ->
+        # the manifest's "methods" block (see record_interconnect_rules).
+        self._pillar_method_rules: Optional[Dict[str, dict]] = None
         # Lower-left corner (x_min, y_min, um) of the interposer top-cell
         # bbox, captured at the FIRST pillar-manifest write (the interposer
         # GDS write, before chiplet instances are added). Manifest x/y are
@@ -939,23 +1012,277 @@ class GDSGenerator:
 
         return paths
 
+    # ------------------------------------------------------------------
+    # Manufacturing grid
+    # ------------------------------------------------------------------
+
+    def _snap(self, v: int) -> int:
+        """Snap one database-unit coordinate onto the manufacturing grid."""
+        g = self.grid_dbu
+        if g <= 1:
+            return int(v)
+        return int(round(v / float(g))) * g
+
+    def _snap_um(self, v_um: float) -> float:
+        """Snap a micrometer value, returned in micrometers.
+
+        Used for the coordinates that also travel in a sidecar (bump centres,
+        I/O pad positions), so the manifest and the drawn geometry agree
+        exactly instead of by a couple of nanometers.
+        """
+        return self._snap(int(round(v_um / self.layout.dbu))) * self.layout.dbu
+
+    def _snap_point(self, p) -> db.Point:
+        return db.Point(self._snap(p.x), self._snap(p.y))
+
+    @staticmethod
+    def _sgn(v: int) -> int:
+        return (v > 0) - (v < 0)
+
+    def _right_normal(self, dx: int, dy: int,
+                      half: int, diag: int) -> Optional[Tuple[int, int]]:
+        """Offset from the centreline to the right-hand flank of a run.
+
+        half on the perpendicular axis for an orthogonal run, (diag, diag) for
+        an exactly diagonal one; those are the same offsets the segment quads
+        use, so the flanks a corner patch lands on are the flanks that exist.
+        None for a run that is neither, which the caller draws with a snapped
+        approximate offset and counts as an odd angle.
+        """
+        if dx == 0 and dy == 0:
+            return None
+        if dx == 0 or dy == 0:
+            return (self._sgn(dy) * half, -self._sgn(dx) * half)
+        if abs(dx) == abs(dy):
+            return (self._sgn(dy) * diag, -self._sgn(dx) * diag)
+        return None
+
+    @staticmethod
+    def _unit(dx: int, dy: int) -> Tuple[int, int]:
+        """Direction of a 0/45/90 run, as components in {-1, 0, 1}."""
+        return ((dx > 0) - (dx < 0), (dy > 0) - (dy < 0))
+
+    def _inner_of(self, point: Tuple[int, int], direction: Tuple[int, int],
+                  inside: db.Point, reach: int) -> db.Polygon:
+        """A polygon covering everything on the `inside` side of a flank line.
+
+        Big enough to swallow the corner patch whole, so intersecting with it
+        is the same as clipping to the half plane.
+        """
+        ux, uy = direction
+        px, py = -uy, ux
+        if px * (inside.x - point[0]) + py * (inside.y - point[1]) < 0:
+            px, py = -px, -py
+        along = (ux * reach, uy * reach)
+        off = (px * reach, py * reach)
+        return db.Polygon([
+            db.Point(point[0] - along[0], point[1] - along[1]),
+            db.Point(point[0] + along[0], point[1] + along[1]),
+            db.Point(point[0] + along[0] + off[0], point[1] + along[1] + off[1]),
+            db.Point(point[0] - along[0] + off[0],
+                     point[1] - along[1] + off[1])])
+
+    def _corner_patch(self, a: db.Point, p: db.Point, b: db.Point,
+                      half: int, diag: int) -> db.Polygon:
+        """The copper that closes the corner at an interior vertex p.
+
+        The two segment quads leave exactly one wedge open there, on the
+        outside of the turn. The square of side 2*half centred on p closes it,
+        which is why it was the first thing drawn, but at a 45 degree bend the
+        square reaches the corner of its own bounding box while the two flanks
+        meet earlier, so it leaves (2 - sqrt(2)) * width / 2 of copper sticking
+        out past the flank: 1.17 um on a 4 um trace, a tip 2.83 um from the
+        vertex where the flanks meet at 2.17 and KiCad's round join is at 2.00.
+        That overshoot trips no rule, which is how it survived, but it is real
+        copper pointing at whatever the trace passes, and it is not what the
+        designer drew.
+
+        So the patch is the square with the overshoot cut off along the flanks,
+        united with the wedge in case the flanks meet outside the square (a 90
+        degree turn between two diagonal runs). Two properties make this the
+        shape to use rather than the wedge alone:
+
+        - it has no acute corner. The wedge's own corner at p is the turn
+          angle, 45 degrees at a 45 degree bend, and 3_2_angle.drc checks the
+          RAW polygons, so a wedge drawn on its own is a violation even though
+          the copper around it is a straight trace. Cutting the square keeps
+          every corner at 90 or 135 degrees;
+        - the cut lands ON the flanks instead of crossing them, so it adds no
+          intersection vertex to the merged outline. That is the difference
+          from the 45 degree chamfer tried earlier, which cut across the
+          flanks and put merged-level vertices off the 5 nm grid.
+
+        Falls back to the plain square, which is always safe, when the shape
+        cannot be built exactly: a turn sharper than 90 degrees (where the
+        flanks meet in a spike far outside the trace), a run that is neither
+        orthogonal nor exactly diagonal so its flank is only approximated, or
+        any result that is off-grid, not 0/45/90, or not a single piece.
+        """
+        square = db.Polygon(db.Box(p.x - half, p.y - half,
+                                   p.x + half, p.y + half))
+        d1 = (p.x - a.x, p.y - a.y)
+        d2 = (b.x - p.x, b.y - p.y)
+        cross = d1[0] * d2[1] - d1[1] * d2[0]
+        if cross == 0 or d1[0] * d2[0] + d1[1] * d2[1] < 0:
+            return square          # collinear, reversal, or sharper than 90
+        n1 = self._right_normal(d1[0], d1[1], half, diag)
+        n2 = self._right_normal(d2[0], d2[1], half, diag)
+        if n1 is None or n2 is None:
+            return square
+        if cross < 0:
+            # The open wedge is on the outside of the turn: right of a left
+            # turn, left of a right one.
+            n1, n2 = (-n1[0], -n1[1]), (-n2[0], -n2[1])
+        flank_a = (p.x + n1[0], p.y + n1[1])
+        flank_b = (p.x + n2[0], p.y + n2[1])
+
+        # Where the two flanks meet: flank_a + t*d1 = flank_b + s*d2.
+        num = ((flank_b[0] - flank_a[0]) * d2[1]
+               - (flank_b[1] - flank_a[1]) * d2[0])
+        if (num * d1[0]) % cross or (num * d1[1]) % cross:
+            return square
+        tip = (flank_a[0] + num * d1[0] // cross,
+               flank_a[1] + num * d1[1] // cross)
+
+        reach = 4 * (half + diag)
+        region = (db.Region(square)
+                  & db.Region(self._inner_of(flank_a, self._unit(*d1), p, reach))
+                  & db.Region(self._inner_of(flank_b, self._unit(*d2), p, reach)))
+        region += db.Region(db.Polygon([
+            db.Point(p.x, p.y), db.Point(*flank_a), db.Point(*tip),
+            db.Point(*flank_b)]))
+        region.merge()
+        if region.count() != 1:
+            return square
+        patch = next(region.each())
+        if patch.holes():
+            return square
+        g = max(1, self.grid_dbu)
+        pts = list(patch.each_point_hull())
+        for q in pts:
+            if q.x % g or q.y % g:
+                return square
+        for u, v in zip(pts, pts[1:] + pts[:1]):
+            dx, dy = abs(v.x - u.x), abs(v.y - u.y)
+            if not (dx == 0 or dy == 0 or dx == dy):
+                return square
+        return patch
+
+    def _trace_polygons(self, points: List[Tuple[float, float]],
+                        width_um: float) -> List[db.Polygon]:
+        """Fracture a trace centreline into on-grid polygons.
+
+        One quad per segment plus one patch per interior corner. The union is
+        the copper a mitered path would have drawn; the difference is that
+        every drawn vertex is on the manufacturing grid and every drawn edge is
+        0, 45 or 90 degrees. Snapping the vertices of a single path outline
+        cannot give both: the perpendicular offset of a diagonal wire is
+        width/(2*sqrt(2)), so either the vertex leaves the grid or the edge
+        leaves 45 degrees. The offgrid and angle rules read the raw, as-drawn
+        polygons, so fracturing satisfies them without changing the merged
+        copper that the width, space and enclosure rules see.
+        """
+        dbu = self.layout.dbu
+        raw = [(int(round(x / dbu)), int(round(y / dbu))) for x, y in points]
+
+        # Snap the first vertex, then walk the centreline by snapped deltas.
+        # Snapping each vertex on its own would be simpler but it breaks the
+        # runs: two ends of an exactly diagonal segment can round in opposite
+        # directions and leave |dx| and |dy| one grid step apart, which the
+        # angle deck reports as a non-45 edge. Walking deltas keeps every run
+        # orthogonal or exactly diagonal; the price is an accumulated drift of
+        # at most half a grid step per segment, four orders of magnitude below
+        # the via and pad overlaps that carry the connection.
+        pts: List[db.Point] = []
+        cx, cy = self._snap(raw[0][0]), self._snap(raw[0][1])
+        pts.append(db.Point(cx, cy))
+        for (px, py), (qx, qy) in zip(raw, raw[1:]):
+            dx, dy = qx - px, qy - py
+            sdx, sdy = self._snap(dx), self._snap(dy)
+            if dx and dy and abs(dx) == abs(dy):
+                mag = max(abs(sdx), abs(sdy))
+                sdx = mag if dx > 0 else -mag
+                sdy = mag if dy > 0 else -mag
+            cx += sdx
+            cy += sdy
+            p = db.Point(cx, cy)
+            if p != pts[-1]:
+                pts.append(p)
+        if len(pts) < 2:
+            return []
+
+        half = self._snap(int(round(width_um / 2.0 / dbu)))
+        if half <= 0:
+            return []
+        # Offset components for a 45 degree run. Rounding the component, not
+        # the resulting vertex, is what keeps the long edges exactly parallel
+        # to the segment and therefore exactly at 45 degrees. Rounded UP, not
+        # to nearest: half/sqrt(2) rounded down would draw the diagonal run
+        # narrower than the nominal width and trip the minimum-width rule.
+        g = max(1, self.grid_dbu)
+        diag = int(math.ceil(half / math.sqrt(2.0) / g)) * g
+
+        polys: List[db.Polygon] = []
+        for a, b in zip(pts, pts[1:]):
+            dx, dy = b.x - a.x, b.y - a.y
+            if dx == 0:
+                ox, oy = half, 0
+            elif dy == 0:
+                ox, oy = 0, half
+            elif abs(dx) == abs(dy):
+                ox = -diag if dy > 0 else diag
+                oy = diag if dx > 0 else -diag
+            else:
+                # Neither orthogonal nor 45: a discretized arc, or a board
+                # drawn off the 45 grid. The angle rule will report it; draw
+                # the nearest on-grid quad rather than silently reshaping the
+                # copper to make a violation disappear.
+                length = math.hypot(dx, dy)
+                ox = self._snap(int(round(-dy * half / length)))
+                oy = self._snap(int(round(dx * half / length)))
+                self._odd_angle_segments += 1
+            polys.append(db.Polygon([
+                db.Point(a.x + ox, a.y + oy),
+                db.Point(b.x + ox, b.y + oy),
+                db.Point(b.x - ox, b.y - oy),
+                db.Point(a.x - ox, a.y - oy)]))
+
+        # Corner patches: each closes the wedge the two neighbouring quads
+        # leave open at an interior vertex, cut back to the flanks so the
+        # copper stops where the trace does. See _corner_patch.
+        for a, p, b in zip(pts, pts[1:], pts[2:]):
+            polys.append(self._corner_patch(a, p, b, half, diag))
+        return polys
+
     def add_path(self, points: List[Tuple[float, float]], width_um: float, layer: str) -> bool:
         """
-        Add a path using DPath for smooth corners.
-        Points are in micrometers, width is in micrometers.
+        Add a trace. Points are in micrometers, width is in micrometers.
+
+        With the manufacturing grid active (the default) the trace is drawn as
+        on-grid polygons; see _trace_polygons for why it cannot stay a single
+        path. With snapping disabled it keeps the historical DPath, which is
+        smaller and prettier in a viewer but fails the carrier's offgrid deck.
         """
         if len(points) < 2:
             return False
 
         try:
-            dpoints = [db.DPoint(x, y) for x, y in points]
-            path = db.DPath(dpoints, width_um)
             layer_idx = self._get_gds_layer(layer)
-            self.routing_cell.shapes(layer_idx).insert(path)
-            return True
         except KeyError as e:
             print(f"Warning: {e} - skipping path on layer {layer}")
             return False
+
+        if self.grid_dbu <= 1:
+            dpoints = [db.DPoint(x, y) for x, y in points]
+            self.routing_cell.shapes(layer_idx).insert(db.DPath(dpoints, width_um))
+            return True
+
+        polys = self._trace_polygons(points, width_um)
+        if not polys:
+            return False
+        for poly in polys:
+            self.routing_cell.shapes(layer_idx).insert(poly)
+        return True
 
     def add_segments_as_paths(self, segments: List[TraceSegment], arcs: List[TraceArc] = None) -> int:
         """
@@ -1576,6 +1903,11 @@ class GDSGenerator:
                 self._imported_templates[expected_cell_name] = template_cell
 
             template_cell = self._imported_templates[expected_cell_name]
+            # A third-party die is delivered as drawn. Its geometry and its
+            # placement stay out of the manufacturing-grid pass: reshaping
+            # someone else's layout is not the exporter's business, and the
+            # placement is the design intent the boundary manifest records.
+            self._foreign_cells.add(template_cell.cell_index())
 
             if flip_chip:
                 # Flip-chip: extract geometry per-layer with mirror-X transform.
@@ -1584,6 +1916,9 @@ class GDSGenerator:
                 wrapper_name = f"{device.ref}_{expected_cell_name}_flipped"
                 imported_cell = self._place_die_flipped(
                     template_cell, wrapper_name, rotation=device.rotation)
+                # The wrapper holds the die's own geometry, flattened; it is
+                # as foreign as the template it came from.
+                self._foreign_cells.add(imported_cell.cell_index())
                 # Place with translation only -- mirror is baked into geometry
                 trans = db.DTrans(db.DVector(x_um, y_um))
             else:
@@ -1735,6 +2070,29 @@ class GDSGenerator:
             return None
         return (bbox.left, bbox.bottom, bbox.width(), bbox.height())
 
+    # Drawn metals that the notch heal runs on, mapped to the minimum-space
+    # key each one is checked against in interposer_tech_default.json (the
+    # same file the via parameters come from). Metal4 and Metal5 share Mn_b.
+    NOTCH_HEAL_LAYERS = {
+        (50, 0):  'Mn_b',    # Metal4
+        (67, 0):  'Mn_b',    # Metal5
+        (126, 0): 'TM1_b',   # TopMetal1
+        (134, 0): 'TM2_b',   # TopMetal2
+    }
+
+    # Fallback space values, used only when the tech JSON is unavailable.
+    # Same numbers, same units (um) as the keys above.
+    _DEFAULT_NOTCH_SPACE = {'Mn_b': 0.21, 'TM1_b': 1.64, 'TM2_b': 2.0}
+
+    # The heal keeps its hands off wire-bond pads. Pad.fR measures the exit
+    # band from the edge where the trace crosses the pad marker, so widening
+    # a trace at the pad mouth lengthens that edge and enlarges the band that
+    # has to stay covered: patching a notch there trades it for a bigger
+    # exit-length violation. That geometry belongs to the pad cell and its own
+    # rules, not to a spacing heal. dfpad drawing (41/0) is the wire-bond pad;
+    # the Cu-pillar pads carry the :pillar datatype and are not excluded.
+    NOTCH_HEAL_KEEPOUT = (41, 0)
+
     # Cu-pillar pad layer definitions (layer_num, datatype). The TopMetal2
     # entry is shared with the wire-bond I/O pad cell below. Cu-pillar cell
     # generation itself lives in the interposer PDK's bump_mirror (fab pads)
@@ -1746,6 +2104,53 @@ class GDSGenerator:
         'Recog:pillar':   (99, 35),
     }
 
+    # Wire-bond pads use the drawing datatypes of the same families: a bond
+    # pad is TopMetal2 with a passivation opening over it and a dfpad polygon
+    # marking it as a pad. Both are load-bearing in the carrier's own deck,
+    # not decoration: dfpad is what exempts the pad from the metal-slit
+    # requirement (Slt.c, max unslitted metal width 30 um, which a 100 um pad
+    # otherwise violates), and passiv AND dfpad AND TopMetal2 is how
+    # layers_def.drc derives a pad at all.
+    IO_PAD_FAB_LAYERS = {
+        'TopMetal2': (134, 0),
+        'Passiv':    (9, 0),
+        'dfpad':     (41, 0),
+    }
+
+    # Metal enclosure of the passivation opening on a wire-bond pad, in um.
+    # Pas.c (min TopMetal2 enclosure of Passiv) is 2.1 um in the interposer
+    # tech JSON, and the bondpad PyCell reads the same techparam, so this is
+    # not a second copy of the rule: it is the value the PyCell's output is
+    # checked against after every build. The deck only checks Pas.c inside a
+    # sealring, which a bare carrier has none of, so an enclosure that came
+    # out wrong would otherwise ship unnoticed.
+    IO_PAD_PASSIV_ENCLOSURE_UM = 2.1
+
+    # Pad shape asked of the PyCell.
+    #
+    # 'square' rather than the tech default 'octagon', and the reason is the
+    # grid, not taste. Measured on the reference board, the octagon is better
+    # electrically: it meets a diagonal trace head-on instead of at 45
+    # degrees, which took Pad.fR_TM2 from 27 markers to 9. But its facets run
+    # at 45 degrees, and where a facet of one slope is crossed by a trace
+    # flank of the other, the two lines meet at a half grid step: the merged
+    # outline then picks up a vertex at 2.5 nm, which rounds to the database
+    # unit and reports as both Offgrid and Angle45. Seven of each on this
+    # board. Offgrid and angle are hard rules, so the octagon stays out until
+    # the crossing is made exact (see SESSION_LOG: it needs the pad centre and
+    # the trace flank constants to have the same parity in grid steps).
+    #
+    # Do NOT ask for 'circle': that branch leaks an intermediate polygon at
+    # full pad size onto the passivation layer, which drops the metal
+    # enclosure to 0.5 nm. _check_io_pad_geometry catches it, but naming it
+    # here saves the debugging.
+    IO_PAD_SHAPE = 'square'
+
+    # Below this the PyCell stops honouring the aspect ratio: it resets
+    # hwquota to 1.0 with only a print, so a rectangular pad would come out
+    # square while the .chiplet still recorded the rectangle. Refuse instead.
+    IO_PAD_MIN_DIMENSION_UM = 10.0
+
     # I/O pads (external interposer pads): wire-bond MVP; flipped_bump and
     # tsv_bump reserved for follow-up PRs.
     SUPPORTED_IO_CLASSES = {'wire_bond'}
@@ -1753,25 +2158,120 @@ class GDSGenerator:
 
     def _create_wire_bond_pad_cell(self, size_x_um: float,
                                     size_y_um: float) -> db.Cell:
-        """Create a wire-bond I/O pad cell: single rectangle on TopMetal2.
+        """Create a wire-bond I/O pad cell from the interposer PDK's PyCell.
 
-        Passiv opening and dfpad recognition are deferred to the follow-up
-        PR that introduces the I/O pad DRC rule deck.
+        A bond pad is a fabricable structure the PDK defines, the same way a
+        Cu-pillar pad is: pad metal on TopMetal2, a dfpad polygon marking it as
+        a pad, and a passivation opening the metal encloses by Pas.c. This used
+        to be three boxes drawn here, which was a workaround; the geometry now
+        comes from IntM4TM2/bondpad, so a pad that ships is a pad the PDK
+        drew. IO_PAD_FAB_LAYERS stops being a description and becomes the
+        contract that output is checked against.
 
-        The layer is the shared TopMetal2 *fab* entry from CUPILLAR_FAB_LAYERS
-        (134/0), deliberately NOT routed through the trace LayerMap: the I/O pad
-        must land on the same fab layer as the cu-pillars, which is not
-        necessarily the TopMetal2 *routing* layer the LYP maps for traces.
+        Drawing dfpad and passiv is what makes this a pad to the carrier's own
+        deck rather than a wide slab of metal. Without dfpad the pad is not
+        exempt from the metal-slit rule (Slt.c: 30 um is the widest unslitted
+        TopMetal2), so every 100 um bond pad was a violation; without passiv
+        there is no opening for a bond wire to land in and layers_def.drc's
+        pad derivation (passiv AND dfpad AND TopMetal2) never fires. Both are
+        why padType stays 'bondpad': the PyCell's 'probepad' draws no dfpad.
+
+        The PyCell is built in a scratch layout bound to the interposer
+        technology and copied in, rather than instantiated here: this
+        generator's layout is bound to 'sg13g2' so the via_stack PCell
+        resolves, and its via variants are still unflattened at this point.
+
+        Raises:
+            RuntimeError: the PDK or its PyCell library is not reachable, or
+                the PyCell did not draw the fabrication layers. There is no
+                hand-drawn fallback on purpose: an approximation of a
+                fabricable pad is the thing this replaced.
+            ValueError: the requested pad is too small for the PyCell to
+                honour (caught by add_io_pads, which skips that pad).
         """
-        cell_name = f"WB_PAD_{size_x_um:g}x{size_y_um:g}"
-        cell = self.layout.create_cell(cell_name)
-        layer_num, layer_dt = self.CUPILLAR_FAB_LAYERS['TopMetal2']
-        layer_idx = self.layout.layer(layer_num, layer_dt)
-        half_x = size_x_um / 2.0
-        half_y = size_y_um / 2.0
-        cell.shapes(layer_idx).insert(
-            db.DBox(-half_x, -half_y, half_x, half_y))
+        if min(size_x_um, size_y_um) < self.IO_PAD_MIN_DIMENSION_UM:
+            raise ValueError(
+                f"I/O pad {size_x_um:g}x{size_y_um:g} um is below the "
+                f"{self.IO_PAD_MIN_DIMENSION_UM:g} um the bondpad PyCell can "
+                f"draw while honouring the requested aspect ratio")
+
+        bm = _import_bump_mirror()
+        ensure_lib = getattr(bm, '_ensure_pcell_lib', None) if bm else None
+        if ensure_lib is None:
+            raise RuntimeError(
+                "cannot reach the interposer PDK's PyCell library, so the "
+                "wire-bond pad geometry has no source. Set "
+                "INTERPOSER_PDK_ROOT to an OpenIntM4TM2 checkout (the one "
+                "whose libs.tech/klayout/python holds bump_mirror.py and "
+                "intm4tm2_pycell_lib) and retry.")
+        ensure_lib()
+
+        scratch = db.Layout()
+        scratch.dbu = self.layout.dbu
+        scratch.technology_name = 'intm4tm2'
+        variant = scratch.create_cell('bondpad', 'IntM4TM2', {
+            'diameter': f"{max(size_x_um, size_y_um):g}u",
+            'hwquota': f"{size_y_um / size_x_um:g}",
+            'shape': self.IO_PAD_SHAPE,
+            'padType': 'bondpad',
+            'topMetal': 'TM2',
+            # Both off: a filler exclusion ring or a via stack under every bond
+            # pad would land on layers this cell does not own, and the ring
+            # would grow the top cell's bbox, which is the frame every pillar
+            # and .chiplet coordinate is rebased on.
+            'stack': 'nil',
+            'addFillerEx': 'nil',
+        })
+        if variant is None:
+            raise RuntimeError(
+                "IntM4TM2/bondpad PCell variant could not be created "
+                "(create_cell returned None; the library or the 'intm4tm2' "
+                "technology did not resolve)")
+        variant.flatten(-1, True)
+
+        cell = self.layout.create_cell(f"WB_PAD_{size_x_um:g}x{size_y_um:g}")
+        cell.copy_tree(variant)
+        self._check_io_pad_geometry(cell)
         return cell
+
+    def _check_io_pad_geometry(self, cell: db.Cell) -> None:
+        """Hold the PyCell's output to the pad contract.
+
+        Two ways it can go wrong quietly, both seen in this PyCell: a foreign
+        KLAYOUT_LYP_FILE honoured by whatever registered the library first
+        retags or drops the fabrication layers, and the 'circle' shape leaks an
+        intermediate polygon at full pad size onto the passivation layer, which
+        leaves the metal enclosing its own opening by 0.5 nm instead of 2.1 um.
+        Neither raises anything on its own, and the carrier deck only checks
+        Pas.c inside a sealring, which a bare carrier has none of.
+        """
+        drawn = set()
+        for idx in self.layout.layer_indexes():
+            if not cell.bbox_per_layer(idx).empty():
+                info = self.layout.get_info(idx)
+                drawn.add((info.layer, info.datatype))
+        expected = set(self.IO_PAD_FAB_LAYERS.values())
+        if drawn != expected:
+            raise RuntimeError(
+                f"the bondpad PyCell drew layers {sorted(drawn)} instead of "
+                f"the fabrication set {sorted(expected)}. Check for a foreign "
+                f"KLAYOUT_LYP_FILE in the environment of whatever process "
+                f"first registered the IntM4TM2 library.")
+
+        metal = db.Region(cell.shapes(
+            self.layout.layer(*self.IO_PAD_FAB_LAYERS['TopMetal2'])))
+        passiv = db.Region(cell.shapes(
+            self.layout.layer(*self.IO_PAD_FAB_LAYERS['Passiv'])))
+        enc_dbu = int(round(self.IO_PAD_PASSIV_ENCLOSURE_UM
+                            / self.layout.dbu))
+        short = metal.enclosing_check(passiv, enc_dbu, False,
+                                      db.Metrics.Euclidian)
+        if not short.is_empty():
+            raise RuntimeError(
+                f"the bondpad PyCell drew {short.count()} place(s) where the "
+                f"pad metal encloses its passivation opening by less than "
+                f"Pas.c ({self.IO_PAD_PASSIV_ENCLOSURE_UM} um). Pad cell "
+                f"{cell.name}, shape '{self.IO_PAD_SHAPE}'.")
 
     def _get_or_create_io_pad_cell(self, io_class: str,
                                     size_x_um: float,
@@ -1880,6 +2380,13 @@ class GDSGenerator:
                     db.DCellInstArray(group_cells[io_class], db.DTrans()))
                 counts[io_class] = 0
 
+            # Place on the manufacturing grid and record what was placed: the
+            # sidecar position travels into the .chiplet, so it has to be the
+            # drawn one, not the one the board happened to carry.
+            x = self._snap_um(x)
+            y = self._snap_um(y)
+            p['x_um'] = x
+            p['y_um'] = y
             group_cells[io_class].insert(
                 db.DCellInstArray(pad_cell, db.DTrans(db.DVector(x, y))))
             counts[io_class] += 1
@@ -1981,7 +2488,31 @@ class GDSGenerator:
         """
         if self._pillar_records is None:
             self._pillar_records = []
+        # The pillar cells are instantiated at these centres and the write
+        # pass puts those instances on the manufacturing grid, so the record
+        # is snapped with them: "as drawn" has to mean as drawn.
+        for rec in records:
+            rec["x_um"] = round(self._snap_um(rec["x_um"]), 6)
+            rec["y_um"] = round(self._snap_um(rec["y_um"]), 6)
         self._pillar_records.extend(records)
+
+    def record_interconnect_rules(self, method: str, spacing_um: float,
+                                  pitch_um: float, pad_size_um: float) -> None:
+        """Record the attachment rules one method's pillars were checked against.
+
+        These are the numbers auto-resolve enforces, so recording them is what
+        makes moved_by_auto_resolve explainable after the fact. They travel in
+        the pillar manifest's "methods" block; the interconnect PDK stays the
+        authority, and a consumer that has both can tell a stale artifact from
+        a current one.
+        """
+        if self._pillar_method_rules is None:
+            self._pillar_method_rules = {}
+        self._pillar_method_rules[method] = {
+            "IXN_spacing": float(spacing_um),
+            "IXN_pitch": float(pitch_um),
+            "IXN_pad_size": float(pad_size_um),
+        }
 
     def _write_pillar_manifest(self, output_path: str) -> Optional[Path]:
         """Write the <stem>.pillars.json sidecar with the as-drawn
@@ -2025,6 +2556,7 @@ class GDSGenerator:
             "generator": "hyp_to_gds.py",
             "assembly_gds": out.name,
             "units": "um",
+            "methods": dict(sorted((self._pillar_method_rules or {}).items())),
             "pillars": pillars,
         }
         with manifest_path.open("w") as fh:
@@ -2064,6 +2596,245 @@ class GDSGenerator:
         print(f"  Boundary annotations painted on {viz_layer}/{viz_dt} "
               f"({len(self._boundary_records)} chiplets, viewer-only, no rule reads it)")
 
+    def _foreign_cell_set(self) -> set:
+        """Imported die cells plus everything they instantiate."""
+        out = set()
+        for ci in self._foreign_cells:
+            if not self.layout.is_valid_cell_index(ci):
+                continue
+            out.add(ci)
+            out.update(self.layout.cell(ci).called_cells())
+        return out
+
+    def _snap_shape(self, sh):
+        """Return the on-grid geometry for a shape, or None if it is already
+        on grid. Boxes, polygons, paths and text labels are covered; anything
+        else is left alone rather than guessed at."""
+        if sh.is_box():
+            b = sh.box
+            nb = db.Box(self._snap(b.left), self._snap(b.bottom),
+                        self._snap(b.right), self._snap(b.top))
+            return None if nb == b else nb
+        if sh.is_path():
+            p = sh.path
+            pts = [self._snap_point(q) for q in p.each_point()]
+            np_ = db.Path(pts, p.width, p.bgn_ext, p.end_ext, p.round)
+            return None if np_ == p else np_
+        if sh.is_polygon() or sh.is_simple_polygon():
+            poly = sh.polygon
+            np_ = db.Polygon([self._snap_point(q) for q in poly.each_point_hull()])
+            for h in range(poly.holes()):
+                np_.insert_hole([self._snap_point(q)
+                                 for q in poly.each_point_hole(h)])
+            return None if np_ == poly else np_
+        if sh.is_text():
+            t = sh.text
+            nt = t.dup()
+            nt.x = self._snap(t.x)
+            nt.y = self._snap(t.y)
+            return None if nt == t else nt
+        return None
+
+    def _snap_layout_to_grid(self) -> Tuple[int, int]:
+        """Move every authored vertex and instance origin onto the grid.
+
+        Idempotent, so running it before each write() is free on the second
+        call. Imported chiplet dies are excluded on both counts: their
+        geometry is not ours to reshape, and their placement is design intent
+        that the boundary manifest records. Everything the exporter draws is
+        covered, including via and pad cells, which are on grid inside their
+        own cell but were instantiated at bump and pad coordinates that are
+        not. Returns (shapes moved, instances moved).
+        """
+        if self.grid_dbu <= 1:
+            return (0, 0)
+        foreign = self._foreign_cell_set()
+        shapes_moved = 0
+        insts_moved = 0
+        for cell in self.layout.each_cell():
+            if cell.cell_index() in foreign:
+                continue
+            for li in self.layout.layer_indexes():
+                shapes = cell.shapes(li)
+                if shapes.is_empty():
+                    continue
+                pending = []
+                for sh in shapes.each():
+                    new_geom = self._snap_shape(sh)
+                    if new_geom is not None:
+                        pending.append((sh, new_geom))
+                for sh, new_geom in pending:
+                    shapes.replace(sh, new_geom)
+                shapes_moved += len(pending)
+            pending_i = []
+            for inst in cell.each_inst():
+                if inst.cell_index in foreign:
+                    continue
+                trans = inst.cplx_trans if inst.is_complex() else inst.trans
+                disp = trans.disp
+                snapped = db.Vector(self._snap(disp.x), self._snap(disp.y))
+                if snapped != disp:
+                    pending_i.append((inst, snapped))
+            for inst, snapped in pending_i:
+                if inst.is_complex():
+                    trans = inst.cplx_trans.dup()
+                    trans.disp = snapped
+                    inst.cplx_trans = trans
+                else:
+                    trans = inst.trans.dup()
+                    trans.disp = snapped
+                    inst.trans = trans
+            insts_moved += len(pending_i)
+        return (shapes_moved, insts_moved)
+
+    # Notch heal tuning. MARGIN fills a little past the rule so the result
+    # clears it rather than sitting on it. MIN_SPAN keeps every patch wide
+    # enough to escape the wedge it is filling: a wedge that closes at a
+    # shallow angle reports a tiny edge-pair bounding box, and a patch that
+    # small lands back inside the wedge and the heal never converges.
+    # MAX_ITERS bounds the loop; it is not a convergence proof (see
+    # _heal_notches), which is why exceeding it warns instead of passing.
+    NOTCH_HEAL_MARGIN = 1.10
+    NOTCH_HEAL_MIN_SPAN = 2.0     # multiples of the layer's space rule
+    NOTCH_HEAL_MAX_ITERS = 12
+    # Patches are axis-aligned rectangles, and that is a constraint, not a
+    # default. A 45 degree chamfer on them is legal in isolation (on grid,
+    # 0/45/90, no acute corner) and was measured to close the same notches
+    # with less copper, but it makes the MERGED copper acquire vertices off
+    # the 5 nm grid where a chamfer meets the diagonal traces, and the deck
+    # reports those: 4 offgrid and 4 Angle45 markers on the reference board,
+    # in flat, deep and tiling alike, none of them at a drawn vertex. An
+    # axis-aligned edge crossing a 0/45/90 world does not do that. Do not
+    # reintroduce the chamfer without re-running the offgrid and angle decks.
+
+    def _heal_notches(self) -> int:
+        """Fill sub-minimum-space notches in the drawn metals.
+
+        A notch is a gap inside a single piece of copper, so filling one can
+        never connect two nets; the gap between two separate pieces is a
+        space violation and is deliberately left alone. That distinction is
+        the whole reason this uses notch_check rather than the more obvious
+        oversize/undersize closing: the closing would bridge any two nets
+        sitting at exactly the minimum space, which is legal copper, and
+        turn it into a short.
+
+        The patches are axis-aligned boxes on the manufacturing grid. They
+        over-fill the wedge rather than tracing it, on purpose: the deck
+        checks raw polygons, so a patch has to be 0/45/90 and on grid on its
+        own, while the notch is usually bounded on one side by the arc of a
+        round pad. A traced fill would inherit the arc's vertices and trip
+        the offgrid and angle decks.
+
+        Over-filling can expose a new, smaller notch at a patch corner, so
+        the pass repeats until the layer is clean. This converges in practice
+        but is not guaranteed to, hence the iteration cap and the warning.
+
+        Foreign cells are excluded on the same grounds as the grid snap: an
+        imported die's geometry is not ours to reshape.
+
+        Returns the number of notches still reported after the last pass.
+        """
+        foreign = list(self._foreign_cell_set())
+        keepout = db.Region(
+            self.top_cell.begin_shapes_rec(
+                self.layout.layer(*self.NOTCH_HEAL_KEEPOUT))).merged()
+        heal_cell = None
+        residual = 0
+        for (layer_num, datatype), rule_key in sorted(self.NOTCH_HEAL_LAYERS.items()):
+            space_um = self.PDK_NOTCH_SPACE[rule_key]
+            li = self.layout.layer(layer_num, datatype)
+            limit = space_um * self.NOTCH_HEAL_MARGIN / self.layout.dbu
+            min_span = int(round(space_um * self.NOTCH_HEAL_MIN_SPAN
+                                 / self.layout.dbu))
+            def in_scope_patches():
+                """Patches this pass would place, keepout already removed."""
+                merged = self._own_metal(li, foreign)
+                boxes = self._notch_patches(
+                    merged.notch_check(limit, False, db.Metrics.Euclidian),
+                    min_span)
+                if not keepout.is_empty():
+                    boxes = boxes.not_interacting(keepout)
+                return merged, boxes
+
+            patched = 0
+            for _ in range(self.NOTCH_HEAL_MAX_ITERS):
+                merged, boxes = in_scope_patches()
+                if (boxes - merged).is_empty():
+                    # Either nothing is left to close, or what is left is
+                    # inside the keepout, or the patch shape cannot close it.
+                    # All three mean: stop, do not spin.
+                    break
+                if heal_cell is None:
+                    heal_cell = self.layout.create_cell(
+                        f"{self.top_cell.name}_NOTCH_HEAL")
+                    self.top_cell.insert(
+                        db.CellInstArray(heal_cell.cell_index(), db.Trans()))
+                for box in boxes.each():
+                    heal_cell.shapes(li).insert(box)
+                patched += boxes.count()
+
+            # Residual counts only what the heal owns. Notches under the
+            # keepout are out of scope by design, not failures, and the
+            # carrier DRC reports them against the pad rules where they
+            # belong.
+            merged, boxes = in_scope_patches()
+            still = (boxes - merged).count()
+            residual += still
+            if patched or still:
+                print(f"  Notch heal ({layer_num}/{datatype}, {rule_key} = "
+                      f"{space_um} um): {patched} patch(es)"
+                      + (f", {still} region(s) unclosed" if still else ""))
+        if residual:
+            print(f"Warning: {residual} notch region(s) below the minimum "
+                  f"space are still open after {self.NOTCH_HEAL_MAX_ITERS} "
+                  f"heal passes. "
+                  f"The carrier DRC will report them; they need a layout fix, "
+                  f"not a wider heal.", file=sys.stderr)
+        return residual
+
+    def _own_metal(self, layer_index: int, foreign: List[int]) -> 'db.Region':
+        """Merged drawn metal on one layer, excluding imported dies."""
+        shape_iter = self.top_cell.begin_shapes_rec(layer_index)
+        if foreign:
+            shape_iter.unselect_cells(foreign)
+        region = db.Region(shape_iter)
+        region.merge()
+        return region
+
+    def _notch_patches(self, notches, min_span: int) -> 'db.Region':
+        """Turn notch edge pairs into on-grid fill patches, one per junction.
+
+        A single wedge is reported as a fan of edge pairs, one per step of the
+        gap: at the junction below, five pairs measuring 0.00, 0.11, 0.69,
+        1.27 and 1.86 um, all inside one 1.9 x 2.5 um spot. Patching each pair
+        on its own puts five overlapping shapes there, and their corners seed
+        the next round, so the heal walks up the trace leaving a staircase of
+        patches behind it. Grouping the pairs first gives one patch per
+        junction: on the reference board 25 patches and 377 um2 instead of 61
+        and 556.
+        """
+        g = max(1, self.grid_dbu)
+        def floor_g(v):
+            return (v // g) * g
+        def ceil_g(v):
+            return -((-v) // g) * g
+
+        # Group by proximity: grow each pair's footprint by half the patch
+        # span, merge, and whatever fuses was one junction.
+        seeds = db.Region()
+        for pair in notches.each():
+            seeds.insert(pair.bbox())
+        seeds.size(max(g, ceil_g(min_span // 2)))
+        seeds.merge()
+
+        patches = db.Region()
+        for cluster in seeds.each():
+            b = cluster.bbox()
+            patches.insert(db.Box(floor_g(b.left), floor_g(b.bottom),
+                                  ceil_g(b.right), ceil_g(b.top)))
+        patches.merge()
+        return patches
+
     def write(self, output_path: str) -> None:
         """Write layout preserving via cell hierarchy.
 
@@ -2077,6 +2848,27 @@ class GDSGenerator:
         """
         for via_index in self._via_cells.values():
             self.layout.cell(via_index).flatten(-1, True)
+
+        # Onto the manufacturing grid before anything is written, so the GDS
+        # and the sidecars describe the same geometry. The boundary
+        # annotations are painted afterwards from the manifest records, which
+        # keeps the viewer-only layer identical to the contract even where the
+        # snap moved a die-adjacent vertex by a nanometer or two.
+        shapes_moved, insts_moved = self._snap_layout_to_grid()
+        if shapes_moved or insts_moved:
+            print(f"  Manufacturing grid ({self.grid_dbu} dbu): snapped "
+                  f"{shapes_moved} shape(s) and {insts_moved} instance "
+                  f"origin(s)")
+
+        # After the grid pass, so the heal reads the geometry that will
+        # actually be written and its own patches are never moved again.
+        self._heal_notches()
+        if self._odd_angle_segments:
+            print(f"Warning: {self._odd_angle_segments} trace segment(s) are "
+                  f"neither orthogonal nor 45 degrees; the carrier's angle "
+                  f"deck (3_2_angle.drc) allows only 0/45/90 on the metals, "
+                  f"so these will be reported. Redraw them on the board.",
+                  file=sys.stderr)
 
         save_opts = db.SaveLayoutOptions()
         save_opts.write_context_info = False
@@ -3079,6 +3871,7 @@ def convert_hyp_to_gds(
     boundary_viz_layer: Tuple[int, int] = (1000, 0),
     die_connections: Optional[Dict[str, str]] = None,
     die_thicknesses: Optional[Dict[str, float]] = None,
+    grid_nm: int = MANUFACTURING_GRID_NM,
 ) -> bool:
     """
     Main conversion function.
@@ -3183,7 +3976,8 @@ def convert_hyp_to_gds(
     # Generate GDS
     generator = GDSGenerator(layer_map, cell_name, parser.units, parser.stackup_layers,
                              tech_json_path, annotate_boundaries=annotate_boundaries,
-                             boundary_viz_layer=boundary_viz_layer)
+                             boundary_viz_layer=boundary_viz_layer,
+                             grid_nm=grid_nm)
 
     if generator._pcells_available:
         print("PDK PCells available - using via_stack PCell for vias")
@@ -3317,17 +4111,75 @@ def convert_hyp_to_gds(
             per_method = {}
             for m in methods_in_use:
                 m_diameter = _connection_to_body_diameter(m)
-                m_params = bm.DrcParams.from_body_diameter(m_diameter)
-                m_bodies = im.layers_3d(m)
-                # Fab pad geometry travels with the method too: diameters
-                # outside the IHP Table 6.1 (vendor methods) draw their
-                # manifest-declared passivation opening.
+                # A method's declared pitch_rules are authoritative over the
+                # body-diameter table lookup. from_body_diameter maps an IHP
+                # Table 6.1 body diameter (35/44/49/54) to that row's
+                # pitch/spacing and returns the Option-2 defaults (pitch 80 /
+                # spacing 40) for any other diameter -- so a vendor fine-pitch
+                # method (vendorx, body 40 um) or a solder bump (body 80 um) was
+                # checked against 80/40 instead of its real manifest spec. That
+                # let auto-resolve spread vendorx's native 70 um bumps toward 80
+                # (landing ~72 nm short -> a phantom cu-pillar DRC error) while
+                # the assembly DRC, which reads the manifest, passed the same
+                # geometry at the real 50 um pitch. Honor the manifest's
+                # pitch_rules when the method declares them; keep the
+                # body-diameter fab geometry (diameter, enclosure). In-table
+                # methods declare the same numbers, so this is a no-op for them.
+                #
+                # For an out-of-table diameter take the Option-2 fallback fields
+                # directly rather than via from_body_diameter(), so its "using
+                # Option 2 defaults" stderr warning does not fire -- that message
+                # is misleading once the manifest pitch_rules below supersede
+                # those defaults. An accurate note is emitted afterwards.
+                m_in_table = bm.CUPILLAR_TABLE_6_1.get(m_diameter) is not None
+                m_params = (bm.DrcParams.from_body_diameter(m_diameter)
+                            if m_in_table else bm.DrcParams())
                 try:
                     m_fab = im.fab_params(m)
                 except KeyError:
                     m_fab = {}
+                try:
+                    m_pr = im.pitch_rules(m)
+                except KeyError:
+                    m_pr = {}
+                m_overrode = False
+                if m_pr.get("IXN_pitch") is not None:
+                    m_params.min_pitch_um = m_pr["IXN_pitch"]
+                    m_overrode = True
+                if m_pr.get("IXN_spacing") is not None:
+                    m_params.min_spacing_um = m_pr["IXN_spacing"]
+                    m_overrode = True
+                # The pad size the pre-DRC reasons about has to be the pad size
+                # that gets drawn, and the drawn one comes from fab_params
+                # (CuPillarGenerator below is handed the same number). Without
+                # this, an out-of-table method kept the Option-2 fallback of 40
+                # um while drawing a 35 um opening, and auto_resolve, which
+                # targets max(pitch, diameter + spacing), pushed for 55 um where
+                # the method asks for 50. In-table methods declare the table's
+                # own opening, so this is a no-op for them.
+                if m_fab.get("passiv_opening_um") is not None:
+                    m_params.diameter_um = m_fab["passiv_opening_um"]
+                if not m_in_table:
+                    if m_overrode:
+                        print(f"  Note: {m} body diameter {m_diameter} um is "
+                              f"outside IHP Table 6.1; using its manifest "
+                              f"pitch/spacing ({m_params.min_pitch_um}/"
+                              f"{m_params.min_spacing_um} um).")
+                    else:
+                        print(f"  Warning: {m} body diameter {m_diameter} um is "
+                              f"outside IHP Table 6.1 and declares no "
+                              f"pitch_rules; using Option 2 defaults "
+                              f"({m_params.min_pitch_um}/"
+                              f"{m_params.min_spacing_um} um).",
+                              file=sys.stderr)
+                m_bodies = im.layers_3d(m)
+                # Fab pad geometry travels with the method too (m_fab above):
+                # diameters outside the IHP Table 6.1 (vendor methods) draw
+                # their manifest-declared passivation opening.
                 print(f"\nGenerating Cu-pillars (connection={m}, "
-                      f"body diameter={m_diameter} um) with DRC validation...")
+                      f"body diameter={m_diameter} um, "
+                      f"pitch {m_params.min_pitch_um} um / spacing "
+                      f"{m_params.min_spacing_um} um) with DRC validation...")
                 print("  3D bodies: " + ", ".join(
                     f"{name} ({lnum}/{ldt})" for name, lnum, ldt in m_bodies))
                 per_method[m] = (
@@ -3336,6 +4188,11 @@ def convert_hyp_to_gds(
                         bodies=m_bodies,
                         passiv_opening_um=m_fab.get("passiv_opening_um")),
                     m_params, m_diameter)
+                # The numbers this method's bumps are placed and auto-resolved
+                # against travel with the drawn pads, in the pillar manifest.
+                generator.record_interconnect_rules(
+                    m, m_params.min_spacing_um, m_params.min_pitch_um,
+                    m_params.diameter_um)
             device_map = {dev.ref: dev for dev in parser.devices}
             total_pillars = 0
             device_reports = {}
@@ -3795,6 +4652,16 @@ Examples:
              "<gds>.boundaries.json manifest. Off by default."
     )
     parser.add_argument(
+        "--grid-nm",
+        type=int,
+        default=MANUFACTURING_GRID_NM,
+        help=f"Manufacturing grid in nanometers for the drawn geometry "
+             f"(default {MANUFACTURING_GRID_NM}, the value the interposer "
+             f"PDK's own offgrid deck enforces). 0 disables snapping and "
+             f"keeps traces as paths; that output will not pass the carrier "
+             f"DRC and is for debugging the raw conversion only."
+    )
+    parser.add_argument(
         "--boundary-viz-layer",
         type=str,
         default="1000/0",
@@ -3918,6 +4785,7 @@ Examples:
         die_connections=die_connections,
         die_thicknesses=die_thicknesses,
         cmim_devices_json=args.cmim_devices,
+        grid_nm=args.grid_nm,
     )
 
     return 0 if success else 1
