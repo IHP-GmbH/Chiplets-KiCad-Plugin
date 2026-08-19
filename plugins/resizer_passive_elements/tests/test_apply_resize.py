@@ -58,6 +58,35 @@ def test_capacitance_formatting_keeps_the_unit():
     assert apply_resize._format_capacitance_fF(151.6) == "151.6fF"
 
 
+def test_graphic_width_literals_use_fixed_point(tmp_path):
+    mod_path = tmp_path / "tiny.kicad_mod"
+    mod_path.write_text(
+        "(stroke (width 7.5e-05))\n"
+        "(font (thickness 6.1e-05))\n"
+    )
+
+    apply_resize._normalise_graphic_width_literals(str(mod_path))
+
+    assert mod_path.read_text() == (
+        "(stroke (width 0.000075))\n"
+        "(font (thickness 0.000061))\n"
+    )
+
+
+def test_value_label_uses_spaced_fF_without_changing_internal_name(tmp_path):
+    mod_path = tmp_path / "tiny.kicad_mod"
+    mod_path.write_text('(footprint "CMIM_10p006fF"\n'
+                        '    (property "Value" "CMIM_10p006fF"))\n')
+
+    apply_resize._set_value_label(str(mod_path),
+                                  apply_resize._format_value_label(10.0))
+
+    assert mod_path.read_text() == (
+        '(footprint "CMIM_10p006fF"\n'
+        '    (property "Value" "10 fF"))\n'
+    )
+
+
 def test_managed_fields_cover_everything_the_plugin_writes():
     # Any field the plugin writes itself must be excluded from the
     # carry-over of the replaced instance's fields, or the stale value wins.

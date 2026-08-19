@@ -20,7 +20,7 @@ ActionPlugin only exists inside a running pcbnew process.
 # a stale cached copy -- Python caches imported modules, and reloading
 # the plugin (or even a fresh KiCad process against an unchanged mount)
 # does not guarantee the .py files on disk actually changed underneath it.
-__version__ = "0.11.0"
+__version__ = "0.15.0"
 
 try:
     from .action_resizer_passive_elements import ResizerPassiveElementsPlugin

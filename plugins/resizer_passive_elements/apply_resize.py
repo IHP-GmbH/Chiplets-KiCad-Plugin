@@ -18,6 +18,7 @@ can run in plain Python.
 
 import importlib.util
 import os
+import re
 from pathlib import Path
 
 from . import paths
@@ -119,6 +120,61 @@ def _strip_visible_name_label(mod_path, name):
 
     with open(mod_path, "w") as handle:
         handle.write(text[:line_start] + text[after:])
+
+
+_GRAPHIC_SCIENTIFIC_NUMBER_RE = re.compile(
+    r'(\((?:width|thickness)\s+)([-+]?(?:\d+(?:\.\d*)?|\.\d+)[eE][-+]?\d+)'
+)
+
+
+def _normalise_graphic_width_literals(mod_path):
+    """Write graphical widths without scientific notation.
+
+    Some KiCad builds misread tiny scientific-notation values while a
+    footprint is loaded into pcbnew and later serialised into a board.
+    For example, 7.5e-05 can come back as 7.5 mm. Keep the exact value,
+    but use fixed-point text for width and thickness tokens.
+    """
+    with open(mod_path, "r") as handle:
+        text = handle.read()
+
+    def fixed_point(match):
+        value = "{:.12f}".format(float(match.group(2))).rstrip("0").rstrip(".")
+        if value in ("", "-0"):
+            value = "0"
+        return match.group(1) + value
+
+    normalised = _GRAPHIC_SCIENTIFIC_NUMBER_RE.sub(fixed_point, text)
+    if normalised != text:
+        with open(mod_path, "w") as handle:
+            handle.write(normalised)
+
+
+_VALUE_PROPERTY_RE = re.compile(
+    r'(\(property\s+"Value"\s+")[^"]*(")'
+)
+
+
+def _set_value_label(mod_path, value):
+    """Set the visible Value text without changing the internal footprint name."""
+    with open(mod_path, "r") as handle:
+        text = handle.read()
+
+    def replace_value(match):
+        return match.group(1) + str(value) + match.group(2)
+
+    normalised = _VALUE_PROPERTY_RE.sub(replace_value, text, count=1)
+    if normalised != text:
+        with open(mod_path, "w") as handle:
+            handle.write(normalised)
+
+
+def _format_value_label(cap_fF):
+    """Format a schematic-style visible label, e.g. 10 fF."""
+    value = float(cap_fF)
+    if value >= 1000.0:
+        return "{:g} pF".format(round(value / 1000.0, 3))
+    return "{:g} fF".format(round(value, 3))
 
 
 def _format_nominal_label(cap_fF):
@@ -275,11 +331,18 @@ def _generate_cap_cmim_footprint(params, tech, output_dir, on_log=None, gen_scri
         return None
 
     _strip_visible_name_label(out_path, name)
+    _normalise_graphic_width_literals(out_path)
 
     try:
         cap_fF_result = gen.cmim_capacitance_fF(w_um, l_um, tech)
     except Exception:
         cap_fF_result = None
+
+    display_cap_fF = params.get("capacitance_fF")
+    if display_cap_fF is None:
+        display_cap_fF = cap_fF_result
+    if display_cap_fF is not None:
+        _set_value_label(out_path, _format_value_label(display_cap_fF))
 
     params["w_um"] = w_um
     params["l_um"] = l_um
@@ -438,16 +501,34 @@ def _style_provenance_field(footprint, field_name):
         import pcbnew
         field = None
         for candidate in footprint.GetFields():
-            if candidate.GetName() == field_name:
+            if str(candidate.GetName()) == field_name:
                 field = candidate
                 break
         if field is None:
             return
-        field.SetLayer(pcbnew.F_Fab)
-        field.SetVisible(False)
-        small = pcbnew.FromMM(0.2)
-        field.SetTextSize(pcbnew.VECTOR2I(small, small))
-        field.SetTextThickness(pcbnew.FromMM(0.05))
+
+        # Hide first. A field created with SetField() starts out visible on
+        # F.SilkS at KiCad's normal PCB text size. If one of the presentation
+        # setters is unavailable on a particular KiCad build, leaving that
+        # default visible is much worse than leaving the layer/size untouched:
+        # on a micrometre-scale CMIM it creates a multi-millimetre label.
+        try:
+            field.SetVisible(False)
+        except Exception:
+            pass
+        try:
+            field.SetLayer(pcbnew.F_Fab)
+        except Exception:
+            pass
+        try:
+            small = pcbnew.FromMM(0.2)
+            field.SetTextSize(pcbnew.VECTOR2I(small, small))
+        except Exception:
+            pass
+        try:
+            field.SetTextThickness(pcbnew.FromMM(0.05))
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -694,6 +775,13 @@ def apply_to_instance(board, footprint_obj, generated_mod_path, params=None, on_
         log("{}: ERROR: could not add the new footprint to the board: {} "
             "(the old instance was left untouched)".format(reference, exc))
         return False
+
+    # CMIM_GENERATED_FILE is a user field created after FootprintLoad(). Some
+    # KiCad builds do not expose a just-created field through GetFields() until
+    # its footprint belongs to a BOARD, so style it once more after Add().
+    # Without this second pass KiCad's default F.SilkS presentation can leave
+    # the filename as a giant visible label (roughly 9.6 mm for these names).
+    _style_provenance_field(new_fp, "CMIM_GENERATED_FILE")
 
     try:
         board.Remove(footprint_obj)
