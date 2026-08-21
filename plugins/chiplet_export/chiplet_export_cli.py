@@ -72,6 +72,23 @@ def _build_parser():
         help="Connection stack (e.g. cupillar_opt1/2/3, sbump_sac305). A "
              "cupillar stack auto-generates pillars from the die pads.",
     )
+    parser.add_argument(
+        "--insert-metal-fill", action="store_true",
+        help="Stamp metal density fill on the interposer GDS via the "
+             "interposer PDK engine. Needs the PDK fill work and the klayout "
+             "binary; off by default.",
+    )
+    parser.add_argument(
+        "--fill-mode", choices=("single-pass", "closure"), default="single-pass",
+        help="single-pass (fast, all four metals) or closure (M4/M5 "
+             "density-feedback, deck-verified). Ignored without "
+             "--insert-metal-fill.",
+    )
+    parser.add_argument(
+        "--nofill-regions", default="",
+        help="Sidecar JSON of no-fill keep-outs. Empty = auto-extract from the "
+             "board's NoMetFiller / <metal>.nofill layers.",
+    )
     return parser
 
 
@@ -98,6 +115,10 @@ def main(argv=None):
         connection_type=args.connection,
         interposer_adapter=args.interposer_adapter,
         interconnect_adapter=args.interconnect_adapter,
+        insert_metal_fill=args.insert_metal_fill,
+        fill_mode=args.fill_mode,
+        nofill_regions_json=(str(Path(args.nofill_regions).absolute())
+                             if args.nofill_regions else ""),
     )
 
     def on_log(line):
@@ -116,6 +137,10 @@ def main(argv=None):
     print("chiplet_path:        %s" % result.chiplet_path)
     print("interposer_gds_path: %s" % result.interposer_gds_path)
     print("complete_gds_path:   %s" % result.complete_gds_path)
+    if result.fill_density_report_path:
+        print("fill_density_report: %s" % result.fill_density_report_path)
+    if result.fill_coverage_path:
+        print("fill_coverage_path:  %s" % result.fill_coverage_path)
     print("%s" % describe_assembly_drc(result))
     if result.assembly_drc_report_path:
         print("assembly_drc_report: %s" % result.assembly_drc_report_path)

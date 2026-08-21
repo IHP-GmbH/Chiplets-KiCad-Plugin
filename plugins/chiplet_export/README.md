@@ -110,6 +110,9 @@ Tick what you additionally want produced:
   each chiplet boundary and instance label onto annotation layer
   `1000/0` for eyeball inspection in KLayout. No DRC rule reads this
   layer; the assembly contract stays in the `.boundaries.json` manifest.
+- *Insert metal density fill (interposer GDS)* (default OFF): stamp
+  floating dummy metal on the interposer BEOL to meet the IntM4TM2 CMP
+  density rules. See *Metal density fill* below.
 
 The Hyperlynx `.hyp` that drives the pipeline is always written to the
 output directory (next to the `.chiplet`), so other tools can consume the
@@ -136,6 +139,52 @@ Machine-readable sidecars land next to each generated GDS:
 
 Readers of both manifests exact-match the `version` string; producer and
 readers are bumped together.
+
+### Metal density fill
+
+Aluminium-BEOL interposers must meet a fab CMP-planarity density window, so
+each metal needs floating dummy fill. The fill is **not** generated in KiCad:
+KiCad copper zones are net-connected pours that land as real metal, and they
+cannot target the IntM4TM2 density bands. Instead the plugin invokes the
+interposer PDK's own fill engine (`fill_closure.fill_stack`) on the exported
+GDS, so the density rules live in one place (the PDK, checked against the same
+sign-off deck) and never diverge. The tiles are regenerated on every export;
+you do not hand-edit them.
+
+What you edit in KiCad are the two *inputs* the fill respects:
+
+- **Real metal** you draw becomes drawn metal in the GDS, and the fill keeps
+  clear of it automatically.
+- **No-fill (keep-out) regions**, drawn as graphic polygons (or keepout
+  zones) on dedicated **non-copper** layers. Never author a keep-out on a
+  copper layer: it would export as real metal through the `.hyp`. Rename user
+  layers to these names (case-sensitive):
+
+  | KiCad layer   | keeps fill out of |
+  |---------------|-------------------|
+  | `NoMetFiller` | all metals (global)|
+  | `M4.nofill`   | Metal4 only       |
+  | `M5.nofill`   | Metal5 only       |
+  | `TM1.nofill`  | TopMetal1 only    |
+  | `TM2.nofill`  | TopMetal2 only    |
+
+  These are read straight off the board into a sidecar and painted onto the
+  GDS keep-out datatypes (`160/0`, `<metal>/23`), which the PDK generators
+  already subtract. No layer means no keep-out; you can add them incrementally.
+
+Two modes: *Single pass (fast)* stamps every metal once; *Density closure*
+iterates Metal4/Metal5 against the sign-off density deck until in band
+(slower, and it runs the deck). Fill runs on the interposer GDS only (the
+complete assembly GDS is left unfilled). Requires an `INTERPOSER_PDK_ROOT`
+checkout that includes the fill engine, and the `klayout` binary on `PATH`
+(same dependency as the assembly DRC); without the binary the step soft-skips
+with a message rather than failing the export.
+
+Read-back: a per-metal density report lands at
+`reports/<board>_fill_density.json`, and a coarse coverage map
+(`layout/<board>_interposer.fill_coverage.json`) is painted onto a KiCad
+read-back layer (`FillCoverage` if that user layer exists, else `Dwgs.User`)
+for a canvas glance. The read-back is viewer-only; the GDS is the ground truth.
 
 ### PDK roots
 

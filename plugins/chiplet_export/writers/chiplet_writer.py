@@ -337,6 +337,110 @@ def write_cmim_devices_json(board, output_path, skipped=None):
     return len(devices)
 
 
+# No-fill (keep-out) authoring layers. The user draws graphic polygons or
+# rule-area/keepout zones on these dedicated NON-COPPER board layers to carve
+# out where metal density fill must not go; the worker paints them onto the
+# interposer GDS keep-out datatypes so the PDK fill generators skip them.
+#
+# Never author no-fill on a copper layer: a polygon on copper exports through
+# the .hyp as real drawn metal (it would become fill's opposite -- metal, not a
+# keep-out). Regions therefore travel by this sidecar, never through the .hyp.
+#
+# role -> GDS meaning is resolved worker-side (global -> NoMetFiller 160/0, all
+# metals; per-metal -> <metal>/23), keeping the GDS layer contract in one place
+# (hyp_to_gds.GDSGenerator).
+NOFILL_LAYER_ROLES = {
+    "NoMetFiller": "global",
+    "M4.nofill": "M4",
+    "M5.nofill": "M5",
+    "TM1.nofill": "TM1",
+    "TM2.nofill": "TM2",
+}
+NOFILL_SIDECAR_VERSION = 1
+
+
+def _iter_polyset_rings_um(poly_set):
+    """Yield each outline of a SHAPE_POLY_SET as a list of [x_um, y_um].
+
+    Y is negated for the GDS frame (KiCad Y-down -> GDS Y-up), same convention
+    as write_io_pads_json. Holes are ignored: a keep-out is a solid region, and
+    an inner hole would only shrink the area the fill must avoid.
+    """
+    for i in range(poly_set.OutlineCount()):
+        outl = poly_set.COutline(i)
+        ring = [[_iu_to_um(outl.CPoint(v).x), -_iu_to_um(outl.CPoint(v).y)]
+                for v in range(outl.PointCount())]
+        if len(ring) >= 3:
+            yield ring
+
+
+def write_nofill_regions_json(board, output_path):
+    """Extract no-fill (keep-out) regions from the dedicated board layers.
+
+    Reads graphic polygons/rectangles (PCB_SHAPE) and rule-area/keepout zones
+    drawn on the NOFILL_LAYER_ROLES layers into a sidecar JSON consumed by
+    hyp_to_gds.py --nofill-regions. Coordinates are micrometres with Y negated,
+    matching write_io_pads_json. The sidecar (not the .hyp) is the transport:
+    the .hyp carries only net-attached copper, so a keep-out could not ride it.
+
+    Returns the number of regions written (0 -> nothing written, no file).
+    """
+    import json
+
+    def _role(item):
+        try:
+            return NOFILL_LAYER_ROLES.get(board.GetLayerName(item.GetLayer()))
+        except Exception:
+            return None
+
+    regions = []
+
+    def _emit(role, rings):
+        for ring in rings:
+            regions.append({"role": role, "polygon_um": ring})
+
+    for item in list(board.GetDrawings()):
+        if not isinstance(item, pcbnew.PCB_SHAPE):
+            continue
+        role = _role(item)
+        if role is None:
+            continue
+        try:
+            shape = item.GetShape()
+        except Exception:
+            continue
+        if shape == pcbnew.SHAPE_T_POLYGON:
+            _emit(role, _iter_polyset_rings_um(item.GetPolyShape()))
+        elif shape == pcbnew.SHAPE_T_RECT:
+            a, b = item.GetStart(), item.GetEnd()
+            _emit(role, [[
+                [_iu_to_um(a.x), -_iu_to_um(a.y)],
+                [_iu_to_um(b.x), -_iu_to_um(a.y)],
+                [_iu_to_um(b.x), -_iu_to_um(b.y)],
+                [_iu_to_um(a.x), -_iu_to_um(b.y)],
+            ]])
+        # segment/arc/circle are not closed keep-out areas; skip them.
+
+    for zone in list(board.Zones()):
+        role = _role(zone)
+        if role is None:
+            continue
+        try:
+            outline = zone.Outline()
+        except Exception:
+            continue
+        _emit(role, _iter_polyset_rings_um(outline))
+
+    if not regions:
+        return 0
+
+    with open(output_path, "w") as f:
+        json.dump({"version": NOFILL_SIDECAR_VERSION, "regions": regions}, f,
+                  indent=2)
+
+    return len(regions)
+
+
 def write_die_pin_lists(board, out_dir):
     """Extract die footprint pads into per-die pin_list JSON sidecars.
 

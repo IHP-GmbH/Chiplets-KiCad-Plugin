@@ -219,6 +219,35 @@ class ChipletExportDialog(wx.Dialog):
             "boundary manifest. Off by default.")
         for cb in (self._cb_complete, self._cb_annotate):
             outs_box.Add(cb, 0, wx.ALL, 2)
+
+        self._cb_fill = wx.CheckBox(
+            panel, label="Insert metal density fill (interposer GDS)")
+        self._cb_fill.SetToolTip(
+            "Stamp floating dummy metal on Metal4/5 and TopMetal1/2 to meet the "
+            "IntM4TM2 CMP density rules, using the interposer PDK's own fill "
+            "engine. Draw keep-outs on the NoMetFiller / <metal>.nofill layers "
+            "and they are honored automatically. Needs the PDK fill work and "
+            "the KLayout binary on PATH. Off by default.")
+        outs_box.Add(self._cb_fill, 0, wx.ALL, 2)
+
+        fill_mode_row = wx.BoxSizer(wx.HORIZONTAL)
+        fill_mode_row.Add(_muted(panel, "Fill mode:"), 0,
+                          wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        self._fill_mode = wx.Choice(
+            panel, choices=["Single pass (fast)",
+                            "Density closure (iterative, M4/M5)"])
+        self._fill_mode.SetSelection(0)
+        self._fill_mode.Enable(False)
+        self._fill_mode.SetToolTip(
+            "Single pass stamps each metal once (all four metals). Density "
+            "closure iterates Metal4/Metal5 against the sign-off density deck "
+            "until in band; slower, and it needs the deck to run.")
+        fill_mode_row.Add(self._fill_mode, 0, wx.ALIGN_CENTER_VERTICAL, 0)
+        outs_box.Add(fill_mode_row, 0, wx.LEFT | wx.BOTTOM, 4)
+        self._cb_fill.Bind(
+            wx.EVT_CHECKBOX,
+            lambda _e: self._fill_mode.Enable(self._cb_fill.GetValue()))
+
         outer.Add(outs_box, 0, wx.EXPAND | wx.ALL, 8)
 
         # PDK roots: pre-filled with the discovery chain's result (env var ->
@@ -761,6 +790,9 @@ class ChipletExportDialog(wx.Dialog):
             output_dir=self._out_dir_ctrl.GetPath(),
             emit_complete_gds=self._cb_complete.GetValue(),
             annotate_boundaries=self._cb_annotate.GetValue(),
+            insert_metal_fill=self._cb_fill.GetValue(),
+            fill_mode=("closure" if self._fill_mode.GetSelection() == 1
+                       else "single-pass"),
             top_cell=self._top_cell_ctrl.GetValue() or "INTERPOSER",
             connection_type=conn,
             die_connections=die_conns,
@@ -907,6 +939,10 @@ class ChipletExportDialog(wx.Dialog):
                                 ("Hyperlynx (.hyp)", result.hyp_path)):
                 if path:
                     self._append_log("Wrote %s: %s" % (label, path))
+            if result.fill_density_report_path:
+                self._append_log("Fill density report: %s"
+                                 % result.fill_density_report_path)
+            self._paint_fill_coverage(result)
             verdict = describe_assembly_drc(result)
             self._append_log(verdict)
             if result.assembly_drc_report_path:
@@ -918,6 +954,30 @@ class ChipletExportDialog(wx.Dialog):
                 self._set_status("Done (exit 0)")
         else:
             self._set_status("Failed (exit %d)" % result.exit_code)
+
+    def _paint_fill_coverage(self, result):
+        """Paint the coarse fill-coverage map onto a KiCad read-back layer.
+
+        Best-effort and non-authoritative: a failure here never affects the
+        export outcome. Runs on the UI thread (pcbnew board edits are not
+        thread-safe), which is where _on_done already is.
+        """
+        if self._board is None or not result.fill_coverage_path:
+            return
+        try:
+            from .fill_readback import paint_fill_coverage
+            n = paint_fill_coverage(self._board, result.fill_coverage_path)
+        except Exception as exc:
+            self._append_log("Warning: could not paint fill coverage: %s" % exc)
+            return
+        if n:
+            try:
+                import pcbnew
+                pcbnew.Refresh()
+            except Exception:
+                pass
+            self._append_log("Fill coverage: painted %d cell(s) on the "
+                             "read-back layer" % n)
 
     # ------------------------------------------------------------------
     # Helpers

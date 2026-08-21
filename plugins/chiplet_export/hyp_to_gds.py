@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -1991,6 +1992,16 @@ class GDSGenerator:
     # is pre-migration and just needs regenerating.
     LEGACY_PRBOUNDARY_LAYERS = ((189, 0),)
 
+    # No-fill (metal density fill keep-out) targets. The user authors keep-outs
+    # on dedicated KiCad layers (writers/chiplet_writer.NOFILL_LAYER_ROLES); the
+    # role -> GDS mapping lives here, next to the rest of the GDS contract. The
+    # PDK fill generators already subtract 160/0 (global) and <metal>/23 from
+    # the fill region, so stamping these is all that is needed.
+    NOFILL_GLOBAL_LAYER = (160, 0)          # NoMetFiller: blanket keep-out
+    NOFILL_ROLE_TO_METAL = {"M4": "Metal4", "M5": "Metal5",
+                            "TM1": "TopMetal1", "TM2": "TopMetal2"}
+    NOFILL_DATATYPE = 23                     # <metal>/23 = per-metal nofill
+
     def add_board_outline(self, perimeter_segments: List[PerimeterSegment]) -> int:
         """Draw the board outline on prBoundary (235/0).
 
@@ -2055,6 +2066,56 @@ class GDSGenerator:
             poly = db.DSimplePolygon([db.DPoint(x, y) for (x, y) in pts])
             self.top_cell.shapes(layer_idx).insert(poly)
         return len(loops)
+
+    def _nofill_target(self, role: str) -> Optional[Tuple[int, int]]:
+        """(layer, datatype) for a no-fill role, or None if unmapped.
+
+        'global' -> NoMetFiller 160/0. Per-metal roles resolve to <metal>/23:
+        prefer the LYP's explicit ``<metal>.nofill`` purpose, and derive it from
+        the drawn-metal layer number when the LYP does not declare it, so a
+        metal rename in the PDK cannot silently drift the mapping.
+        """
+        if role == "global":
+            return self.NOFILL_GLOBAL_LAYER
+        metal = self.NOFILL_ROLE_TO_METAL.get(role)
+        if metal is None:
+            return None
+        try:
+            return self.layer_map.get_layer(metal, "nofill")
+        except KeyError:
+            pass
+        try:
+            num, _dt = self.layer_map.get_layer(metal)
+        except KeyError:
+            return None
+        return (num, self.NOFILL_DATATYPE)
+
+    def add_nofill_regions(self, records: List[Dict]) -> int:
+        """Paint KiCad-authored no-fill keep-outs onto the GDS keep-out layers.
+
+        role 'global' -> NoMetFiller 160/0 (all metals); per-metal roles ->
+        <metal>/23. Must be called before write() so the manufacturing-grid
+        snap normalizes the polygons alongside the drawn geometry.
+
+        Returns the number of polygons inserted.
+        """
+        n = 0
+        for rec in records or []:
+            role = rec.get("role")
+            ring = rec.get("polygon_um") or []
+            if len(ring) < 3:
+                continue
+            target = self._nofill_target(role)
+            if target is None:
+                print("Warning: no-fill region with unknown role %r skipped"
+                      % (role,), file=sys.stderr)
+                continue
+            layer_idx = self.layout.layer(*target)
+            poly = db.DSimplePolygon(
+                [db.DPoint(float(x), float(y)) for (x, y) in ring])
+            self.top_cell.shapes(layer_idx).insert(poly)
+            n += 1
+        return n
 
     def get_outline_bbox(self) -> Optional[Tuple[float, float, float, float]]:
         """Bbox of the drawn board outline (prBoundary 235/0), or None.
@@ -3804,6 +3865,176 @@ def _import_bump_mirror():
         return None
 
 
+def _import_fill_closure():
+    """Import the interposer PDK's metal-fill engine (fill_closure).
+
+    Resolved via _find_interposer_pdk_python() (same INTERPOSER_PDK_ROOT
+    discovery as bump_mirror). Returns the module, or None when the PDK is not
+    reachable OR the checkout predates the fill engine. A caller that was asked
+    to fill MUST treat None as a hard error, never a soft skip.
+    """
+    try:
+        python_dir = _find_interposer_pdk_python()
+        if python_dir is None:
+            print("Warning: interposer PDK not found (set INTERPOSER_PDK_ROOT "
+                  "or keep the sibling checkout).", file=sys.stderr)
+            return None
+        has_fc = (python_dir / "fill_closure.py").is_file()
+        has_fs = (python_dir / "fill_stack.py").is_file()
+        if not (has_fc or has_fs):
+            print("Warning: interposer PDK checkout has no fill engine "
+                  "(libs.tech/klayout/python/fill_closure.py); use a checkout "
+                  "that includes the metal-fill work.", file=sys.stderr)
+            return None
+        if str(python_dir) not in sys.path:
+            sys.path.insert(0, str(python_dir))
+        # fill_stack may ship as its own module or as an entry point added to
+        # fill_closure; accept either and return whichever exposes fill_stack.
+        mod = None
+        if has_fs:
+            try:
+                import fill_stack as mod
+            except Exception:
+                mod = None
+        if mod is None or not hasattr(mod, "fill_stack"):
+            import fill_closure as mod
+        return mod
+    except Exception as exc:
+        print("Warning: could not import the fill engine: %s" % exc,
+              file=sys.stderr)
+        return None
+
+
+def _filler_layers(layer_map) -> List[Tuple[int, int]]:
+    """(layer, datatype) of the four BEOL filler purposes, from the LYP.
+
+    Prefers the explicit ``<metal>.filler`` purpose, derives <metal>/22 from the
+    drawn-metal number when the LYP does not declare it. Used only to measure
+    coverage for the read-back map; the fill itself is the PDK engine's job.
+    """
+    out = []
+    for metal in ("Metal4", "Metal5", "TopMetal1", "TopMetal2"):
+        try:
+            out.append(layer_map.get_layer(metal, "filler"))
+            continue
+        except KeyError:
+            pass
+        try:
+            num, _dt = layer_map.get_layer(metal)
+            out.append((num, 22))
+        except KeyError:
+            pass
+    return out
+
+
+def _compute_fill_coverage(gds_path, filler_layers, cell_um=200.0):
+    """Coarse per-cell fill coverage over the prBoundary bbox, for the KiCad
+    read-back layer.
+
+    Returns {"cell_um": .., "grid": [{x_um,y_um,w_um,h_um,coverage}]} where
+    coverage is the fraction of the cell covered by any filler shape (union
+    across metals). Coarse by design -- a canvas glance, not the tiles.
+    Coordinates stay in the GDS frame (Y up); the KiCad painter negates Y.
+    """
+    ly = db.Layout()
+    ly.read(str(gds_path))
+    top = ly.top_cell()
+    dbu = ly.dbu
+
+    def reg(layer, dt):
+        li = ly.find_layer(layer, dt)
+        if li is None:
+            return db.Region()
+        return db.Region(top.begin_shapes_rec(li))
+
+    fill = db.Region()
+    for (lnum, dt) in filler_layers:
+        fill += reg(lnum, dt)
+    fill.merge()
+
+    prb = reg(*GDSGenerator.PRBOUNDARY_LAYER)
+    bb = prb.bbox() if not prb.is_empty() else top.bbox()
+    grid = []
+    if bb.empty() or fill.is_empty():
+        return {"cell_um": cell_um, "grid": grid}
+
+    step = max(1, int(round(cell_um / dbu)))
+    xi = bb.left
+    while xi < bb.right:
+        cx1 = min(xi + step, bb.right)
+        yi = bb.bottom
+        while yi < bb.top:
+            cy1 = min(yi + step, bb.top)
+            cell = db.Box(xi, yi, cx1, cy1)
+            area = cell.area()
+            if area > 0:
+                cov = (fill & db.Region(cell)).area()
+                if cov > 0:
+                    grid.append({
+                        "x_um": round(xi * dbu, 4),
+                        "y_um": round(yi * dbu, 4),
+                        "w_um": round((cx1 - xi) * dbu, 4),
+                        "h_um": round((cy1 - yi) * dbu, 4),
+                        "coverage": round(cov / float(area), 4),
+                    })
+            yi += step
+        xi += step
+    return {"cell_um": cell_um, "grid": grid}
+
+
+def _insert_metal_fill(gds_path, topcell, mode, filler_layers, log=print):
+    """Stamp PDK metal density fill onto `gds_path` in place.
+
+    Delegates the actual fill to the interposer PDK's engine
+    (fill_closure.fill_stack) -- the single source of truth for the density
+    rules -- and only locates it, calls it, and writes the read-back sidecars
+    (``<stem>.fill_density.json`` and ``<stem>.fill_coverage.json``). Returns
+    {"status": "ok"|"skipped"|"error", "report": .., "coverage": ..}.
+
+    The ``klayout`` binary is required (the engine shells out to it, exactly
+    like the assembly-DRC step); when it is absent we SOFT-SKIP with a clear
+    message rather than failing the whole export.
+    """
+    if shutil.which("klayout") is None:
+        log("Metal fill skipped: 'klayout' binary not on PATH (the fill engine "
+            "needs it, same as assembly DRC). Run the PDK filler in KLayout on "
+            "the exported GDS, or install the KLayout application.")
+        return {"status": "skipped", "report": None, "coverage": None}
+
+    fc = _import_fill_closure()
+    if fc is None or not hasattr(fc, "fill_stack"):
+        print("ERROR: --insert-metal-fill was requested but the interposer PDK "
+              "fill engine (fill_closure.fill_stack) is unavailable; see the "
+              "warning above.", file=sys.stderr)
+        return {"status": "error", "report": None, "coverage": None}
+
+    with tempfile.TemporaryDirectory() as td:
+        report = fc.fill_stack(gds_path, gds_path, topcell=topcell, mode=mode,
+                               workdir=td, log=log)
+
+    stem = str(Path(gds_path).with_suffix(""))
+    try:
+        with open(stem + ".fill_density.json", "w") as f:
+            json.dump(report if report is not None else {}, f, indent=2)
+        log("Fill density report: %s.fill_density.json" % stem)
+    except OSError as exc:
+        print("Warning: could not write fill density report: %s" % exc,
+              file=sys.stderr)
+
+    coverage = None
+    try:
+        coverage = _compute_fill_coverage(gds_path, filler_layers)
+        with open(stem + ".fill_coverage.json", "w") as f:
+            json.dump(coverage, f, indent=2)
+        log("Fill coverage map: %s.fill_coverage.json (%d cell(s))"
+            % (stem, len(coverage.get("grid", []))))
+    except Exception as exc:
+        print("Warning: could not compute fill coverage map: %s" % exc,
+              file=sys.stderr)
+
+    return {"status": "ok", "report": report, "coverage": coverage}
+
+
 def _parse_length_um(value) -> Optional[float]:
     """A sidecar w/l value -> micrometers, or None if unparseable.
 
@@ -3888,6 +4119,37 @@ def load_cmim_devices(cmim_devices_json: str) -> Optional[List[Dict]]:
     return devices
 
 
+def load_nofill_regions(nofill_regions_json: str) -> Optional[List[Dict]]:
+    """Read the no-fill regions sidecar (keep-outs authored in KiCad).
+
+    Returns the region list, [] when the file is well formed but declares no
+    regions, and None when it could not be read at all. The caller must treat
+    None as fatal: a keep-out the designer drew must never be silently dropped
+    (fill over probe pads or the seal ring is worse than a hard stop).
+    """
+    path = Path(nofill_regions_json)
+    if not path.exists():
+        print(f"Warning: no-fill regions file not found: {nofill_regions_json}",
+              file=sys.stderr)
+        return None
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        print(f"Warning: could not read no-fill regions file "
+              f"{nofill_regions_json}: {exc}", file=sys.stderr)
+        return None
+    if not isinstance(data, dict):
+        print(f"Warning: no-fill regions file {nofill_regions_json} is not a "
+              f"JSON object", file=sys.stderr)
+        return None
+    regions = data.get("regions", [])
+    if not regions:
+        print(f"  No regions found in {nofill_regions_json}")
+        return []
+    return regions
+
+
 def convert_hyp_to_gds(
     hyp_path: str,
     output_path: str,
@@ -3907,6 +4169,9 @@ def convert_hyp_to_gds(
     die_connections: Optional[Dict[str, str]] = None,
     die_thicknesses: Optional[Dict[str, float]] = None,
     grid_nm: int = MANUFACTURING_GRID_NM,
+    nofill_regions_json: Optional[str] = None,
+    insert_metal_fill: bool = False,
+    fill_mode: str = "single-pass",
 ) -> bool:
     """
     Main conversion function.
@@ -4079,6 +4344,23 @@ def convert_hyp_to_gds(
     else:
         print("No board perimeter in HYP; prBoundary not drawn (interposer "
               "dimensions fall back to the drawn-geometry bbox)")
+
+    # No-fill keep-outs authored in KiCad (writers/chiplet_writer): paint them
+    # onto the GDS keep-out datatypes BEFORE write() so the grid snap normalizes
+    # them and the PDK fill generators (which subtract 160/0 and <metal>/23)
+    # honor them. Requested-but-unreadable is fatal: a dropped keep-out would
+    # let fill land over probe pads or the seal ring.
+    if nofill_regions_json:
+        nofill_records = load_nofill_regions(nofill_regions_json)
+        if nofill_records is None:
+            print("\nERROR: --nofill-regions was given but the sidecar could "
+                  "not be read (see the warning above). Refusing to fill "
+                  "without the designer's keep-outs.", file=sys.stderr)
+            return False
+        n_nofill = generator.add_nofill_regions(nofill_records)
+        if n_nofill:
+            print("No-fill keep-outs: painted %d region(s) onto GDS keep-out "
+                  "layers" % n_nofill)
 
     # Add cu-pillar pads: prefer pre-generated GDS, fall back to inline generation
     if cupillar_gds_path:
@@ -4429,6 +4711,31 @@ def convert_hyp_to_gds(
     generator.write(output_path)
     print(f"Interposer GDS file written to: {output_path}")
 
+    # Metal density fill (PDK engine, on the interposer GDS in place). Runs
+    # after write() so it operates on the final drawn metal + keep-outs. The
+    # complete GDS below is intentionally left unfilled: it embeds chiplet dies
+    # on the same metal layers, which are not interposer metal for density.
+    if insert_metal_fill:
+        fill_result = _insert_metal_fill(
+            output_path, cell_name, fill_mode, _filler_layers(layer_map))
+        if fill_result["status"] == "error":
+            return False
+        report = fill_result.get("report") or {}
+        if isinstance(report, dict):
+            concerns = []
+            if report.get("converged") is False:
+                concerns.append("did not converge")
+            for key, val in report.items():
+                if isinstance(val, dict):
+                    if val.get("converged") is False:
+                        concerns.append("%s did not converge" % key)
+                    if val.get("state") in ("under", "over", "split"):
+                        concerns.append("%s %s" % (key, val["state"]))
+            if concerns:
+                print("Warning: metal fill density concern (%s); see the fill "
+                      "density report. The GDS may fail CMP density sign-off."
+                      % ", ".join(concerns), file=sys.stderr)
+
     # Early design-error signal (precursor of the assembly containment
     # rule): drawn geometry sticking out of the board outline. KiCad's own
     # DRC flags the off-board footprint at design time; this catches it
@@ -4679,6 +4986,33 @@ Examples:
         help="Sidecar JSON with cap_cmim footprint parameters for IntM4TM2 PCell placement."
     )
     parser.add_argument(
+        "--nofill-regions",
+        type=str,
+        metavar="JSON_FILE",
+        help="Sidecar JSON with no-fill (keep-out) polygons authored in KiCad "
+             "(produced by writers/chiplet_writer.write_nofill_regions_json). "
+             "Painted onto the GDS keep-out datatypes (160/0 global, <metal>/23 "
+             "per metal) so the PDK metal-fill generators skip them."
+    )
+    parser.add_argument(
+        "--insert-metal-fill",
+        action="store_true",
+        help="Stamp metal density fill onto the interposer GDS using the "
+             "interposer PDK's fill engine (fill_closure.fill_stack). Needs "
+             "INTERPOSER_PDK_ROOT with the fill work and the 'klayout' binary "
+             "on PATH (same as assembly DRC). Off by default; the complete GDS "
+             "is left unfilled."
+    )
+    parser.add_argument(
+        "--fill-mode",
+        choices=("single-pass", "closure"),
+        default="single-pass",
+        help="single-pass: stamp all four metals once (fast, default). "
+             "closure: density-feedback loop for M4/M5 (slower, verifies the "
+             "density band against the sign-off deck). Ignored without "
+             "--insert-metal-fill."
+    )
+    parser.add_argument(
         "--annotate-boundaries",
         action="store_true",
         help="Also paint each chiplet boundary (and instance label) onto a "
@@ -4716,7 +5050,7 @@ Examples:
     # relative paths pass through untouched.
     for _attr in ("hyp_file", "output", "lyp", "tech_json",
                   "complete_output", "update_chiplet_file",
-                  "cupillar_gds", "io_pads", "cmim_devices"):
+                  "cupillar_gds", "io_pads", "cmim_devices", "nofill_regions"):
         setattr(args, _attr, _expand_path_vars(getattr(args, _attr)))
 
     # Determine output path (interposer-only GDS)
@@ -4821,6 +5155,9 @@ Examples:
         die_thicknesses=die_thicknesses,
         cmim_devices_json=args.cmim_devices,
         grid_nm=args.grid_nm,
+        nofill_regions_json=args.nofill_regions,
+        insert_metal_fill=args.insert_metal_fill,
+        fill_mode=args.fill_mode,
     )
 
     return 0 if success else 1

@@ -147,6 +147,15 @@ class ExportOptions:
     lyp_override: str = ""             # empty = hyp_to_gds default (built-in IHP)
     io_pads_json: str = ""             # empty = auto-extract from board
     cmim_devices_json: str = ""        # empty = auto-extract from board
+    # No-fill (keep-out) regions authored in KiCad. Empty = auto-extract from
+    # the board's NoMetFiller / <metal>.nofill layers. Drives --nofill-regions.
+    nofill_regions_json: str = ""
+    # Metal density fill via the interposer PDK engine, stamped on the
+    # interposer GDS (opt-in; needs the PDK fill work + the klayout binary).
+    # fill_mode: "single-pass" (fast, all four metals) or "closure" (M4/M5
+    # density-feedback loop, deck-verified, slower).
+    insert_metal_fill: bool = False
+    fill_mode: str = "single-pass"
     cupillar_gds: str = ""             # non-empty = pre-generated GDS override
     worker_python_override: str = ""   # empty = use discovery chain
     # Assembly DRC against the ADK deck. Runs after hyp_to_gds when a
@@ -194,6 +203,12 @@ class ExportResult:
     interposer_gds_path: str = ""
     complete_gds_path: str = ""
     cupillar_drc_path: str = ""
+    # Metal-fill read-back. The density report (per-metal coverage/state) lands
+    # under reports/; the coarse coverage map (for the KiCad read-back layer)
+    # stays next to the interposer GDS under layout/. Both empty when fill was
+    # off or skipped.
+    fill_density_report_path: str = ""
+    fill_coverage_path: str = ""
     # ADK assembly DRC outcome. ``exit_code`` of -1 means the deck did
     # not run (disabled, no complete.gds, or runner not found).
     assembly_drc_exit_code: int = -1
@@ -867,6 +882,15 @@ def build_cli_args(hyp_to_gds_path: str,
     if options.annotate_boundaries:
         args += ["--annotate-boundaries"]
 
+    # Metal density fill on the interposer GDS (PDK engine). --fill-mode is
+    # inert without --insert-metal-fill, but pass it together for a legible argv.
+    if options.insert_metal_fill:
+        args += ["--insert-metal-fill", "--fill-mode", options.fill_mode]
+
+    # No-fill keep-outs authored in KiCad, carried by sidecar (not the .hyp).
+    if options.nofill_regions_json:
+        args += ["--nofill-regions", options.nofill_regions_json]
+
     if options.emit_chiplet:
         args += [
             "--update-chiplet-file",
@@ -965,6 +989,9 @@ def _write_outputs_manifest(output_dir, board_name):
         ("layout/%s_interposer.pillars.json" % board_name,
          "cu-pillar manifest for the interposer GDS (per-pillar geometry "
          "and connection method; present when a cu-pillar stack is used)"),
+        ("layout/%s_interposer.fill_coverage.json" % board_name,
+         "coarse metal-fill coverage map for the KiCad read-back layer "
+         "(present when metal fill is inserted)"),
         ("layout/%s_complete.gds" % board_name,
          "full assembly layout (interposer + dies)"),
         ("layout/%s_complete.boundaries.json" % board_name,
@@ -979,6 +1006,9 @@ def _write_outputs_manifest(output_dir, board_name):
          "ADK assembly DRC results (open in KLayout)"),
         ("reports/%s_cupillar_drc.json" % board_name,
          "cu-pillar connection DRC summary"),
+        ("reports/%s_fill_density.json" % board_name,
+         "metal-fill density report (per-metal coverage and deck state; "
+         "present when metal fill is inserted)"),
     ]
 
     def section(items):
@@ -1041,6 +1071,7 @@ def run_export(board, options, plugin_dir,
     from ..writers.chiplet_writer import (
         write_chiplet, write_io_pads_json,
         write_cmim_devices_json,
+        write_nofill_regions_json,
         write_die_pin_lists,
         read_die_connections, read_die_thicknesses, list_die_refs,
         _iu_to_um,
@@ -1154,6 +1185,22 @@ def run_export(board, options, plugin_dir,
             if n_io:
                 effective_io_pads = io_pads_auto
                 _log("Auto-extracted %d io_pad(s) from board" % n_io)
+
+        # Auto-extract no-fill (keep-out) regions from the board's dedicated
+        # NoMetFiller / <metal>.nofill layers so the worker carves them out of
+        # the metal fill. A non-empty options.nofill_regions_json overrides.
+        effective_nofill = options.nofill_regions_json
+        if not effective_nofill:
+            nofill_auto = os.path.join(tmpdir,
+                                       "%s_nofill_regions.json" % board_name)
+            try:
+                n_nofill = write_nofill_regions_json(board, nofill_auto)
+            except Exception as exc:
+                n_nofill = 0
+                _log("Warning: no-fill region extraction failed: %s" % exc)
+            if n_nofill:
+                effective_nofill = nofill_auto
+                _log("Auto-extracted %d no-fill region(s) from board" % n_nofill)
 
         # Auto-extract cap_cmim device metadata from the board so hyp_to_gds can
         # instantiate the real IntM4TM2 cmim PCell. A non-empty
@@ -1284,6 +1331,7 @@ def run_export(board, options, plugin_dir,
             options,
             io_pads_json=effective_io_pads,
             cmim_devices_json=effective_cmim_devices,
+            nofill_regions_json=effective_nofill,
             pad_locations=effective_pad_locs,
             die_connections=effective_die_conns,
             die_thicknesses=effective_die_thicks)
@@ -1349,6 +1397,34 @@ def run_export(board, options, plugin_dir,
                 _log("Warning: could not move cu-pillar DRC into reports/: %s"
                      % exc)
                 drc_report = cupillar_flat
+
+        # Metal-fill read-back sidecars (written by the worker next to the
+        # interposer GDS under layout/). The density report is a verdict, so it
+        # joins reports/; the coarse coverage map is layout-derived geometry the
+        # KiCad read-back layer consumes, so it stays in layout/.
+        fill_density_report = ""
+        fill_coverage = ""
+        if options.insert_metal_fill:
+            density_flat = layout_path(
+                options.output_dir,
+                "%s_interposer.fill_density.json" % board_name)
+            if os.path.exists(density_flat):
+                reports_dir = os.path.join(options.output_dir, "reports")
+                os.makedirs(reports_dir, exist_ok=True)
+                density_dst = os.path.join(
+                    reports_dir, "%s_fill_density.json" % board_name)
+                try:
+                    shutil.move(density_flat, density_dst)
+                    fill_density_report = density_dst
+                except OSError as exc:
+                    _log("Warning: could not move fill density report into "
+                         "reports/: %s" % exc)
+                    fill_density_report = density_flat
+            coverage_flat = layout_path(
+                options.output_dir,
+                "%s_interposer.fill_coverage.json" % board_name)
+            if os.path.exists(coverage_flat):
+                fill_coverage = coverage_flat
 
         # ADK assembly DRC over the complete.gds. The chiplet boundaries come
         # from the <complete>.boundaries.json manifest that hyp_to_gds wrote
@@ -1476,6 +1552,8 @@ def run_export(board, options, plugin_dir,
                 complete_gds_abs if options.emit_complete_gds else ""
             ),
             cupillar_drc_path=drc_report,
+            fill_density_report_path=fill_density_report,
+            fill_coverage_path=fill_coverage,
             assembly_drc_exit_code=assembly_drc_exit,
             assembly_drc_report_path=assembly_drc_report,
         )

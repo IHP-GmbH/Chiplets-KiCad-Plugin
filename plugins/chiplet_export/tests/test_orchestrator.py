@@ -77,7 +77,8 @@ def test_defaults_emit_canonical_chiplet_and_interposer(tmp_path):
     # run_export (board auto-extraction), not by the pure build_cli_args.
     for flag in ("-l", "--connection-type", "--io-pads",
                  "--cupillar-gds", "--pad-locations", "--annotate-boundaries",
-                 "--cmim-devices"
+                 "--cmim-devices", "--insert-metal-fill", "--fill-mode",
+                 "--nofill-regions"
                  ):
         assert flag not in args
 
@@ -101,6 +102,52 @@ def test_annotate_boundaries_toggle(tmp_path):
     opts.annotate_boundaries = True
     args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
     assert "--annotate-boundaries" in args
+
+
+def test_metal_fill_defaults():
+    opts = ExportOptions()
+    assert opts.insert_metal_fill is False
+    assert opts.fill_mode == "single-pass"
+    assert opts.nofill_regions_json == ""
+
+
+def test_metal_fill_off_by_default(tmp_path):
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, _opts(tmp_path))
+    assert "--insert-metal-fill" not in args
+    assert "--fill-mode" not in args
+
+
+def test_metal_fill_single_pass_toggle(tmp_path):
+    opts = _opts(tmp_path)
+    opts.insert_metal_fill = True
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
+    assert "--insert-metal-fill" in args
+    assert args[args.index("--fill-mode") + 1] == "single-pass"
+
+
+def test_metal_fill_closure_mode(tmp_path):
+    opts = _opts(tmp_path)
+    opts.insert_metal_fill = True
+    opts.fill_mode = "closure"
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
+    assert args[args.index("--fill-mode") + 1] == "closure"
+
+
+def test_fill_mode_inert_without_insert(tmp_path):
+    # A fill_mode set without insert_metal_fill must not leak the flag: the
+    # worker would otherwise receive a mode with nothing to apply it to.
+    opts = _opts(tmp_path)
+    opts.fill_mode = "closure"
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
+    assert "--insert-metal-fill" not in args
+    assert "--fill-mode" not in args
+
+
+def test_nofill_regions_flag(tmp_path):
+    opts = _opts(tmp_path)
+    opts.nofill_regions_json = "/tmp/demo_nofill.json"
+    args = build_cli_args(HYP_SCRIPT, HYP_INPUT, BOARD_NAME, opts)
+    assert args[args.index("--nofill-regions") + 1] == "/tmp/demo_nofill.json"
 
 
 def test_interposer_output_always_passed(tmp_path):
