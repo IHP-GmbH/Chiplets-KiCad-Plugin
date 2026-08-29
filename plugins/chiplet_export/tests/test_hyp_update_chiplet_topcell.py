@@ -22,7 +22,8 @@ import hyp_to_gds as h  # noqa: E402
 
 _CHIPLET = """\
 format_version: "1.0"
-name: t
+assembly:
+  name: t
 components:
   - id: interposer
     type: interposer

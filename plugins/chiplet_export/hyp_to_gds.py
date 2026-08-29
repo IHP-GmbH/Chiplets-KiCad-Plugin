@@ -29,6 +29,19 @@ except ImportError:
     sys.exit(1)
 
 
+def _vendored_cfio():
+    """Import the vendored ``chiplet_format_io`` (the single guarded read/write
+    path for ``.chiplet``). Kept lazy and path-robust so this worker script
+    resolves it whether run as ``python hyp_to_gds.py`` or imported. Fixes in the
+    reader belong upstream in chiplet-spec and come back as a re-vendor; do not
+    edit ``vendor/chiplet_format_io`` in place."""
+    vendor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor")
+    if vendor not in sys.path:
+        sys.path.insert(0, vendor)
+    import chiplet_format_io as cfio
+    return cfio
+
+
 # Chiplet mechanical boundaries are ADK assembly metadata, not fabrication
 # geometry. They are emitted to a <gds>.boundaries.json manifest (see
 # GDSGenerator._write_boundary_manifest) and live in NO PDK layer namespace,
@@ -3123,8 +3136,15 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                       file=sys.stderr)
 
     try:
-        with open(chiplet_file, 'r') as f:
-            data = yaml.safe_load(f)
+        # Guarded read (H-B): delegate to the vendored reference loader rather
+        # than a bare safe_load, so the tolerant format_version gate and the
+        # intermediate guard run here too. allow_intermediate=True because this
+        # IS the finalizer and its input still carries finalize_required. A
+        # ChipletFormatError (unsupported major / malformed) is caught by the
+        # broad `except Exception` below and converted to return False, which
+        # the caller maps to a nonzero exit (convert_hyp_to_gds -> main), so a
+        # refusal never reports success.
+        data = _vendored_cfio().load(str(chiplet_file), allow_intermediate=True)
 
         # Find and update the interposer component
         updated = False
@@ -3513,6 +3533,16 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
         if data.pop('_metadata', None) is not None:
             print("  Stripped _metadata.finalize_required marker "
                   "(file is now canonical)")
+
+        # Passthrough writer stamp (H-B crux): this finalizer re-emits the whole
+        # loaded dict (unknown top-level keys included), so the stamped
+        # format_version must describe the bytes written. check_format_version
+        # returns the normalized version -- preserving a same-major higher minor,
+        # normalizing an equal/lower/unquoted value to the supported string --
+        # and re-warns on a higher minor. It never stamps a higher-minor input
+        # DOWN to the baseline (which would forge a "1.0" label over 1.1 bytes).
+        data['format_version'] = _vendored_cfio().check_format_version(
+            data.get('format_version'))
 
         # Write back the updated file
         with open(chiplet_file, 'w') as f:
@@ -4796,8 +4826,14 @@ def convert_hyp_to_gds(
         if chiplet_file_path:
             import yaml
             try:
-                with open(chiplet_file_path) as f:
-                    chiplet_data = yaml.safe_load(f) or {}
+                # Guarded read (H-B): delegate to the vendored reference loader.
+                # allow_intermediate=True since the finalize step above already
+                # canonicalised the file. A ChipletFormatError (unsupported major
+                # / malformed) is deliberately NOT in the (OSError, yaml.YAMLError)
+                # handler below: this is an exporter, so bad input must reject
+                # (propagates to a nonzero exit), never warn-and-continue.
+                chiplet_data = _vendored_cfio().load(
+                    chiplet_file_path, allow_intermediate=True)
                 for comp in chiplet_data.get('components', []):
                     # The frame contract (coord_frame_contract.md 2.4) defines
                     # only face_up and flip_chip; an absent field means face_up.

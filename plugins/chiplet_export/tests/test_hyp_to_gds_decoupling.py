@@ -272,7 +272,8 @@ def test_default_lyp_resolves_canonical(monkeypatch):
 
 MIXED_CHIPLET = """\
 format_version: "1.0"
-name: mixed
+assembly:
+  name: mixed
 components:
   - id: interposer
     type: interposer
