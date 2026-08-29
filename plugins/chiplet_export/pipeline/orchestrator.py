@@ -137,6 +137,13 @@ class ExportOptions:
     # a toggle could only ever have thrown the result away. Neither has a
     # dialog control; emit_chiplet survives as a headless escape hatch.
     emit_chiplet: bool = True
+    # Override the H-A clobber guard's hand-edit tripwire. When the canonical
+    # .chiplet's exporter-owned content was hand-edited outside KiCad since the
+    # last export, the re-export aborts (the edit would be silently regenerated
+    # away); set force to overwrite it deliberately. Foreign blocks (flow:,
+    # netlist:) are always preserved regardless of this flag. Headless escape
+    # hatch, like emit_chiplet; no dialog control.
+    force: bool = False
     emit_complete_gds: bool = False
     # Viewer-only: paint each chiplet boundary onto an annotation GDS layer
     # (no DRC rule reads it). Drives hyp_to_gds --annotate-boundaries. Off by
@@ -1068,6 +1075,7 @@ def run_export(board, options, plugin_dir,
     import dataclasses
 
     from .runner import run_async
+    from . import chiplet_merge
     from ..writers.chiplet_writer import (
         write_chiplet, write_io_pads_json,
         write_cmim_devices_json,
@@ -1311,7 +1319,45 @@ def run_export(board, options, plugin_dir,
         # output dir now (hyp_to_gds --update-chiplet-file rewrites it in
         # place). Deferred from above so a validation failure leaves no
         # partial artifact.
+        #
+        # H-A clobber guard. write_chiplet regenerated the intermediate from
+        # board state only, so a straight copy2 over the canonical file would
+        # silently destroy any human/Studio-authored top-level block (flow:,
+        # netlist:) and any hand-edited position. Guard the door before the
+        # copy: (1) if the canonical file's exporter-owned content was
+        # hand-edited outside KiCad since the last export, abort rather than
+        # regenerate it away (unless forced) -- the copy alone could not be
+        # skipped safely because the worker rewrites the file in place via
+        # --update-chiplet-file; (2) carry the foreign blocks over into the
+        # staged intermediate so flow: stays EMBEDDED (FlowEngine reads it only
+        # from the embedded block) and survives the finalizer's round-trip.
         if options.emit_chiplet:
+            if chiplet_merge.foreign_hand_edit_detected(chiplet_final) \
+                    and not options.force:
+                return ExportResult(
+                    error=(
+                        "The canonical .chiplet has hand edits to "
+                        "exporter-owned content (e.g. a position) made outside "
+                        "KiCad since the last export; re-exporting would "
+                        "silently regenerate them away. Re-apply the change in "
+                        "KiCad, or re-run with force=True to overwrite. "
+                        "(flow:/netlist: blocks are preserved either way.)\n"
+                        "  File: %s" % chiplet_final
+                    ),
+                )
+            try:
+                carried = chiplet_merge.carry_over_foreign_blocks(
+                    chiplet_final, chiplet_intermediate)
+            except Exception as exc:
+                # A malformed canonical file must not crash the export; the
+                # worst case degrades to the pre-guard behaviour (no carry-over),
+                # loudly, instead of silently.
+                carried = []
+                _log("Warning: could not preserve foreign .chiplet blocks: %s"
+                     % exc)
+            if carried:
+                _log("Preserved hand-authored .chiplet block(s) across "
+                     "re-export: %s" % ", ".join(carried))
             shutil.copy2(chiplet_intermediate, chiplet_final)
 
         # The Hyperlynx netlist that drives hyp_to_gds is a first-class
@@ -1375,6 +1421,18 @@ def run_export(board, options, plugin_dir,
                      % unfinalized)
             except OSError as exc:
                 _log("Warning: could not retire the unfinalized .chiplet: %s"
+                     % exc)
+
+        # H-A clobber guard, second half: record the finalized file's
+        # exporter-content digest so the next re-export can tell a genuine
+        # hand edit (position touched outside KiCad) from a foreign-block edit
+        # (a pasted flow:) and from an unchanged file. Best-effort: a sidecar
+        # failure must never fail an otherwise good export.
+        if chiplet_ok:
+            try:
+                chiplet_merge.record_exporter_content_digest(chiplet_final)
+            except Exception as exc:
+                _log("Warning: could not record .chiplet content digest: %s"
                      % exc)
 
         # The worker writes <board>_cupillar_drc.json next to the interposer
