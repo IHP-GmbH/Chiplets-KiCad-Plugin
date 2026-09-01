@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""H-A clobber guard for the ``.chiplet`` waist.
+"""H-A clobber guard for the ``.chiplet`` waist -- pure stdlib, GUI-tier safe.
 
 Background (the real mechanism, see CHIPLET_FLOW_ROADMAP.md "Interop hardening"):
 ``write_chiplet`` regenerates the ``.chiplet`` from board state only. It never
@@ -12,42 +12,56 @@ silently. The finalizer (``hyp_to_gds --update-chiplet-file``) is load-modify-
 dump and round-trips foreign top-level keys, so it is NOT the destroying door;
 the ``copy2`` is.
 
-This module guards that door with two mechanisms, both routed through the shared
-reference loader ``chiplet_format_io`` (the confirmed single guarded read/write
-path), never through a new raw ``yaml.safe_load`` (which the Lane 2 raw-load lint
-forbids):
+Why this module is stdlib-only (no PyYAML, no ``chiplet_format_io``):
+``orchestrator.run_export`` -- and therefore this guard -- runs in KiCad's
+bundled Python, which by contract has NO PyYAML and NO klayout (discovery.py
+lines 4-7). The guard only needs top-level *block identity* -- which key owns
+which run of lines -- to carry a foreign block over verbatim and to hash the
+exporter-owned content. That is a pure-text operation, so it must not import
+``yaml`` or the vendored ``chiplet_format_io`` (which imports ``yaml``
+unconditionally); doing so crashes the very first export in the real GUI process
+at import time. ``chiplet_format_io`` remains the reference parser only where
+parsing actually happens -- the worker interpreter and ``hyp_to_gds.py`` -- both
+of which have PyYAML. The GUI tier parses no YAML at all.
 
-1. ``carry_over_foreign_blocks`` -- shallow top-level merge that copies the
-   exporter-*unowned* keys (``flow:``, ``netlist:``, any future hand-authored
-   block) from the existing canonical file into the freshly staged intermediate
-   BEFORE the copy. Because the finalizer round-trips them, ``flow:`` stays
-   EMBEDDED, which is exactly what Chiplet Studio's FlowEngine requires (it reads
-   ``flow:`` only from the embedded block).
+This module guards the ``copy2`` door with two mechanisms, both operating on raw
+top-level block TEXT:
+
+1. ``carry_over_foreign_blocks`` -- a shallow top-level merge that copies the
+   exporter-*unowned* top-level blocks (``flow:``, ``netlist:``, any future
+   hand-authored block) VERBATIM from the existing canonical file into the freshly
+   staged intermediate BEFORE the copy. Because the finalizer round-trips them,
+   ``flow:`` stays EMBEDDED, which is exactly what Chiplet Studio's FlowEngine
+   requires (it reads ``flow:`` only from the embedded block).
 
 2. An exporter-content digest tripwire. After a successful export the digest of
    the finalized file's exporter-*owned* content is recorded in a sidecar. On the
    next export, if that content no longer matches (a human hand-edited an
    exporter-owned field, e.g. a position, outside KiCad), the caller aborts the
-   re-export unless forced. Foreign-only edits (pasting ``flow:``) do NOT change
-   this digest, so the common hosting workflow never trips it.
+   re-export unless forced. Editing/adding a foreign block does NOT change this
+   digest, so the common hosting workflow never trips it. The digest sidecar has
+   no external consumer -- ``record`` and ``check`` only need to agree with each
+   other -- so a raw-text hash is sufficient and the finalizer's own round-trip
+   does not false-trip it (record and check run on the same on-disk bytes).
 
-Pure format logic: stdlib + the vendored ``chiplet_format_io`` (PyYAML only). It
-does not import ``pcbnew``, so it is unit-testable on a host Python without KiCad.
+Two accepted semantic deltas versus the previous YAML-parsing guard:
+  * A *formatting-only* edit inside an exporter-OWNED block now trips the wire.
+    Acceptable: it is an edit made to the canonical file outside KiCad, and
+    ``force=True`` bypasses the wire.
+  * A carried foreign block keeps the human's comments and formatting verbatim
+    until the finalizer's ``yaml`` round-trip normalizes it (the finalizer runs
+    in the worker tier, which has PyYAML).
+
+Stdlib only; it does not import ``pcbnew``, so it is unit-testable on a host
+Python without KiCad and it runs unchanged in the GUI tier without PyYAML.
 """
 
 from __future__ import annotations
 
+import collections
 import hashlib
-from typing import Any, Dict, List
-
-try:  # normal package import (pytest / KiCad both reach it this way)
-    from ..vendor import chiplet_format_io as cfio
-except ImportError:  # pragma: no cover - fallback for odd load contexts
-    import os
-    import sys
-    sys.path.insert(
-        0, os.path.join(os.path.dirname(__file__), os.pardir, "vendor"))
-    import chiplet_format_io as cfio  # type: ignore
+import re
+from typing import List
 
 
 #: Top-level keys the exporter pipeline owns and regenerates on every run
@@ -69,79 +83,138 @@ EXPORTER_OWNED_TOP_LEVEL_KEYS = frozenset({
 #: Sidecar suffix for the exporter-content digest tripwire.
 DIGEST_SIDECAR_SUFFIX = ".exportcontent.sha256"
 
+#: Bucket key for lines that precede the first top-level key (a leading comment
+#: or blank line). Neither owned nor foreign; never carried, never hashed.
+_PREAMBLE_KEY = ""
 
-def _load_permissive(path: str) -> Dict[str, Any]:
-    """Parse a ``.chiplet`` through the shared loader, permissively.
+#: A top-level key line: an unindented ``key:`` at column 0, optionally followed
+#: by whitespace and a value. This is exactly the block-style layout the
+#: finalizer (yaml.dump default) and writers/chiplet_writer emit -- top-level
+#: keys at column 0, nested content indented. A ``#`` comment or an indented
+#: line is not a key line and stays inside the current block.
+_KEY_LINE_RE = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.-]*):(?:\s.*)?$")
 
-    Validation is off and intermediates are allowed: the guard only needs the
-    top-level key set, and it must never abort an export just because the
-    on-disk file is an intermediate or fails a strict check. Routing through
-    ``cfio`` (not a bare ``yaml.safe_load``) keeps this a delegating consumer.
+
+def split_top_level_blocks(text: str) -> "collections.OrderedDict[str, str]":
+    """Split a ``.chiplet`` document into top-level blocks, insertion-ordered.
+
+    A line is a top-level key line iff it matches ``_KEY_LINE_RE`` at column 0
+    (no leading whitespace); ``group(1)`` is the key. That key line PLUS every
+    following line until the next column-0 key line forms the block, kept
+    VERBATIM (the key line, indented content, comments, blank lines, trailing
+    newlines all included). Lines before the first key go into the preamble
+    bucket under key ``""`` (neither owned nor foreign). A duplicate top-level
+    key concatenates its blocks. No YAML is parsed.
     """
-    data = cfio.load(path, allow_intermediate=True, validate=False)
-    if not isinstance(data, dict):
-        raise cfio.ChipletFormatError(
-            "top-level .chiplet document must be a mapping")
-    return data
+    blocks: "collections.OrderedDict[str, str]" = collections.OrderedDict()
+    current = _PREAMBLE_KEY
+    blocks[_PREAMBLE_KEY] = ""
+    for line in text.splitlines(keepends=True):
+        match = _KEY_LINE_RE.match(line)
+        if match:
+            current = match.group(1)
+            # A duplicate top-level key concatenates onto the first occurrence
+            # (which keeps its original insertion position).
+            blocks[current] = blocks.get(current, "") + line
+        else:
+            blocks[current] = blocks.get(current, "") + line
+    if not blocks[_PREAMBLE_KEY]:
+        del blocks[_PREAMBLE_KEY]
+    return blocks
 
 
-def foreign_top_level_keys(data: Dict[str, Any]) -> List[str]:
-    """Top-level keys of ``data`` the exporter does not own (insertion order)."""
-    return [k for k in data if k not in EXPORTER_OWNED_TOP_LEVEL_KEYS]
+def foreign_top_level_keys(blocks: "collections.OrderedDict[str, str]") -> List[str]:
+    """Top-level keys the exporter does not own, in insertion order.
+
+    Operates on the split-block dict. Excludes the exporter-owned keys and the
+    ``""`` preamble bucket.
+    """
+    return [k for k in blocks
+            if k != _PREAMBLE_KEY and k not in EXPORTER_OWNED_TOP_LEVEL_KEYS]
 
 
 def carry_over_foreign_blocks(existing_final: str, staged_intermediate: str) -> List[str]:
     """Merge exporter-unowned top-level blocks into the staged intermediate.
 
     Reads the existing canonical file (if any) and the freshly staged
-    intermediate, copies every exporter-unowned top-level key that the
-    intermediate does not already carry from the former into the latter, and
-    rewrites the intermediate in place through the shared writer. Returns the
-    list of keys carried over (empty when there is nothing to preserve, e.g. a
-    first export or a board with no ``flow:``/``netlist:``).
+    intermediate as UTF-8 text, splits both, and for every exporter-unowned
+    top-level key present in the existing file but absent from the staged file
+    APPENDS its block VERBATIM (existing-file order) to the staged text. Blocks
+    are separated by exactly one blank line, and the staged text is normalized to
+    a single trailing newline. Returns the list of keys carried over (empty when
+    there is nothing to preserve, e.g. a first export or a board with no
+    ``flow:``/``netlist:``).
 
-    Idempotent and non-destructive: exporter-owned content in the intermediate
-    is left untouched, so board state stays the source of truth for it.
+    Non-destructive: exporter-owned content in the staged file is never touched,
+    so board state stays the source of truth for it. A missing/empty existing
+    file returns ``[]``. The orchestrator wraps this call and degrades to the
+    pre-guard behaviour on any exception, so a malformed file never crashes an
+    export.
     """
     import os
     if not existing_final or not os.path.exists(existing_final):
         return []
 
-    existing = _load_permissive(existing_final)
-    foreign = foreign_top_level_keys(existing)
+    with open(existing_final, "r", encoding="utf-8") as fh:
+        existing_text = fh.read()
+    existing_blocks = split_top_level_blocks(existing_text)
+    foreign = foreign_top_level_keys(existing_blocks)
     if not foreign:
         return []
 
-    staged = _load_permissive(staged_intermediate)
-    carried: List[str] = []
-    for key in foreign:
-        if key in staged:
-            # The exporter already produced this key this run: its output wins.
-            continue
-        staged[key] = existing[key]
-        carried.append(key)
+    with open(staged_intermediate, "r", encoding="utf-8") as fh:
+        staged_text = fh.read()
+    staged_blocks = split_top_level_blocks(staged_text)
 
-    if carried:
-        # validate=False: the intermediate carries _metadata.finalize_required
-        # and may predate the tolerant reader; the guard must not gate on it.
-        cfio.dump(staged, staged_intermediate, validate=False)
+    carried = [key for key in foreign if key not in staged_blocks]
+    if not carried:
+        return []
+
+    # Each block is appended verbatim; trailing newlines are trimmed only so the
+    # blocks join with exactly one blank line between them.
+    pieces = [existing_blocks[key].rstrip("\n") for key in carried]
+    staged_text = staged_text.rstrip("\n") + "\n"      # single trailing newline
+    staged_text += "\n" + "\n\n".join(pieces) + "\n"   # blank line before/between
+    with open(staged_intermediate, "w", encoding="utf-8") as fh:
+        fh.write(staged_text)
     return carried
 
 
-def _exporter_owned_subset(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Exporter-owned top-level keys of ``data``, sorted for a stable digest."""
-    return {k: data[k] for k in sorted(data) if k in EXPORTER_OWNED_TOP_LEVEL_KEYS}
+def _owned_canonical(blocks: "collections.OrderedDict[str, str]") -> str:
+    """Deterministic canonical text of the exporter-owned blocks.
+
+    Owned blocks sorted by key; within each block every line is right-stripped
+    and trailing blank lines are dropped, so pure end-of-line/EOF whitespace
+    churn never changes the result. Formatting *inside* an owned block is
+    otherwise preserved, so a formatting-only owned edit does change it (an
+    accepted delta -- it is an out-of-KiCad edit and ``force`` bypasses).
+    """
+    parts = []
+    for key in sorted(k for k in blocks if k in EXPORTER_OWNED_TOP_LEVEL_KEYS):
+        lines = [ln.rstrip() for ln in blocks[key].splitlines()]
+        # Drop trailing blank AND full-line comment lines. A column-0 ``#``
+        # comment pasted just above a foreign block (e.g. above ``flow:``)
+        # attaches to the preceding owned block as its trailing line(s); dropping
+        # it keeps the promise that adding a foreign block never trips the wire.
+        # Comments carry no exporter-owned semantics (the finalizer drops them),
+        # and neither producer emits a literal block scalar where a trailing
+        # ``#`` line would be significant.
+        while lines and (lines[-1] == "" or lines[-1].lstrip().startswith("#")):
+            lines.pop()
+        parts.append("\n".join(lines))
+    return "\n".join(parts)
 
 
 def exporter_content_digest(path: str) -> str:
-    """SHA-256 of the file's exporter-owned content, canonicalized.
+    """SHA-256 of the file's exporter-owned content (see ``_owned_canonical``).
 
-    Independent of on-disk formatting and key order (the subset is re-serialized
-    with sorted keys), so it changes only when the *exporter-owned* content
-    changes, never when a foreign block such as ``flow:`` is added or edited.
+    Stable across identical on-disk bytes and independent of trailing whitespace
+    only. It changes when exporter-owned content changes and does NOT change when
+    a foreign block such as ``flow:`` is added or edited.
     """
-    data = _load_permissive(path)
-    canonical = cfio.dumps(_exporter_owned_subset(data), validate=False)
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    canonical = _owned_canonical(split_top_level_blocks(text))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -168,7 +241,9 @@ def foreign_hand_edit_detected(final_path: str) -> bool:
     Compares the current exporter-content digest against the sidecar recorded
     after the last successful export. False (no tripwire) when either the file or
     the sidecar is absent (a first export, or a checkout predating the guard):
-    the guard adds friction only when there is a recorded baseline to violate.
+    the guard adds friction only when there is a recorded baseline to violate. A
+    corrupt/undecodable canonical file makes ``exporter_content_digest`` raise;
+    that propagates so the caller can fail closed (orchestrator.py).
     """
     import os
     sidecar = digest_sidecar_path(final_path)
@@ -177,7 +252,10 @@ def foreign_hand_edit_detected(final_path: str) -> bool:
     try:
         with open(sidecar, "r", encoding="utf-8") as fh:
             recorded = fh.read().strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # The sidecar is our own best-effort artifact; an unreadable or corrupt
+        # one means we lost the baseline, so behave like "no baseline" (no trip)
+        # rather than fail closed on a file the user did not author.
         return False
     if not recorded:
         return False

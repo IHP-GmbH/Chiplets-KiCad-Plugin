@@ -1332,19 +1332,37 @@ def run_export(board, options, plugin_dir,
         # staged intermediate so flow: stays EMBEDDED (FlowEngine reads it only
         # from the embedded block) and survives the finalizer's round-trip.
         if options.emit_chiplet:
-            if chiplet_merge.foreign_hand_edit_detected(chiplet_final) \
-                    and not options.force:
-                return ExportResult(
-                    error=(
-                        "The canonical .chiplet has hand edits to "
-                        "exporter-owned content (e.g. a position) made outside "
-                        "KiCad since the last export; re-exporting would "
-                        "silently regenerate them away. Re-apply the change in "
-                        "KiCad, or re-run with force=True to overwrite. "
-                        "(flow:/netlist: blocks are preserved either way.)\n"
-                        "  File: %s" % chiplet_final
-                    ),
-                )
+            # force short-circuits the whole tripwire: it bypasses BOTH a tripped
+            # wire AND a corrupt/undecodable canonical file, because the
+            # detector below is never called when force is set. Guard the
+            # detector in try/except and FAIL CLOSED on a parse/decode error --
+            # a corrupt canonical must abort cleanly, naming the file, not crash
+            # the export thread.
+            if not options.force:
+                try:
+                    tripped = chiplet_merge.foreign_hand_edit_detected(
+                        chiplet_final)
+                except Exception as exc:
+                    return ExportResult(
+                        error=(
+                            "Could not verify the canonical .chiplet against "
+                            "the last export (%s); refusing to overwrite it. "
+                            "Fix or remove the file, or re-run with "
+                            "force=True.\n  File: %s" % (exc, chiplet_final)
+                        ),
+                    )
+                if tripped:
+                    return ExportResult(
+                        error=(
+                            "The canonical .chiplet has hand edits to "
+                            "exporter-owned content (e.g. a position) made "
+                            "outside KiCad since the last export; re-exporting "
+                            "would silently regenerate them away. Re-apply the "
+                            "change in KiCad, or re-run with force=True to "
+                            "overwrite. (flow:/netlist: blocks are preserved "
+                            "either way.)\n  File: %s" % chiplet_final
+                        ),
+                    )
             try:
                 carried = chiplet_merge.carry_over_foreign_blocks(
                     chiplet_final, chiplet_intermediate)
