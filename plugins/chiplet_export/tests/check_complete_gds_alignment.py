@@ -4,7 +4,7 @@
 check_complete_gds_alignment.py - KLayout-independent geometric check
 for the cu-pillar / die alignment in *_complete.gds files.
 
-Implements section 7.3 of chiplet-studio/docs/coord_frame_contract.md.
+Implements section 7.3 of chiplet-spec/docs/coord_frame_contract.md.
 The script reads the complete GDS produced by hyp_to_gds.py end-to-end
 and asserts the die's flipped-instance bbox overlaps the cu-pillar
 group bbox with a tight tolerance on the X centroid. The Y centroid

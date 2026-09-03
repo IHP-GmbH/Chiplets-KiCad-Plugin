@@ -8,7 +8,7 @@ with the `_metadata.finalize_required: true` block; the canonical
 file is produced downstream by hyp_to_gds.py --update-chiplet-file.
 
 Frame and anchor semantics follow
-chiplet-studio/docs/coord_frame_contract.md sections 1, 4.1, 4.4.
+chiplet-spec/docs/coord_frame_contract.md sections 1, 4.1, 4.4.
 """
 
 import math

@@ -35,7 +35,7 @@ Verification coverage:
   `CoordFrameContract*` gtests).
 - Live pcbnew smoke (interf_u demo) and chiplet-studio visual smoke.
 
-See `chiplet-studio/docs/coord_frame_contract.md` for the canonical
+See `chiplet-spec/docs/coord_frame_contract.md` for the canonical
 coordinate frame the writers must honour.
 
 ## License
@@ -437,7 +437,7 @@ assert result.exit_code == 0 and not result.error
 
 ## References
 
-- `chiplet-studio/docs/coord_frame_contract.md`: the canonical
+- `chiplet-spec/docs/coord_frame_contract.md`: the canonical
   coordinate frame the writers honour (GDS-bbox-corner, y-up, um) and
   the `_metadata.finalize_required` intermediate-frame marker.
 - `tests/README.md`: test layout, byte-exact parity, round-trip

@@ -3231,7 +3231,7 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     component['dimensions']['width'] = dim_w
                     component['dimensions']['height'] = dim_h
 
-                    # Per chiplet-studio/docs/coord_frame_contract.md
+                    # Per chiplet-spec/docs/coord_frame_contract.md
                     # section 1: position is the geometric center of
                     # the component in the canonical GDS-bbox-corner
                     # frame. The interposer's bbox center, expressed
@@ -3269,7 +3269,7 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     print(f"  attachment_surface_z={attachment_surface_z} um")
 
                 if io_pads is not None:
-                    # Per chiplet-studio/docs/coord_frame_contract.md
+                    # Per chiplet-spec/docs/coord_frame_contract.md
                     # sections 4.2 and 6.1: io_pads positions live in
                     # the same canonical GDS-bbox-corner frame as the
                     # interposer they nest under. The JSON producer
@@ -3411,7 +3411,7 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                 print(f"  {component.get('id')}: dimensions.thickness = "
                       f"{float(thickness)} um")
 
-            # Per chiplet-studio/docs/coord_frame_contract.md sections 2
+            # Per chiplet-spec/docs/coord_frame_contract.md sections 2
             # and 4.4: dies produced by the gds_to_kicad pipeline have
             # GDS (0,0) as the footprint anchor. The mesh is built
             # around that origin; position places it in the canonical
@@ -3526,7 +3526,7 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
 
         # Strip the intermediate-frame marker emitted by KiCad's
         # exporter (see kicad/pcbnew/exporters/export_chiplet.cpp).
-        # Per chiplet-studio/docs/coord_frame_contract.md section 4.1,
+        # Per chiplet-spec/docs/coord_frame_contract.md section 4.1,
         # this finalize step converts to the canonical frame; the
         # canonical .chiplet has no _metadata block. Pop is no-op when
         # the input was already finalized (idempotent re-run).
