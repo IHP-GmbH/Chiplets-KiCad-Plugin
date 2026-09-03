@@ -14,6 +14,7 @@ sibling-repo search, then imported.
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -94,6 +95,51 @@ def emit_interconnect_block(adapter):
     if not adapter:
         return ""
     return 'interconnect:\n  adapter: "%s"\n\n' % escape_yaml_dq(adapter)
+
+
+#: Every adapter id must match this. The registry contract fixes one regex for
+#: all three id namespaces; it forbids "/", "~", a leading "." or "-", ".." and
+#: "${...}" by construction, so it discriminates an id from a path for free:
+#: any real path fails it.
+#:
+#: The contract writes the anchor as "$", but in Python "$" also matches just
+#: BEFORE a trailing newline, so "intm4tm2\n" would pass and go straight into
+#: the emitted double-quoted scalar. "\Z" is the absolute end of the string and
+#: is the only anchor that holds here. Keeping it in the constant, rather than
+#: relying on callers to use fullmatch, means the value is safe no matter how
+#: it is applied.
+ADAPTER_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
+
+
+def validate_adapter_id(value, source):
+    """Fail closed on an adapter id that is not a well-formed id.
+
+    The producer-validates rule: a ``.chiplet`` is where these ids enter the
+    ecosystem, so the authoritative gate belongs at the producer, at emit, and
+    consumers resolve rather than re-validate. An empty value means "unset"
+    and is left to the caller's own default handling.
+
+    This is a shape check only, and deliberately independent of
+    :func:`validate_interconnect_ids`, which checks membership against the
+    interconnect PDK manifest and degrades to a warning when that manifest is
+    not discoverable. Shape must never degrade: on a host without the PDK the
+    membership check is skipped, and the regex is then the only thing standing
+    between a path-shaped text variable and the emitted document.
+
+    Call this during data gathering, never mid-write: the emit sites run
+    inside the open output file, so failing there would leave a partial
+    ``.chiplet`` on disk.
+
+    Raises:
+        ValueError naming the offending value and where it came from.
+    """
+    if not value:
+        return
+    if not ADAPTER_ID_RE.match(value):
+        raise ValueError(
+            "invalid adapter id %r (%s); an adapter is an id, never a path, "
+            "and must match %s" % (value, source, ADAPTER_ID_RE.pattern)
+        )
 
 
 def validate_interconnect_ids(adapter=None, die_methods=None):

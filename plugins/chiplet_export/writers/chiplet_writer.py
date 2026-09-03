@@ -20,6 +20,7 @@ import pcbnew
 from .connection_stacks import (
     emit_connection_stacks_block,
     emit_interconnect_block,
+    validate_adapter_id,
     validate_interconnect_ids,
 )
 from ._yaml import escape_yaml_dq, yaml_scalar
@@ -691,7 +692,24 @@ def write_chiplet(board, output_path):
     # Text-vars only, mirroring export_chiplet.cpp (GetTextVars()); a board
     # property must not shadow this or byte-exact parity breaks.
     interconnect_adapter = _lookup_text_var(board, "INTERCONNECT_ADAPTER")
+    # Shape first, then membership. validate_interconnect_ids degrades to a
+    # warning when the interconnect PDK is not discoverable, which would let a
+    # path-shaped value through unchecked on a host without the PDK; the regex
+    # gate never degrades.
+    validate_adapter_id(interconnect_adapter,
+                        "INTERCONNECT_ADAPTER text variable")
     validate_interconnect_ids(adapter=interconnect_adapter)
+
+    # Interposer adapter, emitted in the interposer: block further down. Read
+    # and validated HERE, during data gathering, and not at the emit site: the
+    # emit site runs inside the open output file, so failing there would leave
+    # a partial .chiplet on disk.
+    # Text-vars only, mirroring export_chiplet.cpp (GetTextVars()).
+    interposer_adapter = (
+        _lookup_text_var(board, "INTERPOSER_ADAPTER")
+        or "intm4tm2"
+    )
+    validate_adapter_id(interposer_adapter, "INTERPOSER_ADAPTER text variable")
 
     component_techs = {}
     components = []
@@ -783,12 +801,9 @@ def write_chiplet(board, output_path):
 
         # Interposer adapter. Declares which ADK PDK adapter the assembly
         # DRC should resolve when this design is checked. Override via
-        # Board Setup > Text Variables > INTERPOSER_ADAPTER.
-        # Text-vars only, mirroring export_chiplet.cpp (GetTextVars()).
-        interposer_adapter = (
-            _lookup_text_var(board, "INTERPOSER_ADAPTER")
-            or "intm4tm2"
-        )
+        # Board Setup > Text Variables > INTERPOSER_ADAPTER. Read and
+        # validated during data gathering above, so a malformed id fails the
+        # export before this file was ever opened.
         f.write("interposer:\n")
         f.write('  adapter: "%s"\n' % escape_yaml_dq(interposer_adapter))
         f.write("\n")

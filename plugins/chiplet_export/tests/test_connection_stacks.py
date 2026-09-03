@@ -20,9 +20,11 @@ if str(PLUGIN_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT.parent))
 
 from chiplet_export.writers.connection_stacks import (  # noqa: E402
+    ADAPTER_ID_RE,
     _manifest_reader,
     emit_connection_stacks_block,
     emit_interconnect_block,
+    validate_adapter_id,
     validate_interconnect_ids,
 )
 
@@ -137,3 +139,89 @@ def test_validate_warns_without_manifest(monkeypatch, capsys):
     connection_stacks.validate_interconnect_ids(adapter="anything")
     err = capsys.readouterr().err
     assert "skipping adapter/method validation" in err
+
+
+# ---------------------------------------------------------------------------
+# validate_adapter_id: the producer-validates gate.
+#
+# A .chiplet is where adapter ids enter the ecosystem, so the authoritative
+# check is at emit. These run without pcbnew and without the interconnect PDK,
+# deliberately: the shape gate must be exercised on a bare CI runner, which is
+# exactly where the membership check below it is skipped.
+# ---------------------------------------------------------------------------
+
+VALID_IDS = [
+    "intm4tm2",            # the interposer default
+    "ihp_cupillar",        # the three real interconnect adapters
+    "ihp_sbump",
+    "vendorx_microbump",
+    "a",                   # single char, minimal
+    "_leading_underscore",
+    "A1",
+    "with.dots",
+    "with-dashes",
+    "mixed_1.2-3",
+]
+
+# Every one of these is either a path, reaches for one, or is a substitution
+# token. The regex has to reject all of them without knowing what a path is.
+INVALID_IDS = [
+    "/etc/passwd",             # absolute path
+    "./local",                 # explicit relative
+    "../escape",               # traversal
+    "..",                      # bare traversal
+    "a/b",                     # any separator at all
+    "~/adapters/x",            # home expansion
+    "-leading-dash",           # leading dash
+    ".leading-dot",            # leading dot / hidden file
+    "${HOME}",                 # text-var substitution left unexpanded
+    "$HOME",
+    "has space",
+    "trailing\n",              # newline would break the YAML line
+    "quote\"break",            # would escape the emitted double-quoted scalar
+    "semi;colon",
+    "C:\\adapters\\x",         # windows path
+]
+
+
+@pytest.mark.parametrize("value", VALID_IDS)
+def test_validate_adapter_id_accepts_well_formed(value):
+    validate_adapter_id(value, "test")
+    assert ADAPTER_ID_RE.match(value)
+
+
+@pytest.mark.parametrize("value", INVALID_IDS)
+def test_validate_adapter_id_rejects_paths_and_junk(value):
+    with pytest.raises(ValueError) as exc:
+        validate_adapter_id(value, "INTERPOSER_ADAPTER text variable")
+    # The message has to name the offending value and where it came from,
+    # otherwise the user cannot find which text variable to fix.
+    assert repr(value) in str(exc.value)
+    assert "INTERPOSER_ADAPTER text variable" in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ["", None])
+def test_validate_adapter_id_treats_empty_as_unset(value):
+    """Empty means "not set"; defaulting is the caller's job, not ours."""
+    validate_adapter_id(value, "test")
+
+
+def test_shape_gate_still_fires_when_the_manifest_is_gone(monkeypatch):
+    """The hole this closes.
+
+    validate_interconnect_ids degrades to a warning when the interconnect PDK
+    is undiscoverable, so on a host without the PDK it waves everything
+    through. The shape gate must not degrade with it, or a path-shaped
+    INTERCONNECT_ADAPTER reaches the emitted document unchecked.
+    """
+    def _raise():
+        raise ImportError("interconnect_pdk reader not found")
+
+    monkeypatch.setattr(connection_stacks, "_manifest_reader", _raise)
+
+    # Membership check: degrades, accepts anything (existing behaviour).
+    connection_stacks.validate_interconnect_ids(adapter="/etc/passwd")
+
+    # Shape check: does not degrade.
+    with pytest.raises(ValueError):
+        validate_adapter_id("/etc/passwd", "INTERCONNECT_ADAPTER text variable")
