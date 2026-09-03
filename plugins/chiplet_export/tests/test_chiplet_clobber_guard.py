@@ -440,3 +440,84 @@ def test_orchestrator_branch_force_bypasses_tripped_wire(tmp_path):
     _write(final, _canonical_final(die_pos=(1.0, 2.0, 3.0)))  # owned hand-edit
     assert cm.foreign_hand_edit_detected(str(final)) is True   # would trip
     assert _emit_chiplet_guard_decision(str(final), force=True) is None
+
+
+# --- interconnect: is exporter-owned ---------------------------------------
+#
+# It was missing from EXPORTER_OWNED_TOP_LEVEL_KEYS while interposer: was
+# present, and that single omission was the difference between a closed leg and
+# an open one. The exporter does own it: the writer emits interconnect.adapter
+# and the finalizer regenerates the whole block, technology subblock included.
+
+_HOSTILE_INTERCONNECT = (
+    'interconnect:\n'
+    '  adapter: "rules/evil.drc"\n'
+)
+
+
+def test_interconnect_is_an_exporter_owned_key():
+    """Pinned as a property, not as a set literal, so this survives a rewrite
+    of the set for any other reason."""
+    assert "interconnect" in cm.EXPORTER_OWNED_TOP_LEVEL_KEYS
+    assert "interposer" in cm.EXPORTER_OWNED_TOP_LEVEL_KEYS
+
+
+def test_a_foreign_interconnect_block_is_not_adopted(tmp_path):
+    """The regression that closes the live path.
+
+    A .chiplet arriving with a downloaded project named the adapter, the merge
+    adopted the block verbatim into the freshly generated document, and the
+    orchestrator read it straight back out into run_drc's --interconnect-adapter,
+    which resolves to a .drc the assembly deck reads into the source it evals.
+    The staged file here has no interconnect: block at all, which is what the
+    writer produces whenever INTERCONNECT_ADAPTER is unset: the normal case, and
+    exactly the condition that made the block look foreign.
+    """
+    final = tmp_path / "demo.chiplet"
+    inter = tmp_path / "demo.intermediate.chiplet"
+    _write(final, _OWNED_HEAD + "\n" + _HOSTILE_INTERCONNECT + "\n" + FLOW_BLOCK)
+    _write(inter, _OWNED_HEAD)
+
+    carried = cm.carry_over_foreign_blocks(str(final), str(inter))
+
+    assert "interconnect" not in carried
+    staged_text = _read(inter)
+    assert "rules/evil.drc" not in staged_text
+    # flow: is still foreign and still carried: the freeze on it is unchanged,
+    # and this test would otherwise pass by breaking carry-over generally.
+    assert "flow" in carried
+    assert "flow:" in staged_text
+
+
+def test_clearing_the_text_var_can_now_remove_the_block(tmp_path):
+    """The plain correctness half, independent of any attacker.
+
+    While the block was foreign, a run that legitimately omitted it counted as
+    "the exporter did not write one" and a stale copy was carried back in. So
+    clearing INTERCONNECT_ADAPTER could never remove the interconnect axis from
+    the document; it was pinned there for good.
+    """
+    final = tmp_path / "demo.chiplet"
+    inter = tmp_path / "demo.intermediate.chiplet"
+    _write(final, _OWNED_HEAD + "\n"
+           + 'interconnect:\n  adapter: "ihp_cupillar"\n')
+    _write(inter, _OWNED_HEAD)
+
+    cm.carry_over_foreign_blocks(str(final), str(inter))
+
+    assert "ihp_cupillar" not in _read(inter)
+
+
+def test_an_owned_interconnect_edit_now_trips_the_tripwire(tmp_path):
+    """Consequence worth pinning: owned content is what the digest covers, so
+    a hand edit to interconnect: is now a tripwire event rather than a foreign
+    block sailing past it."""
+    final = tmp_path / "demo.chiplet"
+    _write(final, _OWNED_HEAD + "\n"
+           + 'interconnect:\n  adapter: "ihp_cupillar"\n')
+    cm.record_exporter_content_digest(str(final))
+    assert cm.foreign_hand_edit_detected(str(final)) is False
+
+    _write(final, _OWNED_HEAD + "\n"
+           + 'interconnect:\n  adapter: "vendorx_microbump"\n')
+    assert cm.foreign_hand_edit_detected(str(final)) is True

@@ -81,6 +81,14 @@ from typing import List
 #: point: when the exporter grows a new owned top-level key, add it here, or the
 #: guard would treat a run that legitimately omits it as a foreign block and
 #: carry a stale copy over.
+#:
+#: "Owned" does not mean one writer produces the whole block. ``interconnect:``
+#: has two, with different reach: the writer emits only ``adapter``, from the
+#: board text variable, while the ``technology`` subblock is derived from the
+#: interconnect PDK manifest and added later by the finalizer. A block can
+#: therefore be legitimately half-written at the moment this guard runs and
+#: still be fully owned. Judge ownership by what the pipeline REGENERATES over
+#: a whole run, not by what any single writer emits in one step.
 EXPORTER_OWNED_TOP_LEVEL_KEYS = frozenset({
     "format_version",
     "_metadata",
@@ -89,6 +97,21 @@ EXPORTER_OWNED_TOP_LEVEL_KEYS = frozenset({
     "technologies",
     "components",
     "stackup",
+    # Added late, and the comment above had already predicted the defect: the
+    # exporter grew this key (writer emits interconnect.adapter, finalizer
+    # regenerates the whole block including the derived technology subblock)
+    # and nobody added it here. So it counted as foreign and was carried over
+    # verbatim from the existing document, with two consequences.
+    #
+    # Clearing the INTERCONNECT_ADAPTER text variable could never remove the
+    # block, because a carried key is one the staged run legitimately omits.
+    #
+    # And the adapter is not inert data: it reaches run_drc as
+    # --interconnect-adapter, which resolves it to a .drc that the assembly
+    # deck reads into the source it evaluates. So a .chiplet arriving with a
+    # third-party project chose code that ran. `interposer` was never
+    # reachable that way for exactly one reason: it was already in this set.
+    "interconnect",
 })
 
 #: Sidecar suffix for the exporter-content digest tripwire.

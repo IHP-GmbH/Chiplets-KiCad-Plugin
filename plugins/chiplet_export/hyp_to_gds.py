@@ -3846,6 +3846,22 @@ def _maybe_set_interconnect_adapter(data):
         tech = _interconnect_technology_block(adapter)
         if tech:
             data["interconnect"]["technology"] = tech
+        else:
+            # Derived data we could not derive. The merge layer treats
+            # interconnect: as exporter-owned, so no older copy is carried
+            # forward any more and the document would otherwise go out quietly
+            # poorer: a consumer needing layer_properties to render the
+            # interconnect layers finds nothing to look at. Whatever this
+            # pipeline already put there is left alone; the point is that the
+            # gap is never silent. The two causes read very differently to a
+            # user, so name both rather than guessing which one happened.
+            print(
+                "  Warning: no technology metadata for interconnect adapter "
+                "'%s'. Either the interconnect PDK manifest is not readable "
+                "from here, or no method in it declares that adapter. The "
+                ".chiplet keeps the adapter but gains no "
+                "interconnect.technology block." % adapter
+            )
     return newly_set
 
 
