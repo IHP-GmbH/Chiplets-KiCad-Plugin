@@ -99,8 +99,13 @@ def emit_interconnect_block(adapter):
 
 #: Every adapter id must match this. The registry contract fixes one regex for
 #: all three id namespaces; it forbids "/", "~", a leading "." or "-", ".." and
-#: "${...}" by construction, so it discriminates an id from a path for free:
-#: any real path fails it.
+#: "${...}" by construction.
+#:
+#: What it does NOT do, despite how it is easy to read: it does not separate an
+#: id from a path. "intm4tm2.drc" matches, and so does any single-segment
+#: relative filename, which is a real path. What actually forbids paths is
+#: fail-closed lookup in a vetted set. Treat this as a shape check that rejects
+#: the obvious, never as the authority that decides what a value may name.
 #:
 #: The contract writes the anchor as "$", but in Python "$" also matches just
 #: BEFORE a trailing newline, so "intm4tm2\n" would pass and go straight into
@@ -108,16 +113,35 @@ def emit_interconnect_block(adapter):
 #: is the only anchor that holds here. Keeping it in the constant, rather than
 #: relying on callers to use fullmatch, means the value is safe no matter how
 #: it is applied.
+#:
+#: An anchor is only safe within one dialect: "\Z" does not exist in ECMA-262,
+#: so this pattern would mean something different to a JS or JSON-schema
+#: validator than it does here, both looking correct against the same contract
+#: text. That is worse than being wrong in one direction. This constant is read
+#: only by Python today; if it is ever mirrored into a schema, express it in the
+#: portable form (chiplet-spec uses "(?![\s\S])") rather than porting "\Z".
 ADAPTER_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
 
 
 def validate_adapter_id(value, source):
     """Fail closed on an adapter id that is not a well-formed id.
 
-    The producer-validates rule: a ``.chiplet`` is where these ids enter the
-    ecosystem, so the authoritative gate belongs at the producer, at emit, and
-    consumers resolve rather than re-validate. An empty value means "unset"
-    and is left to the caller's own default handling.
+    Validating here, at emit, is NOT a security boundary and must not be read
+    as one: the producer of a hostile document is the attacker, so a document
+    that never passed through this writer never met this check. What it buys
+    is a good error naming the text variable the user has to fix, and it keeps
+    this writer from originating a malformed id itself.
+
+    The authoritative gate is at LOAD. Every consumer that reads an id out of
+    a document validates it there and resolves fail-closed, and that includes
+    this plugin reading back a ``.chiplet`` it did not write. An earlier
+    version of this docstring said the opposite, that the gate was at the
+    producer and consumers should resolve rather than re-validate; that rule
+    is superseded, and it is worth knowing it was superseded because two
+    careful implementers in two repos followed it into the same open read leg.
+
+    An empty value means "unset" and is left to the caller's own default
+    handling.
 
     This is a shape check only, and deliberately independent of
     :func:`validate_interconnect_ids`, which checks membership against the
