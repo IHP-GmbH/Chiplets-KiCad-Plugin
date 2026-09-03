@@ -295,6 +295,40 @@ def _read_adapter_from_block(chiplet_path: str, block_name: str,
     return default
 
 
+def adapter_id_rejection(effective_interposer: str,
+                         effective_interconnect: str,
+                         options, chiplet_path: str) -> str:
+    """First adapter-id rejection across both axes, or ``""`` if both pass.
+
+    Takes the values AFTER the override/document ``or`` has resolved, because
+    that is the point where the two sources converge. A CLI override wins over
+    the document, so checking the document leg alone would sit behind an
+    unvalidated override, and checking the override alone would miss the
+    document. Both end up in run_drc's ``--interposer-adapter`` /
+    ``--interconnect-adapter``, which accept an arbitrary ``.drc`` path that
+    the assembly deck reads into the source it evaluates.
+
+    The returned message names the value AND which of the two sources it came
+    from, since "fix your adapter" is useless when the user cannot tell
+    whether to edit a command line or a document.
+    """
+    from ..writers.connection_stacks import validate_adapter_id
+
+    for value, source in (
+        (effective_interposer,
+         "--interposer-adapter override" if options.interposer_adapter
+         else "interposer.adapter in %s" % chiplet_path),
+        (effective_interconnect,
+         "--interconnect-adapter override" if options.interconnect_adapter
+         else "interconnect.adapter in %s" % chiplet_path),
+    ):
+        try:
+            validate_adapter_id(value, source)
+        except ValueError as exc:
+            return str(exc)
+    return ""
+
+
 def load_interposer_adapter(chiplet_path: str) -> str:
     """Return the interposer adapter declared in a ``.chiplet`` YAML file.
 
@@ -1533,26 +1567,46 @@ def run_export(board, options, plugin_dir,
             except AdkRunnerNotFoundError as exc:
                 _log("Assembly DRC skipped: %s" % exc)
                 adk_runner = ""
-            if adk_runner:
-                # The DRC's interposer/interconnect adapters and per-method IXN
-                # scoping come from the .chiplet's declared fields. chiplet_final
-                # exists only when emit_chiplet is set; otherwise read the
-                # intermediate (still in tmpdir, carrying the same adapters and
-                # per-die connections) so the DRC honours the design's real
-                # adapters instead of silently defaulting to intm4tm2.
-                chiplet_for_drc = (
-                    chiplet_final
-                    if options.emit_chiplet and os.path.exists(chiplet_final)
-                    else chiplet_intermediate
-                )
-                effective_adapter = (
-                    options.interposer_adapter
-                    or load_interposer_adapter(chiplet_for_drc)
-                )
-                effective_interconnect = (
-                    options.interconnect_adapter
-                    or load_interconnect_adapter(chiplet_for_drc)
-                )
+            # The DRC's interposer/interconnect adapters and per-method IXN
+            # scoping come from the .chiplet's declared fields. chiplet_final
+            # exists only when emit_chiplet is set; otherwise read the
+            # intermediate (still in tmpdir, carrying the same adapters and
+            # per-die connections) so the DRC honours the design's real
+            # adapters instead of silently defaulting to intm4tm2.
+            chiplet_for_drc = (
+                chiplet_final
+                if options.emit_chiplet and os.path.exists(chiplet_final)
+                else chiplet_intermediate
+            )
+            effective_adapter = (
+                options.interposer_adapter
+                or load_interposer_adapter(chiplet_for_drc)
+            )
+            effective_interconnect = (
+                options.interconnect_adapter
+                or load_interconnect_adapter(chiplet_for_drc)
+            )
+            # Validate where the two sources CONVERGE, not on either one. A CLI
+            # override wins over the document through the `or` above, so a check
+            # on the document leg alone would sit behind an unvalidated
+            # override, and a check on the override alone would miss the
+            # document. Both end up in run_drc's --interposer-adapter /
+            # --interconnect-adapter, which accept an arbitrary .drc path that
+            # the assembly deck reads into the source it evaluates. An adapter
+            # is an id here; a value that is not one never reaches that.
+            adapter_rejected = adapter_id_rejection(
+                effective_adapter, effective_interconnect,
+                options, chiplet_for_drc)
+            if adapter_rejected:
+                # Deliberately NOT the "Assembly DRC skipped" path above. That
+                # one means klayout is absent, is benign, and leaves the DRC
+                # NOT RUN (-1). This is a refusal and must not share an exit
+                # path with a benign skip, or it reads as an environment note:
+                # it gets a failing exit of its own (1, bad input), so the
+                # summary says FAILED and --require-drc fails on it.
+                _log("Assembly DRC REFUSED: %s" % adapter_rejected)
+                assembly_drc_exit = 1
+            if adk_runner and not adapter_rejected:
                 # Per-method IXN refinement: derive {method -> dies} from the
                 # .chiplet's per-die connections + the interconnect PDK
                 # manifest, written as a sidecar next to the complete GDS

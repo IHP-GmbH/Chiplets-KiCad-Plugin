@@ -24,6 +24,7 @@ from chiplet_export.pipeline.orchestrator import (  # noqa: E402
     DEFAULT_INTERCONNECT_ADAPTER,
     DEPENDENCY_ROOT_MARKERS,
     ExportOptions, ExportResult, describe_assembly_drc,
+    adapter_id_rejection,
     build_adk_drc_argv, build_cli_args, build_worker_env,
     load_interposer_adapter, load_interconnect_adapter,
     available_connection_types, discover_dependency_root,
@@ -922,3 +923,104 @@ def test_open_run_log_no_clobber_same_second(tmp_path):
         for fh in (fh1, fh2):
             if fh is not None:
                 fh.close()
+
+
+# ---------------------------------------------------------------------------
+# adapter_id_rejection: the DRC consumption gate.
+#
+# The adapter names a .drc that the assembly deck reads into the source it
+# evaluates, so it is an id and never a path. The point of these tests is the
+# CONVERGENCE: a CLI override wins over the document, so a gate on either leg
+# alone is bypassable through the other.
+# ---------------------------------------------------------------------------
+
+# Shaped like the values that actually reach the DRC: a planted deck beside a
+# downloaded project, an escape out of the vetted adapter directory, an
+# absolute path, and an unexpanded substitution.
+HOSTILE_ADAPTERS = [
+    "rules/evil.drc",
+    "../interconnect/ihp_cupillar",
+    "/tmp/evil.drc",
+    "${INTERCONNECT_PDK_ROOT}/x.drc",
+]
+
+
+def test_adapter_rejection_passes_clean_ids():
+    opts = ExportOptions()
+    assert adapter_id_rejection(
+        "intm4tm2", "ihp_cupillar", opts, "/w/b.chiplet") == ""
+
+
+def test_adapter_rejection_allows_empty_interconnect():
+    """No interconnect axis is the common case and must not be a refusal."""
+    opts = ExportOptions()
+    assert adapter_id_rejection("intm4tm2", "", opts, "/w/b.chiplet") == ""
+
+
+@pytest.mark.parametrize("value", HOSTILE_ADAPTERS)
+def test_adapter_rejection_catches_the_document_interconnect_leg(value):
+    """The leg that is live today: interconnect is not an exporter-owned
+    top-level key, so a foreign block is carried into the freshly generated
+    document and read back from it."""
+    opts = ExportOptions()
+    msg = adapter_id_rejection("intm4tm2", value, opts, "/w/b.chiplet")
+    assert msg
+    assert repr(value) in msg
+    # Names the document, so the user knows to edit a file and not a flag.
+    assert "interconnect.adapter in /w/b.chiplet" in msg
+
+
+@pytest.mark.parametrize("value", HOSTILE_ADAPTERS)
+def test_adapter_rejection_catches_the_document_interposer_leg(value):
+    opts = ExportOptions()
+    msg = adapter_id_rejection(value, "", opts, "/w/b.chiplet")
+    assert msg
+    assert "interposer.adapter in /w/b.chiplet" in msg
+
+
+@pytest.mark.parametrize("value", HOSTILE_ADAPTERS)
+def test_adapter_rejection_catches_the_cli_override_leg(value):
+    """A gate on the document leg alone would sit behind this: the override
+    wins through the `or`, so it never reads the document at all."""
+    opts = ExportOptions(interposer_adapter=value)
+    msg = adapter_id_rejection(value, "", opts, "/w/b.chiplet")
+    assert msg
+    # Blames the flag, not the file, because the file is not what is wrong.
+    assert "--interposer-adapter override" in msg
+    assert "/w/b.chiplet" not in msg
+
+
+@pytest.mark.parametrize("value", HOSTILE_ADAPTERS)
+def test_adapter_rejection_catches_the_interconnect_override_leg(value):
+    opts = ExportOptions(interconnect_adapter=value)
+    msg = adapter_id_rejection("intm4tm2", value, opts, "/w/b.chiplet")
+    assert msg
+    assert "--interconnect-adapter override" in msg
+
+
+def test_a_clean_override_over_a_hostile_document_is_accepted():
+    """The override wins, so the document value never reaches the DRC and is
+    not what we are judging. Pins that we gate the EFFECTIVE value rather
+    than every value we happened to read."""
+    opts = ExportOptions(interconnect_adapter="ihp_cupillar")
+    assert adapter_id_rejection(
+        "intm4tm2", "ihp_cupillar", opts, "/w/b.chiplet") == ""
+
+
+def test_interposer_is_reported_before_interconnect():
+    """Deterministic message when both are bad, so the log is stable."""
+    opts = ExportOptions()
+    msg = adapter_id_rejection("/a.drc", "/b.drc", opts, "/w/b.chiplet")
+    assert "'/a.drc'" in msg and "'/b.drc'" not in msg
+
+
+def test_a_refused_adapter_is_not_reportable_as_a_skip():
+    """A refusal must not share an exit path with the benign "klayout absent"
+    skip. That skip leaves the DRC NOT RUN (-1); the refusal uses 1, so the
+    verdict line says FAILED and cannot be read as an environment note."""
+    refused = describe_assembly_drc(ExportResult(assembly_drc_exit_code=1))
+    skipped = describe_assembly_drc(ExportResult(assembly_drc_exit_code=-1))
+    passed = describe_assembly_drc(ExportResult(assembly_drc_exit_code=0))
+    assert refused == "assembly DRC: FAILED (exit 1)"
+    assert skipped == "assembly DRC: NOT RUN"
+    assert refused != skipped and refused != passed
