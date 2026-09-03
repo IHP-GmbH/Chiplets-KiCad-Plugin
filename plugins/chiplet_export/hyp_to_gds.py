@@ -16,6 +16,7 @@ import re
 import shutil
 import sys
 import tempfile
+import warnings
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -3003,16 +3004,70 @@ def _connection_stack_from_manifest(method_id: str):
     }
 
 
+#: A refusal recorded while the argparse parser was being built, reported later
+#: by _report_deferred_source_refusal. Not a cache: it exists because the read
+#: happens before argv is parsed, so there is nowhere to report it yet.
+_DEFERRED_SOURCE_REFUSAL = None
+
+
 def _connection_type_cli_choices():
     """CLI choices for --connection-type from the manifest (all methods).
 
     Returns None (argparse accepts any value) when the manifest is unavailable,
     so --help still works without the interconnect PDK installed.
+
+    This is the FIRST manifest read in the process: it runs while the parser is
+    being built, before a single argument is parsed. That makes it the wrong
+    place to report anything and the wrong place to die. Before this change an
+    unusable manifest killed the worker right here with a raw traceback and
+    zero bytes of help output, so a user with a version-rejecting PDK could not
+    even run --help to find out about INTERCONNECT_PDK_ROOT, and no later
+    handler could ever report the refusal. It also made the fix at the
+    technology-block site unreachable in a CLI run, which would have been a
+    green that proves nothing.
+
+    So the refusal is RECORDED and re-raised at the boundary once argv exists.
+    It is not simply swallowed and re-read there: the version WARNING dedups
+    per process inside the reader, so a second read of the same manifest can
+    come back clean and the refusal would evaporate. Whoever reads first owns
+    the report.
     """
-    im = _import_interconnect_manifest()
-    if im is None:
+    global _DEFERRED_SOURCE_REFUSAL
+    try:
+        im = _import_interconnect_manifest()
+        if im is None:
+            return None
+        return im.list_methods()
+    except FileNotFoundError:
+        return None  # PDK dir present, manifest not: same as not installed
+    except SourceRefused as exc:
+        _DEFERRED_SOURCE_REFUSAL = exc
         return None
-    return im.list_methods()
+    except Exception as exc:
+        _DEFERRED_SOURCE_REFUSAL = SourceRefused(
+            "the interconnect PDK manifest is present but unusable (%s: %s)"
+            % (type(exc).__name__, exc),
+            exit_code=_source_refusal_exit_code(exc),
+        )
+        return None
+
+
+def _report_deferred_source_refusal():
+    """Exit with the shared table's code if the manifest read at parser-build refused.
+
+    Called immediately after parse_args, so --help has already had its chance
+    to print and no artifact exists yet. Reporting here rather than at the read
+    is what makes the refusal a refusal instead of a traceback.
+    """
+    exc = _DEFERRED_SOURCE_REFUSAL
+    if exc is None:
+        return
+    print("Error: %s" % exc, file=sys.stderr)
+    print("  Refusing to export: a cross-repo source is present and cannot be "
+          "used. No artifact was written. Align the interconnect PDK with the "
+          "plugin, or unset INTERCONNECT_PDK_ROOT to run without it.",
+          file=sys.stderr)
+    sys.exit(exc.exit_code)
 
 
 def _probe_outline_layers(gds_path: str,
@@ -3551,9 +3606,32 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
         print(f"Chiplet file updated: {chiplet_path}")
         return True
 
+    except SourceRefused:
+        # A refusal must reach the boundary as itself. This handler's job is to
+        # turn ordinary failures into a False that the caller maps to exit 1,
+        # which means bad CALLER input -- the wrong thing to tell someone whose
+        # PDK is misaligned, because no argument they can change fixes it.
+        raise
     except Exception as e:
+        if _is_manifest_version_error(e):
+            # Raised raw by _connection_to_adapter and _connection_to_body_
+            # diameter, which catch only (KeyError, FileNotFoundError). Without
+            # this arm the same refusal would leave this one function as exit 6
+            # through one helper and exit 1 through another.
+            raise SourceRefused(str(e), exit_code=EXIT_SOURCE_VERSION) from e
         print(f"Error updating chiplet file: {e}", file=sys.stderr)
         return False
+
+
+def _is_manifest_version_error(exc):
+    """True if ``exc`` is the interconnect reader's version refusal.
+
+    Reads the module off ``sys.modules`` so a failure-reporting path never
+    triggers an import, a diagnostic, or a refusal of its own.
+    """
+    im = sys.modules.get("interconnect_manifest")
+    version_cls = _manifest_class(im, "ManifestVersionError") if im else ()
+    return bool(version_cls) and isinstance(exc, version_cls)
 
 
 # Ecosystem-root variables accepted inside path inputs (board text vars,
@@ -3698,6 +3776,81 @@ def _read_gds_top_cell(gds_path: str) -> Optional[str]:
 _INTERCONNECT_PY = ("libs.tech", "klayout", "python")
 
 
+#: Exit codes from the ecosystem's shared table (interposer-pnr's README and
+#: cli.py; adk-tools maps its registry errors to the same two). Only the two
+#: this module can produce are named here; the worker's total exit-code mapping
+#: is a separate row and this constant is not it.
+EXIT_SOURCE_UNREACHABLE = 5   # a cross-repo source is present but unusable
+EXIT_SOURCE_VERSION = 6       # a source declares a major this code must not read
+
+
+class SourceRefused(Exception):
+    """A cross-repo source is present and cannot be used. Never a soft path.
+
+    Deliberately subclasses plain ``Exception`` and NOT ``ValueError``,
+    ``KeyError`` or ``OSError``. Every one of those is a lookup-shaped type
+    that some handler between here and the process boundary already catches to
+    mean "not found, carry on", which is exactly how the defect this class
+    exists to fix stayed invisible. A refusal that any broad handler can absorb
+    is not a refusal.
+
+    ``exit_code`` carries the shared table's number so the boundary reports the
+    refusal as itself rather than as exit 1, which means bad CALLER input and
+    would send the user looking for an argument to change. No argument fixes an
+    unusable manifest.
+    """
+
+    def __init__(self, message, exit_code=EXIT_SOURCE_UNREACHABLE):
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def _manifest_class(im, name):
+    """A reader's exception class by name, or ``()`` if it has none.
+
+    Read off the already-imported module with getattr and never imported: the
+    plugin must run with no interconnect PDK installed, and ``except ()``
+    catches nothing. The empty-tuple fallback is complete rather than merely
+    defensive, because a reader too old to define the class is also a reader
+    that can never raise it: the interconnect PDK's main and dev ship a reader
+    with no version gate at all, and the gate lives only on an unmerged branch.
+
+    Used ONLY to choose the exit code and word the message. The decision to
+    refuse never depends on recognising a class, so a renamed or removed class
+    costs a line of diagnostic and not the protection.
+    """
+    cls = getattr(im, name, ())
+    return cls if isinstance(cls, type) else ()
+
+
+def _accept_newer_minor_warnings(im):
+    """Stop a warnings-as-errors host from refusing a manifest the policy accepts.
+
+    The shared version policy says a same-major higher minor is ACCEPTED with a
+    warning. Under ``-W error`` that warning becomes an exception, so two hosts
+    correctly implementing the same policy disagree about the same file.
+
+    Worse, it disagrees with itself: the reader adds its dedup key BEFORE
+    calling ``warnings.warn``, so only the FIRST read of a given manifest in a
+    process raises and every later read succeeds silently. Measured against the
+    real reader under ``-W error``: read 1 raised, reads 2 and 3 returned all 5
+    methods. Anything that tried to handle that exception would be handling a
+    condition that moves depending on who read the manifest first.
+
+    ``filterwarnings`` rather than ``catch_warnings``: the GUI runs the export
+    on a worker thread (dialog_chiplet_export.py), and ``catch_warnings``
+    mutates global filter state for the whole process while it is open, so on a
+    thread it is not sound. This installs one filter once, and the warning
+    still prints.
+
+    interconnect_pdk is raising the policy question itself, since the same gap
+    is in chiplet-spec's reference reader; this is the local mitigation only.
+    """
+    warning_cls = _manifest_class(im, "ManifestVersionWarning")
+    if warning_cls:
+        warnings.filterwarnings("always", category=warning_cls)
+
+
 def _interconnect_python_candidates():
     """Candidate interconnect-PDK python dirs: env first, then sibling walk."""
     candidates = []
@@ -3723,13 +3876,18 @@ def _import_interconnect_manifest():
                 sys.path.insert(0, str(cand))
             try:
                 import interconnect_manifest
-                return interconnect_manifest
             except Exception as exc:
-                # The file exists but does not import: surface the real error
-                # instead of letting callers report a misleading "not found".
-                print(f"Warning: found interconnect_manifest.py in {cand} but "
-                      f"could not import it: {exc}", file=sys.stderr)
-                return None
+                # The file is HERE and does not import, so the source is
+                # present and unusable, not absent. Returning None said
+                # "absent" and let every caller take its tolerated path; the
+                # stderr line did not stop anything. That is the same swallow
+                # this module was fixed for, one frame up, so it refuses too.
+                raise SourceRefused(
+                    "found interconnect_manifest.py in %s but could not "
+                    "import it (%s: %s)" % (cand, type(exc).__name__, exc)
+                ) from exc
+            _accept_newer_minor_warnings(interconnect_manifest)
+            return interconnect_manifest
     return None
 
 
@@ -3780,18 +3938,55 @@ _INTERCONNECT_LYP_REF = (
     "${INTERCONNECT_PDK_ROOT}/libs.tech/klayout/tech/interconnect.lyp")
 
 
+#: Why no technology block was derived. Exactly two values, because exactly two
+#: conditions are legitimately not errors. Every other manifest condition
+#: refuses instead of being folded into a third reason.
+_TECH_ABSENT = "manifest_absent"      # no interconnect PDK reachable from here
+_TECH_NOT_DECLARED = "not_declared"   # manifest read fine, no method declares it
+
+
 def _interconnect_technology_block(adapter):
-    """Technology metadata for an interconnect adapter, or None.
+    """``(technology block, None)``, or ``(None, reason)``. Refuses on a bad source.
 
     Mirrors the entries under ``technologies:`` (description /
     layer_properties / dbu) so viewers treat the interconnect method as a
     PDK-backed technology with its own provenance, instead of folding its
-    identity into the interposer. None when the manifest is unavailable or
-    no method declares the adapter (e.g. a hand-set custom adapter).
+    identity into the interposer.
+
+    Two conditions yield no block and are not errors: no interconnect PDK is
+    reachable from here (``_TECH_ABSENT``), and the manifest was read fine but
+    declares no method for this adapter (``_TECH_NOT_DECLARED``, the ordinary
+    hand-set custom adapter). Everything else raises :class:`SourceRefused`.
+
+    The bug this replaces was not the handler, it was the RETURN VALUE. The
+    "no method declares this adapter" case is the ``for``/``else`` below, an
+    exhausted loop that raises nothing, so no exception handler ever separated
+    it from a broken manifest. A bare ``except Exception: return None`` simply
+    turned every read failure into the same None the legitimate path returns,
+    and the caller, seeing one None, could not tell a refused schema_version
+    from a custom adapter. Narrowing the except alone would not have fixed
+    that; the function has to say which of the two happened.
+
+    There is deliberately NO ``except KeyError`` arm, unlike the sibling
+    helpers above. They look a method up by id, so KeyError is their "unknown
+    method" signal. Here the ids come from ``list_methods``, so a KeyError is
+    ``KeyError('methods')`` from a manifest with no methods block: a structural
+    break wearing the same type as an unknown id. Catching it would reopen this
+    defect in a narrower form. Do not add it back.
+
+    Refusing here is safe and does not widen much. ``update_chiplet_file``
+    mutates an in-memory dict and opens the output exactly once, far below its
+    call to this code, so nothing partial can reach disk. And this file already
+    refuses on this manifest through ``_connection_to_adapter`` and
+    ``_connection_to_body_diameter``, which catch only
+    ``(KeyError, FileNotFoundError)``. The choice was never refuse-versus-warn;
+    it was whether a field in the input document got to decide which one you
+    got, since control only reached here when the ``.chiplet`` already declared
+    an adapter.
     """
     im = _import_interconnect_manifest()
     if im is None:
-        return None
+        return None, _TECH_ABSENT
     vendor = None
     try:
         for mid in im.list_methods():
@@ -3800,9 +3995,18 @@ def _interconnect_technology_block(adapter):
                 vendor = method.get("vendor")
                 break
         else:
-            return None
-    except Exception:
-        return None
+            return None, _TECH_NOT_DECLARED
+    except FileNotFoundError:
+        # Nothing to read: a partial or absent PDK install. Same condition as
+        # im is None, and the only tolerated failure here.
+        return None, _TECH_ABSENT
+    except Exception as exc:
+        raise SourceRefused(
+            "the interconnect PDK manifest is present but unusable, so "
+            "interconnect.technology for adapter '%s' cannot be derived "
+            "(%s: %s)" % (adapter, type(exc).__name__, exc),
+            exit_code=_source_refusal_exit_code(exc),
+        ) from exc
     description = "Chiplet attachment"
     if vendor:
         description += f" ({vendor})"
@@ -3810,7 +4014,19 @@ def _interconnect_technology_block(adapter):
         "description": description,
         "layer_properties": _INTERCONNECT_LYP_REF,
         "dbu": 0.001,
-    }
+    }, None
+
+
+def _source_refusal_exit_code(exc):
+    """Shared-table exit code for a manifest failure: 6 for version, else 5.
+
+    Reads the reader off ``sys.modules`` rather than calling
+    ``_import_interconnect_manifest``, which prints its own diagnostic and can
+    now itself refuse. A failure-reporting path must not be able to fail.
+    """
+    if _is_manifest_version_error(exc):
+        return EXIT_SOURCE_VERSION
+    return EXIT_SOURCE_UNREACHABLE
 
 
 def _maybe_set_interconnect_adapter(data):
@@ -3843,24 +4059,34 @@ def _maybe_set_interconnect_adapter(data):
         if not isinstance(data.get("interconnect"), dict):
             data["interconnect"] = {}
         data["interconnect"]["adapter"] = adapter
-        tech = _interconnect_technology_block(adapter)
+        tech, reason = _interconnect_technology_block(adapter)
         if tech:
             data["interconnect"]["technology"] = tech
-        else:
-            # Derived data we could not derive. The merge layer treats
-            # interconnect: as exporter-owned, so no older copy is carried
-            # forward any more and the document would otherwise go out quietly
-            # poorer: a consumer needing layer_properties to render the
-            # interconnect layers finds nothing to look at. Whatever this
-            # pipeline already put there is left alone; the point is that the
-            # gap is never silent. The two causes read very differently to a
-            # user, so name both rather than guessing which one happened.
+        elif reason == _TECH_NOT_DECLARED:
+            # Not a defect and not a warning: the manifest was read and simply
+            # carries no method for this adapter, which is what a hand-set
+            # custom adapter looks like. Said out loud anyway, because the
+            # emitted document is poorer than one with the block.
             print(
-                "  Warning: no technology metadata for interconnect adapter "
-                "'%s'. Either the interconnect PDK manifest is not readable "
-                "from here, or no method in it declares that adapter. The "
-                ".chiplet keeps the adapter but gains no "
-                "interconnect.technology block." % adapter
+                "  Note: the interconnect PDK manifest declares no method for "
+                "adapter '%s', so the .chiplet keeps the adapter and gains no "
+                "interconnect.technology block. Expected for a custom adapter."
+                % adapter
+            )
+        else:
+            # Derived data we could not derive because the source is not here
+            # at all. The merge layer treats interconnect: as exporter-owned,
+            # so no older copy is carried forward and the document goes out
+            # poorer. Degrading rather than refusing is deliberate: an absent
+            # PDK is an environment condition and the plugin has to run
+            # without it. The third cause this warning used to also cover, a
+            # manifest present but unusable, no longer reaches here; it
+            # refuses, which is what PLUG-1 was about.
+            print(
+                "  Warning: no interconnect PDK is reachable from here, so no "
+                "interconnect.technology block is written for adapter '%s'. "
+                "Install the interconnect PDK or set INTERCONNECT_PDK_ROOT "
+                "and re-export to get one." % adapter
             )
     return newly_set
 
@@ -5092,6 +5318,11 @@ Examples:
     )
     args = parser.parse_args()
 
+    # Report a manifest refusal recorded while the parser was built. Here and
+    # not there: --help has now had its chance to print, argv exists, and no
+    # artifact has been written yet.
+    _report_deferred_source_refusal()
+
     # Default lyp: the interposer PDK's canonical copy (env/walk); no
     # plugin-local fallback, the .lyp belongs to the PDK.
     if args.lyp is None:
@@ -5215,5 +5446,22 @@ Examples:
     return 0 if success else 1
 
 
+def _main_reporting_refusals():
+    """Run main(), reporting a SourceRefused with the shared table's exit code.
+
+    A refusal raised deep in the run (the finalizer, a helper that lets the
+    reader's own exception through) would otherwise leave as a traceback and
+    exit 1. Exit 1 means bad caller input, so it would send the user looking
+    for an argument to change when the fix is to align the PDK.
+    """
+    try:
+        return main()
+    except SourceRefused as exc:
+        print("Error: %s" % exc, file=sys.stderr)
+        print("  Refusing to export: a cross-repo source is present and "
+              "cannot be used.", file=sys.stderr)
+        return exc.exit_code
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_main_reporting_refusals())
