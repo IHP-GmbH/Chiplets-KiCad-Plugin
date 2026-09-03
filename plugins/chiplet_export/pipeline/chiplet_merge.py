@@ -29,10 +29,21 @@ top-level block TEXT:
 
 1. ``carry_over_foreign_blocks`` -- a shallow top-level merge that copies the
    exporter-*unowned* top-level blocks (``flow:``, ``netlist:``, any future
-   hand-authored block) VERBATIM from the existing canonical file into the freshly
-   staged intermediate BEFORE the copy. Because the finalizer round-trips them,
-   ``flow:`` stays EMBEDDED, which is exactly what Chiplet Studio's FlowEngine
-   requires (it reads ``flow:`` only from the embedded block).
+   block this exporter does not own) VERBATIM from the existing canonical file
+   into the freshly staged intermediate BEFORE the copy. Because the finalizer
+   round-trips them, ``flow:`` stays EMBEDDED, which is exactly what Chiplet
+   Studio's FlowEngine requires (it reads ``flow:`` only from the embedded
+   block).
+
+   Note on provenance, since it is easy to read this the wrong way: these
+   blocks are whatever the existing file contained, not necessarily anything
+   the current user wrote. A ``.chiplet`` that arrived with a downloaded
+   project brings its author's blocks, and this merge re-emits them into a
+   document the user's own tool just produced. That is the intended contract,
+   preserving unowned content is the whole point, but it means a freshly
+   generated file is NOT evidence that its ``flow:`` block was locally
+   authored. Chiplet Studio executes ``flow:``, and its execution policy is
+   what has to close that; do not "fix" it here by dropping blocks.
 
 2. An exporter-content digest tripwire. After a successful export the digest of
    the finalized file's exporter-*owned* content is recorded in a sidecar. On the

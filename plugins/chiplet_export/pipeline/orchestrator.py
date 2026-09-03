@@ -1374,8 +1374,14 @@ def run_export(board, options, plugin_dir,
                 _log("Warning: could not preserve foreign .chiplet blocks: %s"
                      % exc)
             if carried:
-                _log("Preserved hand-authored .chiplet block(s) across "
-                     "re-export: %s" % ", ".join(carried))
+                # Say what was carried and where it came from, and claim
+                # nothing about who wrote it. These blocks are whatever the
+                # existing file happened to contain, which is not necessarily
+                # this user's work: a .chiplet that arrived with a downloaded
+                # project carries its author's blocks, and re-exporting would
+                # otherwise present them as freshly generated here.
+                _log("Carried over from the existing .chiplet at %s: %s"
+                     % (chiplet_final, ", ".join(carried)))
             shutil.copy2(chiplet_intermediate, chiplet_final)
 
         # The Hyperlynx netlist that drives hyp_to_gds is a first-class
