@@ -135,11 +135,22 @@ NON_PRINTABLE = {
     "record_separator": "\x1e",
 }
 
-#: PyYAML treats these as REAL line breaks. Inside a quoted scalar it folds
-#: them into the scalar and agrees with this grammar; after a plain scalar it
-#: starts a new line and does not. Telling those apart needs a YAML parser,
-#: which the GUI tier does not have, so the write verdict refuses all four.
-#: Measured cost of that bluntness: 0 refusals across 187 real .chiplet files.
+#: PyYAML treats these as REAL line breaks. After a PLAIN scalar one of them
+#: starts a new line for PyYAML and not for this grammar, which is the smuggle.
+#: Telling that apart from the quoted case needs a YAML parser, which the GUI
+#: tier does not have, so the write verdict refuses all four. Measured cost of
+#: that bluntness: 0 refusals across 187 real .chiplet files.
+#:
+#: An earlier version of this comment said the quoted case is folded by PyYAML
+#: and therefore safe. Both halves are wrong, and the correction is kept
+#: because the mistake is instructive: it generalised from the KEY SETS
+#: matching to the READERS matching. Measured inside a quoted scalar, CR and
+#: NEL DO fold, to a single space, so the raw byte is gone and a reader that
+#: preserves it returns a different string with no error raised anywhere;
+#: U+2028 and U+2029 do not fold at all. So the quoted case is not the safe
+#: one, it is the case where two readers disagree about a VALUE while agreeing
+#: about the keys. The refusal is about RAW BYTES, and the escaped forms stay
+#: legal, which is how these characters are meant to be written.
 YAML_LINE_BREAKS = {
     "next_line": "\x85",
     "line_separator": "\u2028",

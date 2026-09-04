@@ -186,11 +186,21 @@ def test_splitter_does_not_refuse_a_merely_undelimitable_document(case):
 #: The one oracle-splittable document this pipeline still refuses to REWRITE,
 #: and the reason is recorded here rather than in a skip so it stays visible.
 #:
-#: U+2028 inside a QUOTED scalar is folded by PyYAML, so both readers agree and
-#: rewriting it would in fact be safe. After a PLAIN scalar the same character
-#: starts a new line for PyYAML and not for this grammar, which is how an owned
-#: ``components:`` rides into a carried foreign block and wins by last-wins.
-#: Telling those two apart requires a YAML parser, and the GUI tier has none.
+#: After a PLAIN scalar the character starts a new line for PyYAML and not for
+#: this grammar, which is how an owned ``components:`` rides into a carried
+#: foreign block and wins by last-wins. Telling that apart from the quoted case
+#: requires a YAML parser, and the GUI tier has none.
+#:
+#: An earlier version of this comment said U+2028 inside a QUOTED scalar is
+#: folded by PyYAML so both readers agree and rewriting it would be safe. That
+#: is wrong in both halves, and it is worth keeping the correction because the
+#: mistake was generalising from key-set agreement to agreement. Measured:
+#: inside a quoted scalar CR and NEL ARE folded, to a single space, so the raw
+#: byte does not survive and a YAML 1.2 reader that keeps it returns a
+#: DIFFERENT string, silently; U+2028 and U+2029 are not folded at all. So the
+#: quoted case is not the safe one, it is the one where two readers disagree
+#: about a value while agreeing about the keys. The refusal is about the RAW
+#: BYTES; escaped forms stay legal and are the way to write these characters.
 #:
 #: So the write verdict is blunt on purpose. Measured cost: 0 refusals across
 #: 187 real .chiplet documents in the ecosystem; the only files it stops are
