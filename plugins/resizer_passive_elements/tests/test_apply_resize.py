@@ -259,7 +259,20 @@ def test_a_resized_part_is_named_for_what_it_now_is(tmp_path, tech):
 
 @needs_pdk
 def test_the_generated_part_matches_the_committed_one(tmp_path, tech):
-    """Regenerating a family member must reproduce the PDK's own footprint."""
+    """Regenerating a family member must reproduce the PDK's own footprint.
+
+    Every property except the visible ``Value`` text. Since 5e256ff this
+    generator writes a schematic-style label there ("100 fF") while the PDK
+    library still carries the footprint name ("CMIM_100fF"), so the two
+    conventions diverge deliberately. That decision is pinned on its own by
+    ``test_value_label_uses_spaced_fF_without_changing_internal_name``; here
+    the divergence is asserted from BOTH sides so a move on either one is
+    named rather than silently absorbed.
+
+    Closing the divergence is the PDK library's call, not this plugin's: the
+    committed CMIM_* footprints live in the repository that owns them, so
+    regenerating them is not a change this repo can make.
+    """
     committed = (paths.Path(paths.discover_tech_json_path()).parents[3]
                  / "kicad" / "footprints" / "intm4tm2.pretty"
                  / "CMIM_100fF.kicad_mod")
@@ -276,8 +289,14 @@ def test_the_generated_part_matches_the_committed_one(tmp_path, tech):
 
     generated = properties(paths.Path(out).read_text())
     reference = properties(committed.read_text())
-    for key in ("Value", "Nominal", "Capacitance", "w", "l", "m"):
+    for key in ("Nominal", "Capacitance", "w", "l", "m"):
         assert generated[key] == reference[key], key
+
+    assert generated["Value"] == "100 fF"
+    if reference["Value"] != generated["Value"]:
+        # Still the old library convention. If the PDK ever adopts the label
+        # the branch above goes green on its own; a THIRD format lands here.
+        assert reference["Value"] == "CMIM_100fF", reference["Value"]
 
 
 def test_an_unregistered_model_is_reported(tmp_path):
