@@ -358,7 +358,13 @@ def split_top_level_blocks(text):
       answer to give here, so none is given.
     * a REPEATED top-level key. Concatenating the two runs decides who owns the
       text but not which value wins, and no reading is conforming: PyYAML takes
-      the last value and yaml-cpp the first.
+      the last value and yaml-cpp the first. Measured against the yaml-cpp the
+      ecosystem actually links, 0.8.0, and the version is named because a
+      reading taken off a vendored 0.6.3 copy has already been wrong once about
+      a different question (0.8.0 breaks a line on a lone CR; 0.6.3 does not).
+      That build also reports ``size() == 3`` for the two-key map above, so the
+      duplicate is not merged away but carried, which is a second reason not to
+      hand these bytes on.
 
     It does NOT refuse a document it merely cannot DELIMIT (a flow-style
     document, ``flow :``). Those split correctly; they just yield no slice for
