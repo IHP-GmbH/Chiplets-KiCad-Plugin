@@ -425,6 +425,39 @@ def _read_component_connections(chiplet_path: str) -> List[tuple]:
     return entries
 
 
+class InterconnectSourceRefused(Exception):
+    """The interconnect PDK manifest is present and cannot be used.
+
+    Deliberately not a ``ValueError``, ``KeyError`` or ``OSError``: each of
+    those is a lookup-shaped type that some handler between here and the dialog
+    already catches to mean "not found, carry on", which is exactly how the
+    defect this class exists to fix stayed invisible for so long.
+    """
+
+
+def _interconnect_reader():
+    """The PDK's own manifest reader, or None if none is discoverable.
+
+    Discovered independently of the manifest ROOT, because the two are
+    different things: the root supplies the DATA and the reader supplies the
+    version policy, and a caller may legitimately point at a data-only root
+    (the tests do). Reuses the writer's discovery so there is one search order
+    in this plugin rather than two.
+
+    The module is pure stdlib (hashlib, json, os, warnings, collections,
+    pathlib, typing), verified by importing it with ``yaml``, ``klayout`` and
+    ``pcbnew`` forced absent, so this is safe in KiCad's bundled Python.
+    """
+    try:
+        from ..writers.connection_stacks import _manifest_reader
+    except ImportError:
+        return None
+    try:
+        return _manifest_reader()
+    except ImportError:
+        return None
+
+
 def _load_interconnect_methods(interconnect_root: str = "",
                                board=None) -> Dict[str, dict]:
     """``{method_id: entry}`` from the interconnect PDK's method manifest.
@@ -434,24 +467,55 @@ def _load_interconnect_methods(interconnect_root: str = "",
     so they can never disagree about which methods exist. The root is the
     explicit ``interconnect_root`` or the discovery chain's result.
 
-    Reads the JSON directly (stdlib only): no import of the PDK's reader
-    module and no sys.path mutation inside KiCad's bundled Python. Returns
-    {} when nothing is readable -- every caller degrades on an empty dict
-    rather than propagating a filesystem error into the dialog.
-    """
-    import json
+    Goes through the PDK's own reader, which applies the shared version policy.
+    This used to read the JSON directly with ``json.load`` under a bare
+    ``except Exception: return {}``, and the docstring justified that as
+    stdlib-only discipline for KiCad's bundled Python. The justification was
+    false: ``interconnect_manifest.py`` imports nothing but hashlib, json, os,
+    warnings, collections, pathlib and typing, so the GUI tier can import it
+    (verified by importing it with ``yaml``, ``klayout`` and ``pcbnew`` all
+    forced absent). What the shortcut actually bought was skipping
+    ``check_schema_version`` on the GUI path, which is the most used one.
 
+    The consequence was the shape this campaign keeps finding: a refused major,
+    a corrupt file, bad UTF-8 and an absent PDK all produced the same ``{}``,
+    which met ``if not methods: return ''`` downstream, and the export finished
+    reporting success with no interconnect methods at all. A version gate that
+    the busiest caller routes around is not a gate.
+
+    Absent stays soft, because the plugin has to run without the PDK. Present
+    and unusable refuses.
+
+    Raises:
+        InterconnectSourceRefused when the manifest is there and cannot be used.
+    """
     root = interconnect_root or discover_dependency_root(
         "INTERCONNECT_PDK_ROOT", board=board)
     if not root:
         return {}
     manifest_path = Path(root) / "manifest" / "interconnect_methods.json"
-    try:
-        with open(manifest_path, "r", encoding="utf-8") as fh:
-            methods = json.load(fh).get("methods", {})
-    except Exception:
+    if not manifest_path.is_file():
+        # Checked HERE and never delegated. load_manifest falls back to its own
+        # discovery when the path it is given does not exist, so handing it a
+        # wrong root makes it quietly serve the reader's own repo manifest
+        # instead: a wrong root would fail OPEN, with the export succeeding
+        # against a manifest nobody asked for.
         return {}
-    return methods if isinstance(methods, dict) else {}
+    reader = _interconnect_reader()
+    if reader is None:
+        return {}                      # no reader: the PDK is not installed
+    try:
+        methods = reader.load_manifest(manifest_path)
+    except FileNotFoundError:
+        return {}                      # partial install: still absence
+    except Exception as exc:
+        raise InterconnectSourceRefused(
+            "the interconnect PDK manifest at %s is present but cannot be "
+            "used (%s: %s). Align the interconnect PDK with the plugin, or "
+            "unset INTERCONNECT_PDK_ROOT to export without it."
+            % (root, type(exc).__name__, exc)) from exc
+    entries = methods.get("methods", {}) if isinstance(methods, dict) else {}
+    return entries if isinstance(entries, dict) else {}
 
 
 def derive_interconnect_methods(chiplet_path: str,

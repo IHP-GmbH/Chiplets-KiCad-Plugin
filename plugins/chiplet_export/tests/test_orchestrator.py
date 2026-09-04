@@ -513,6 +513,11 @@ def _write_fake_interconnect_root(tmp_path):
     manifest_dir = root / "manifest"
     manifest_dir.mkdir(parents=True)
     (manifest_dir / "interconnect_methods.json").write_text(json.dumps({
+        # Required since the loader stopped reading this file with a raw
+        # json.load and started going through the PDK reader, which applies
+        # the shared version policy. A fixture with no schema_version is now
+        # refused, and test_a_manifest_without_a_version_is_refused pins that.
+        "schema_version": "1.0",
         "methods": {
             "method_x": {
                 "pitch_rules": {"IXN_spacing": 40.0, "IXN_pitch": 75.0},
@@ -724,7 +729,8 @@ def test_available_connection_types_explicit_root(tmp_path):
     preserved -- pointing the dialog at a vendor checkout swaps the list."""
     root = tmp_path / "vendor_pdk"
     (root / "manifest").mkdir(parents=True)
-    manifest = {"methods": {"vendor_a": {}, "vendor_b": {}}}
+    manifest = {"schema_version": "1.0",
+                "methods": {"vendor_a": {}, "vendor_b": {}}}
     (root / "manifest" / "interconnect_methods.json").write_text(
         json.dumps(manifest))
     assert available_connection_types(str(root)) == ["", "vendor_a", "vendor_b"]
@@ -786,7 +792,8 @@ def test_connection_label_survives_a_partial_manifest_entry(tmp_path):
     root = tmp_path / "vendor_pdk"
     (root / "manifest").mkdir(parents=True)
     (root / "manifest" / "interconnect_methods.json").write_text(json.dumps(
-        {"methods": {"vendor_a": {"body_diameter_um": 30}}}))
+        {"schema_version": "1.0",
+         "methods": {"vendor_a": {"body_diameter_um": 30}}}))
     specs = connection_method_specs(str(root))
     assert specs["vendor_a"] == {"diameter": 30.0}
     assert format_connection_label("vendor_a", specs["vendor_a"]) == \
@@ -1024,3 +1031,38 @@ def test_a_refused_adapter_is_not_reportable_as_a_skip():
     assert refused == "assembly DRC: FAILED (exit 1)"
     assert skipped == "assembly DRC: NOT RUN"
     assert refused != skipped and refused != passed
+
+
+def test_a_manifest_without_a_version_is_refused(tmp_path):
+    """PLUG-12's break-it-once: the gate is what the raw json.load skipped.
+
+    The loader used to read this file directly under a bare except that
+    returned {}, so a refused major, a corrupt file and an absent PDK were the
+    same answer, and the export finished reporting success with no interconnect
+    methods at all.
+    """
+    from chiplet_export.pipeline.orchestrator import (
+        InterconnectSourceRefused, _load_interconnect_methods)
+
+    root = tmp_path / "versionless"
+    (root / "manifest").mkdir(parents=True)
+    (root / "manifest" / "interconnect_methods.json").write_text(
+        json.dumps({"methods": {"m": {}}}), encoding="utf-8")
+    with pytest.raises(InterconnectSourceRefused):
+        _load_interconnect_methods(str(root))
+
+
+def test_an_absent_interconnect_root_still_degrades_quietly(tmp_path):
+    """Absent is not broken. The plugin has to run without the PDK."""
+    from chiplet_export.pipeline.orchestrator import _load_interconnect_methods
+    assert _load_interconnect_methods(str(tmp_path / "nope")) == {}
+
+
+def test_a_wrong_root_does_not_silently_serve_the_real_manifest(tmp_path):
+    """The reader's load_manifest falls back to its OWN discovery when the path
+    it is handed does not exist, so delegating the existence check would make a
+    wrong root fail OPEN against a manifest nobody asked for."""
+    from chiplet_export.pipeline.orchestrator import _load_interconnect_methods
+    empty = tmp_path / "empty_root"
+    (empty / "manifest").mkdir(parents=True)
+    assert _load_interconnect_methods(str(empty)) == {}
