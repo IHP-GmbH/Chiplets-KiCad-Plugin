@@ -39,13 +39,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 from chiplet_export.pipeline import chiplet_merge  # noqa: E402
 
-#: Vendored byte-for-byte from chiplet-spec d9229cf
+#: Vendored byte-for-byte from chiplet-spec cdfa737
 #: ``conformance/fixtures/top_level_blocks_cases.json``. Re-vendor with a plain
 #: copy; never edit it here (add a case upstream, in the fixture). Provenance
 #: is also declared in ``VENDORED.md`` and gated by ``test_vendored_copies.py``.
 ORACLE_PATH = os.path.join(HERE, "fixtures", "top_level_blocks_cases.json")
 ORACLE_SHA256 = "fa808d59c97c793d33ff3263360ac7adb329b8ea6e9af2c5f761151956b8af7c"
-ORACLE_COMMIT = "d9229cf"
+ORACLE_COMMIT = "cdfa737"
 
 with open(ORACLE_PATH, "r", encoding="utf-8") as _fh:
     ORACLE = json.load(_fh)

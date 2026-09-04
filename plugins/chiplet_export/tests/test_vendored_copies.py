@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 
 import pytest
@@ -34,8 +35,10 @@ PLUGIN_ROOT = os.path.dirname(HERE)
 #: the same three facts and must be updated in the same commit as the copy.
 READER_PATH = os.path.join(PLUGIN_ROOT, "vendor", "chiplet_format_io", "__init__.py")
 READER_UPSTREAM = "reference/python/chiplet_format_io/__init__.py"
-READER_COMMIT = "d9229cf"
-READER_SHA256 = "91dc33a1318963342797eb5632fcd274a8dd2147a3eb8645304f2aa83a017795"
+#: The same file addressed inside THIS repo, for git history queries.
+READER_UPSTREAM_LOCAL = "plugins/chiplet_export/vendor/chiplet_format_io/__init__.py"
+READER_COMMIT = "cdfa737"
+READER_SHA256 = "5c1d3ebe71c2926bc1c1505e2b42493c98a8fff1ef0b503beed9a32ded624cf2"
 
 
 def _sha256(blob):
@@ -91,3 +94,69 @@ def test_vendored_md_declares_the_same_pin():
             "VENDORED.md does not mention %r. Update it in the same commit as "
             "the re-vendor; a provenance file that lags the pin is worse than "
             "none, because it is believed." % fact)
+
+
+_VERSION_RE = re.compile(r'^__version__\s*=\s*["\']([^"\']+)["\']', re.M)
+
+
+def _declared_version(blob):
+    match = _VERSION_RE.search(blob.decode("utf-8", "replace"))
+    return match.group(1) if match else None
+
+
+def test_a_re_vendor_that_changed_the_bytes_also_moved_the_version():
+    """The number has to move when the bytes move, or it stops meaning anything.
+
+    Everything else in this file, and every version check upstream, asks whether
+    the sites that DECLARE a version agree with each other. None of them asks
+    whether the version MOVED when the bytes did. Those are different questions,
+    and the second one is the one a consumer needs: agreement between copies of
+    a value says nothing about whether the value is right.
+
+    It bites for real. Upstream shipped two different readers both declaring
+    1.2.0, and the ecosystem's own registry calls same-version-different-bytes
+    DRIFTED precisely because that is what an undeclared in-place edit looks
+    like. So two honest copies, taken from two commits, accuse each other.
+
+    Implemented against THIS repo's history rather than upstream's, because that
+    is what a consumer can see: compare the vendored file with the previous
+    commit that CHANGED it. Bytes always differ between those two by
+    construction, so the check is never vacuous.
+
+    What a green here does NOT cover: whether the bump was the right SIZE
+    (patch where a minor was due), and anything about the fixture, which
+    declares an oracle version instead and is pinned separately.
+    """
+    proc = subprocess.run(
+        ["git", "-C", PLUGIN_ROOT, "log", "--format=%H", "--", READER_PATH],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        pytest.skip("not a git checkout")
+    with open(READER_PATH, "rb") as fh:
+        current = fh.read()
+
+    # The most recent COMMITTED state that differs from what is on disk. Walking
+    # for the first difference rather than taking commits[1] is not tidiness: on
+    # an uncommitted re-vendor commits[0] is still the OLD bytes, so indexing a
+    # fixed slot compares the new file against the wrong side and passes for the
+    # wrong reason. It did, here, before this loop existed.
+    previous = None
+    for commit in proc.stdout.split():
+        blob = subprocess.run(
+            ["git", "-C", PLUGIN_ROOT, "show",
+             "%s:%s" % (commit, READER_UPSTREAM_LOCAL)],
+            capture_output=True).stdout
+        if blob and blob != current:
+            previous = blob
+            break
+    if previous is None:
+        pytest.skip("the vendored reader has no earlier, different version")
+
+    was, now = _declared_version(previous), _declared_version(current)
+    assert was is not None and now is not None, (
+        "the vendored reader stopped declaring __version__, so nothing "
+        "downstream can tell two copies of it apart")
+    assert was != now, (
+        "the vendored reader changed bytes while still declaring %s. Re-vendor "
+        "from an upstream release that moved the number, or the copy is "
+        "indistinguishable from a hand edit to every gate that reads it." % now)

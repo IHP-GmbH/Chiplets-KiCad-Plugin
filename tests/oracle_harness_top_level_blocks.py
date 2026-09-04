@@ -2,7 +2,7 @@
 """Score ``chiplet_merge.split_top_level_blocks`` against the chiplet-spec oracle.
 
 Read-only conformance harness for the TOP-LEVEL BLOCK GRAMMAR fixture
-``conformance/fixtures/top_level_blocks_cases.json`` (chiplet-spec d9229cf,
+``conformance/fixtures/top_level_blocks_cases.json`` (chiplet-spec cdfa737,
 oracle version 4).
 It never edits the plugin; it only reports which oracle rows the current
 splitter agrees with.

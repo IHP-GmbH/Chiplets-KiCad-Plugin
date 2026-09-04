@@ -15,18 +15,19 @@ Upstream `git@github.com:IHP-GmbH/chiplet-spec.git`. The gates look for a checko
 beside this repository, or at `CHIPLET_SPEC_ROOT`, and skip where there is none, so the
 suite still runs standalone.
 
-Both copies come from the same upstream state, `d9229cf` on `dev`, which is a
+Both copies come from the same upstream state, `cdfa737` on `dev`, which is a
 merge commit whose gate ran green. Pinning the gated head rather
 than the last commit that happened to touch each file means the pin names a state
 somebody verified, not just a state that exists.
 
 **`vendor/chiplet_format_io/__init__.py`**
-from `reference/python/chiplet_format_io/__init__.py` at commit `d9229cf`,
-sha256 `91dc33a1318963342797eb5632fcd274a8dd2147a3eb8645304f2aa83a017795`.
+from `reference/python/chiplet_format_io/__init__.py` at commit `cdfa737`,
+sha256 `5c1d3ebe71c2926bc1c1505e2b42493c98a8fff1ef0b503beed9a32ded624cf2`,
+reader release 1.3.0.
 Gated by `tests/test_vendored_copies.py`.
 
 **`tests/fixtures/top_level_blocks_cases.json`**
-from `conformance/fixtures/top_level_blocks_cases.json` at commit `d9229cf`,
+from `conformance/fixtures/top_level_blocks_cases.json` at commit `cdfa737`,
 sha256 `fa808d59c97c793d33ff3263360ac7adb329b8ea6e9af2c5f761151956b8af7c`,
 oracle version 4.
 Gated by `tests/test_top_level_block_grammar.py`
