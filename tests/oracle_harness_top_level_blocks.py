@@ -2,8 +2,8 @@
 """Score ``chiplet_merge.split_top_level_blocks`` against the chiplet-spec oracle.
 
 Read-only conformance harness for the TOP-LEVEL BLOCK GRAMMAR fixture
-``conformance/fixtures/top_level_blocks_cases.json`` (chiplet-spec 6e640fb,
-oracle version 3).
+``conformance/fixtures/top_level_blocks_cases.json`` (chiplet-spec d9229cf,
+oracle version 4).
 It never edits the plugin; it only reports which oracle rows the current
 splitter agrees with.
 
@@ -58,7 +58,7 @@ DEFAULT_ORACLE = os.path.join(
 #: Oracle version this harness understands; see the note in
 #: ``test_top_level_block_grammar.py``. Reading ``refused_by`` off an older copy
 #: yields ``None`` for every row and scores a vacuous 100%.
-ORACLE_VERSION = 3
+ORACLE_VERSION = 4
 
 
 def _q(text: str) -> str:

@@ -39,13 +39,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 from chiplet_export.pipeline import chiplet_merge  # noqa: E402
 
-#: Vendored byte-for-byte from chiplet-spec 6e640fb
+#: Vendored byte-for-byte from chiplet-spec d9229cf
 #: ``conformance/fixtures/top_level_blocks_cases.json``. Re-vendor with a plain
 #: copy; never edit it here (add a case upstream, in the fixture). Provenance
 #: is also declared in ``VENDORED.md`` and gated by ``test_vendored_copies.py``.
 ORACLE_PATH = os.path.join(HERE, "fixtures", "top_level_blocks_cases.json")
-ORACLE_SHA256 = "bd641d4f7de029c8b270abb454db4bde31b740db0126143d6ac5d2d94c618788"
-ORACLE_COMMIT = "6e640fb"
+ORACLE_SHA256 = "fa808d59c97c793d33ff3263360ac7adb329b8ea6e9af2c5f761151956b8af7c"
+ORACLE_COMMIT = "d9229cf"
 
 with open(ORACLE_PATH, "r", encoding="utf-8") as _fh:
     ORACLE = json.load(_fh)
@@ -53,14 +53,16 @@ with open(ORACLE_PATH, "r", encoding="utf-8") as _fh:
 #: The oracle's own version. Version 1 is any copy with no ``version`` key,
 #: where the whole ``refuse`` group meant "a splitter refuses"; version 2 added
 #: the per-case ``refused_by`` list and the U+000D rows; version 3 turned
-#: ``loadable`` into an obligation in both directions.
+#: ``loadable`` into an obligation in both directions; version 4 restates
+#: the repeated-key justification and changed no verdict, so a consumer
+#: pinned at 3 reads the same rows.
 #:
 #: This is asserted rather than tolerated. A consumer that reads ``refused_by``
 #: off a version 1 copy gets ``None`` for every row and silently tests nothing,
 #: which is the exact shape of failure the field was added to prevent: the
 #: verdict inverts underneath and the suite stays green. Failing on the version
 #: makes a stale re-vendor loud.
-ORACLE_VERSION = 3
+ORACLE_VERSION = 4
 assert ORACLE.get("version") == ORACLE_VERSION, (
     "the vendored oracle is version %r, this consumer reads version %d. A copy "
     "without 'refused_by' would make every refusal test below vacuous."
