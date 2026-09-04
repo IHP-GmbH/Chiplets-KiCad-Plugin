@@ -55,6 +55,33 @@ top-level block TEXT:
    other -- so a raw-text hash is sufficient and the finalizer's own round-trip
    does not false-trip it (record and check run on the same on-disk bytes).
 
+What this grammar can and cannot know, since both mechanisms rest on it:
+
+The splitter decides block identity with one predicate on one line -- is this
+column-0 line a bare ``key:``. That predicate is INCOMPLETE (YAML has top-level
+keys it does not match: quoted, ``flow :``, explicit, flow style) and it is not
+SOUND either (a line at column 0 can sit inside a multi-line flow scalar opened
+earlier, where YAML sees no key at all). Each gap is a real defect: the first
+attaches a foreign-looking block to the owned block above it, which is how an
+owned key rides into a document unseen by the ownership filter AND by the
+digest, since it travels inside foreign bytes; the second invents a block that
+is not in the file, hands its bytes -- carved out of somebody's assembly name --
+to a foreign host, and drops the real block behind it.
+
+So the boundary is made explicit instead of implicit, and it is split across the
+two tiers by what each one can actually prove:
+
+* Here, on text alone: ``unmodelled_top_level_line`` names the five column-0
+  shapes this grammar models, default-deny. When it passes, every top-level key
+  a YAML reader can see is a key line here -- the incompleteness gap is closed.
+  When it does not, ``split_for_rewrite`` REFUSES; the caller aborts the export
+  and says which line, because silently carrying nothing is the data loss this
+  module exists to prevent.
+* One tier down, where PyYAML exists (``hyp_to_gds``): the key list this module
+  produced is compared against the parser's. That closes the unsoundness gap,
+  which text alone cannot, and it discriminates the exact proposition in the one
+  place both parsers are available.
+
 Two accepted semantic deltas versus the previous YAML-parsing guard:
   * A *formatting-only* edit inside an exporter-OWNED block now trips the wire.
     Acceptable: it is an edit made to the canonical file outside KiCad, and
@@ -121,40 +148,361 @@ DIGEST_SIDECAR_SUFFIX = ".exportcontent.sha256"
 #: or blank line). Neither owned nor foreign; never carried, never hashed.
 _PREAMBLE_KEY = ""
 
-#: A top-level key line: an unindented ``key:`` at column 0, optionally followed
-#: by whitespace and a value. This is exactly the block-style layout the
-#: finalizer (yaml.dump default) and writers/chiplet_writer emit -- top-level
-#: keys at column 0, nested content indented. A ``#`` comment or an indented
-#: line is not a key line and stays inside the current block.
-_KEY_LINE_RE = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.-]*):(?:\s.*)?$")
+#: A top-level key line, matched against LINE CONTENT (the text up to the next
+#: LF, with one optional trailing CR already removed) -- never against the raw
+#: slice. ``\Z``, not ``$``: ``$`` also matches just before a trailing newline,
+#: so with ``$`` a two-line string passes a predicate that claims to be about
+#: one line. ``[^\n]`` rather than ``.`` for the same reason, and because it is
+#: what the C++ reference has to write.
+_KEY_LINE_RE = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.-]*):(?:\s[^\n]*)?\Z")
+
+#: A key line spelled with whitespace before the colon: a key to YAML, nothing
+#: at all to this grammar. Used only to give the refusal a specific reason.
+_SPACED_KEY_LINE_RE = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.-]*)\s+:(?:\s[^\n]*)?\Z")
 
 
-def split_top_level_blocks(text: str) -> "collections.OrderedDict[str, str]":
-    """Split a ``.chiplet`` document into top-level blocks, insertion-ordered.
+class TopLevelGrammarRefusal(ValueError):
+    """This grammar cannot say which top-level key owns some line of the text.
 
-    A line is a top-level key line iff it matches ``_KEY_LINE_RE`` at column 0
-    (no leading whitespace); ``group(1)`` is the key. That key line PLUS every
-    following line until the next column-0 key line forms the block, kept
-    VERBATIM (the key line, indented content, comments, blank lines, trailing
-    newlines all included). Lines before the first key go into the preamble
-    bucket under key ``""`` (neither owned nor foreign). A duplicate top-level
-    key concatenates its blocks. No YAML is parsed.
+    Raised instead of returning a split the caller would then act on. Carries
+    the 1-based ``lineno``, the offending ``line`` content and a ``kind``, so a
+    caller can name the line to the user instead of saying "malformed file".
     """
-    blocks: "collections.OrderedDict[str, str]" = collections.OrderedDict()
+
+    def __init__(self, reason, lineno, line, kind):
+        self.reason = reason
+        self.lineno = lineno
+        self.line = line
+        self.kind = kind
+        ValueError.__init__(
+            self, "line %d: %s\n    %s" % (lineno, reason, line))
+
+
+# ---------------------------------------------------------------------------
+# The line grammar. One definition, shared by every reader of the text.
+# ---------------------------------------------------------------------------
+
+def iter_lines(text):
+    """Yield ``(raw, content)`` per line, cutting on LF and on nothing else.
+
+    ``raw`` is the source slice including its terminator, so joining every
+    ``raw`` reproduces ``text`` byte for byte. ``content`` is ``raw`` without
+    the terminating LF and without one optional CR immediately before it; the
+    key-line predicate is matched against ``content``.
+
+    Why not ``str.splitlines()``: it also breaks on CR alone, VT, FF, FS, GS,
+    RS, U+0085 NEL, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR. A YAML
+    line ends at LF, with one optional preceding CR, and nowhere else, so every
+    one of those characters is ordinary scalar content. Breaking on one invents
+    a line, and therefore a top-level key, that no reader of the document sees:
+    the block that key "owns" is cut out of somebody's ``assembly.name`` and
+    handed to a foreign host, and the real block behind it is lost.
+
+    This only holds if the caller read the file WITHOUT newline translation
+    (``newline=""``). Python's text mode turns a lone CR into LF before this
+    function ever sees it, which puts the CR half of the defect back.
+    """
+    start = 0
+    end = len(text)
+    while start < end:
+        nl = text.find("\n", start)
+        if nl < 0:
+            raw = text[start:]
+            yield raw, raw
+            return
+        raw = text[start:nl + 1]
+        content = raw[:-1]
+        if content.endswith("\r"):
+            content = content[:-1]
+        yield raw, content
+        start = nl + 1
+
+
+def read_document(path):
+    """Read a ``.chiplet`` as text with NO newline translation.
+
+    ``open(path, "r")`` is universal-newlines: it rewrites CRLF and lone CR to
+    LF. Two consequences this module cannot live with. A lone CR inside a scalar
+    would become a real line break and grow a phantom top-level key (the CR half
+    of the line-grammar defect, reintroduced by the reader). And a CRLF document
+    would be split into slices that no longer match the file, so
+    ``carry_over_foreign_blocks`` would silently rewrite a foreign block's line
+    endings while promising to copy it verbatim.
+    """
+    with open(path, "r", encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def write_document(path, text):
+    """Write a ``.chiplet`` with NO newline translation (see ``read_document``).
+
+    Without ``newline=""`` Python turns every LF into ``os.linesep`` on write,
+    so on Windows -- a first-class KiCad platform -- the guard would convert the
+    whole document to CRLF as a side effect of preserving a ``flow:`` block.
+    """
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+
+
+def top_level_key_line(content):
+    """The top-level key this LINE CONTENT opens, or None."""
+    match = _KEY_LINE_RE.match(content)
+    return match.group(1) if match else None
+
+
+def top_level_key_lines(text):
+    """Every top-level key in document order, REPEATS INCLUDED.
+
+    The list the worker tier compares against PyYAML's keys. A list and not a
+    set because ``split_top_level_blocks`` cannot express a repeated key, so a
+    set comparison would agree with PyYAML on the one document no two readers
+    agree on. It shares ``iter_lines`` and ``top_level_key_line`` with the
+    splitter deliberately: the proposition under test is about the key list the
+    ownership filter actually used, and a second implementation that happens to
+    agree with PyYAML says nothing about the one that made the decision.
+    """
+    keys = []
+    for _raw, content in iter_lines(text):
+        key = top_level_key_line(content)
+        if key is not None:
+            keys.append(key)
+    return keys
+
+
+# ---------------------------------------------------------------------------
+# The competence boundary, stated positively and tested as a whole.
+# ---------------------------------------------------------------------------
+
+def _unmodelled_reason(content, seen_key):
+    """None if this column-0 non-key line is modelled; else why it is not."""
+    if content == "":
+        return None                                    # blank line
+    head = content[0]
+    if head in " \t":
+        return None                                    # indented block content
+    if head == "#":
+        return None                                    # comment at column 0
+    if content == "---" or content.startswith("--- "):
+        if not seen_key:
+            return None                                # leading marker: preamble
+        return ("a document marker here starts a SECOND YAML document, whose "
+                "top-level keys this grammar cannot see at all")
+    if head == "-" and (len(content) == 1 or content[1] in " \t"):
+        return None                                    # top-level sequence item
+    if head in "\"'":
+        return ("a quoted key at column 0 is a key to YAML but not to this "
+                "grammar, so its block would be attributed to the block above "
+                "it, whose owner regenerates it away on the next export")
+    if head in "{[":
+        return ("flow style at column 0: YAML reads a mapping here and this "
+                "grammar reads one line that owns nothing, so the block's "
+                "bytes are never captured and the re-export drops them")
+    if _SPACED_KEY_LINE_RE.match(content):
+        return ("YAML reads a key here but this grammar does not, because the "
+                "colon does not follow the key directly, so the block's bytes "
+                "are never captured and the re-export drops them")
+    return ("this line is at column 0 but is not a top-level key line, so the "
+            "grammar cannot tell which top-level key owns it")
+
+
+def unmodelled_top_level_line(text):
+    """First column-0 line the grammar does not model: ``(lineno, line, why)``.
+
+    None when every line is either a top-level key line at column 0 or one of
+    the five modelled non-key shapes: blank, indented, ``#`` comment at column
+    0, ``- `` sequence item at column 0 (``yaml.dump`` does not indent a
+    sequence under its key, so these are ordinary), and a leading ``---``
+    before the first key.
+
+    That list is this module's whole competence claim and it is default-deny: a
+    column-0 shape not on it is refused, never assumed harmless. What the claim
+    buys is one-directional, and worth stating exactly. When this returns None,
+    every top-level key a YAML reader can see IS a key line here. The converse
+    -- that every key line here is a key to the reader -- is NOT claimed, and
+    cannot be established from text alone: a column-0 line can sit inside a
+    multi-line flow scalar or flow collection opened on an earlier line, and
+    deciding that needs a parser. That remaining direction is closed one tier
+    down, by ``top_level_key_lines`` against PyYAML.
+    """
+    seen_key = False
+    lineno = 0
+    for _raw, content in iter_lines(text):
+        lineno += 1
+        if top_level_key_line(content) is not None:
+            seen_key = True
+            continue
+        why = _unmodelled_reason(content, seen_key)
+        if why is not None:
+            return lineno, content, why
+    return None
+
+
+def split_top_level_blocks(text):
+    """Split a ``.chiplet`` into top-level blocks, insertion-ordered, or REFUSE.
+
+    A line is a top-level key line iff its CONTENT matches ``_KEY_LINE_RE`` at
+    column 0; ``group(1)`` is the key. That line plus every following line up to
+    the next key line is the block, kept VERBATIM (key line, indented content,
+    comments, blank lines, line endings). Lines before the first key line are
+    the preamble, keyed ``""``. Joining the slices in document order reproduces
+    the input byte for byte. No YAML is parsed.
+
+    Two documents this used to answer, wrongly, are now refused with
+    ``TopLevelGrammarRefusal``:
+
+    * a QUOTED key at column 0. It is a key to YAML and not to this grammar, so
+      the split attached its block to the preceding key, whose owner
+      regenerates it away -- which is also how an exporter-owned key rides into
+      a document inside a foreign block, unseen by the ownership filter and by
+      the digest, because it travels in foreign content. There is no right
+      answer to give here, so none is given.
+    * a REPEATED top-level key. Concatenating the two runs decides who owns the
+      text but not which value wins, and no reading is conforming: PyYAML takes
+      the last value and yaml-cpp the first.
+
+    It does NOT refuse a document it merely cannot DELIMIT (a flow-style
+    document, ``flow :``). Those split correctly; they just yield no slice for
+    the node. Whether that is safe depends on what the caller does next, so it
+    is the caller's verdict and not the grammar's: ``split_for_rewrite``.
+    """
+    blocks = collections.OrderedDict()
     current = _PREAMBLE_KEY
     blocks[_PREAMBLE_KEY] = ""
-    for line in text.splitlines(keepends=True):
-        match = _KEY_LINE_RE.match(line)
-        if match:
-            current = match.group(1)
-            # A duplicate top-level key concatenates onto the first occurrence
-            # (which keeps its original insertion position).
-            blocks[current] = blocks.get(current, "") + line
-        else:
-            blocks[current] = blocks.get(current, "") + line
+    opened_at = {}
+    lineno = 0
+    for raw, content in iter_lines(text):
+        lineno += 1
+        key = top_level_key_line(content)
+        if key is not None:
+            if key in opened_at:
+                raise TopLevelGrammarRefusal(
+                    "the top-level key %r is named twice (already opened at "
+                    "line %d). PyYAML resolves a repeated key to the LAST "
+                    "value and yaml-cpp to the FIRST, so two conforming "
+                    "readers build different documents from these bytes"
+                    % (key, opened_at[key]),
+                    lineno, content, "repeated_top_level_key")
+            opened_at[key] = lineno
+            current = key
+            blocks[current] = raw
+            continue
+        if content[:1] in ("\"", "'"):
+            raise TopLevelGrammarRefusal(
+                _unmodelled_reason(content, True), lineno, content,
+                "quoted_key_at_column_zero")
+        blocks[current] = blocks.get(current, "") + raw
     if not blocks[_PREAMBLE_KEY]:
         del blocks[_PREAMBLE_KEY]
     return blocks
+
+
+#: Characters PyYAML treats as a LINE BREAK but this LF-only grammar treats as
+#: ordinary content: a lone CR (a CR that is not part of CRLF), NEL, and the
+#: Unicode line and paragraph separators.
+#:
+#: This is the residual PLUG-9 left behind, and it inverts the original defect
+#: rather than repeating it. Cutting only on LF is right for the grammar, and
+#: the oracle requires the SPLITTER to succeed on a U+2028 document. But it
+#: means PyYAML can see a line break where the grammar sees none, so a second
+#: ``components:`` written after a plain scalar, separated by one of these,
+#: lands inside a carried foreign block and wins by last-wins in the consumer.
+#: Measured: all four smuggled an owned block past both the layout refusal and
+#: the worker key-set check.
+#:
+#: It belongs to the WRITE verdict only, never to ``split_top_level_blocks``:
+#: reading such a document is fine and the oracle pins that the split succeeds.
+#: What is refused is writing it back, because the grammar cannot agree with
+#: the consumer about where its lines are.
+_BREAK_CHAR_RE = re.compile("\r(?!\n)|[\x85  ]")
+
+
+def break_character_line(text):
+    """``(lineno, content, why)`` for the first line-break disagreement, else None.
+
+    Line numbers count LF-terminated lines, so they match what the rest of the
+    verdict reports and what a user's editor shows for the same file.
+    """
+    # Searched over the WHOLE text, never per line. Splitting first would eat
+    # the LF that the ``\r(?!\n)`` lookahead needs, so every CRLF document
+    # would report a lone carriage return and be refused. That is not a
+    # hypothetical: it is the first thing this function got wrong.
+    match = _BREAK_CHAR_RE.search(text)
+    if match is None:
+        return None
+    found = match.group(0)
+    lineno = text.count("\n", 0, match.start()) + 1
+    line = text.split("\n")[lineno - 1]
+    names = {"\r": "a carriage return not followed by a newline",
+             "\x85": "a NEL (U+0085)",
+             "\u2028": "a Unicode line separator (U+2028)",
+             "\u2029": "a Unicode paragraph separator (U+2029)"}
+    shown = found.encode("unicode_escape").decode("ascii")
+    return (lineno,
+            line.replace(found, "<%s>" % shown),
+            "the line contains %s, which YAML reads as a line break and this "
+            "grammar reads as text, so the two disagree about where this "
+            "document's lines are" % names[found])
+
+
+def split_for_rewrite(text):
+    """``split_top_level_blocks`` for a caller about to REWRITE the document.
+
+    The same split over a narrower domain. It refuses the whole unmodelled-shape
+    set, not only the two shapes the grammar itself cannot answer, because this
+    caller is about to destroy the existing bytes: a block whose delimitation
+    the grammar got wrong, or whose bytes it never captured, is content that
+    disappears with no trace and no message. A reader may go on reading such a
+    document -- flow rule 1 says it must -- but a rewriter may not write it back.
+    """
+    bad = break_character_line(text)
+    if bad is not None:
+        lineno, content, why = bad
+        raise TopLevelGrammarRefusal(why, lineno, content, "break_character")
+    bad = unmodelled_top_level_line(text)
+    if bad is not None:
+        lineno, content, why = bad
+        raise TopLevelGrammarRefusal(why, lineno, content, "unmodelled_line")
+    return split_top_level_blocks(text)
+
+
+def unwritable_reason(path):
+    """User-facing reason this ``.chiplet`` cannot be safely re-exported, or None.
+
+    The whole GUI-tier verdict in one call, so the orchestrator branch stays
+    three lines and the message is testable without KiCad. None means: every
+    byte of the document is attributable to a top-level key this grammar
+    models, so regenerating the owned blocks and carrying the foreign ones over
+    cannot lose content the guard could not see.
+
+    Answers the LAYOUT question only. A file that cannot be read or decoded is
+    somebody else's verdict (the digest tripwire, which fails closed and which
+    ``force`` deliberately bypasses), and answering it here would silently take
+    that override away.
+    """
+    import os
+    if not path or not os.path.exists(path):
+        return None                                    # first export
+    try:
+        text = read_document(path)
+    except (OSError, UnicodeDecodeError):
+        return None                                    # not this check's question
+    try:
+        split_for_rewrite(text)
+    except TopLevelGrammarRefusal as exc:
+        return ("The existing .chiplet has a top-level line this exporter "
+                "cannot attribute to a block, so re-exporting it could destroy "
+                "content the guard cannot see. Refusing; the file on disk is "
+                "unchanged.\n"
+                "  File: %s\n"
+                "  Line %d: %s\n"
+                "  Why: %s\n"
+                "  Fix: write every top-level key at column 0 as an unquoted "
+                "`key:`, once each, then re-export. Or delete the file to "
+                "regenerate it from the board, losing whatever it holds.\n"
+                "  force=True does not bypass this: it overrides the hand-edit "
+                "tripwire, not a document this exporter cannot read."
+                % (path, exc.lineno, exc.line, exc.reason))
+    return None
 
 
 def foreign_top_level_keys(blocks: "collections.OrderedDict[str, str]") -> List[str]:
@@ -189,16 +537,14 @@ def carry_over_foreign_blocks(existing_final: str, staged_intermediate: str) -> 
     if not existing_final or not os.path.exists(existing_final):
         return []
 
-    with open(existing_final, "r", encoding="utf-8") as fh:
-        existing_text = fh.read()
-    existing_blocks = split_top_level_blocks(existing_text)
+    existing_text = read_document(existing_final)
+    existing_blocks = split_for_rewrite(existing_text)
     foreign = foreign_top_level_keys(existing_blocks)
     if not foreign:
         return []
 
-    with open(staged_intermediate, "r", encoding="utf-8") as fh:
-        staged_text = fh.read()
-    staged_blocks = split_top_level_blocks(staged_text)
+    staged_text = read_document(staged_intermediate)
+    staged_blocks = split_for_rewrite(staged_text)
 
     carried = [key for key in foreign if key not in staged_blocks]
     if not carried:
@@ -209,8 +555,7 @@ def carry_over_foreign_blocks(existing_final: str, staged_intermediate: str) -> 
     pieces = [existing_blocks[key].rstrip("\n") for key in carried]
     staged_text = staged_text.rstrip("\n") + "\n"      # single trailing newline
     staged_text += "\n" + "\n\n".join(pieces) + "\n"   # blank line before/between
-    with open(staged_intermediate, "w", encoding="utf-8") as fh:
-        fh.write(staged_text)
+    write_document(staged_intermediate, staged_text)
     return carried
 
 
@@ -225,7 +570,8 @@ def _owned_canonical(blocks: "collections.OrderedDict[str, str]") -> str:
     """
     parts = []
     for key in sorted(k for k in blocks if k in EXPORTER_OWNED_TOP_LEVEL_KEYS):
-        lines = [ln.rstrip() for ln in blocks[key].splitlines()]
+        lines = [content.rstrip()
+                 for _raw, content in iter_lines(blocks[key])]
         # Drop trailing blank AND full-line comment lines. A column-0 ``#``
         # comment pasted just above a foreign block (e.g. above ``flow:``)
         # attaches to the preceding owned block as its trailing line(s); dropping
@@ -246,9 +592,7 @@ def exporter_content_digest(path: str) -> str:
     only. It changes when exporter-owned content changes and does NOT change when
     a foreign block such as ``flow:`` is added or edited.
     """
-    with open(path, "r", encoding="utf-8") as fh:
-        text = fh.read()
-    canonical = _owned_canonical(split_top_level_blocks(text))
+    canonical = _owned_canonical(split_for_rewrite(read_document(path)))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

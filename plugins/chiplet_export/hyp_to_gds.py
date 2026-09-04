@@ -43,6 +43,111 @@ def _vendored_cfio():
     return cfio
 
 
+def _chiplet_merge():
+    """Import the GUI tier's top-level block grammar, BY FILE PATH.
+
+    By path and not as a package: importing ``chiplet_export.pipeline...`` runs
+    ``chiplet_export/__init__.py``, which registers the KiCad action plugin
+    whenever pcbnew is importable, so a CLI conversion would grow a side effect.
+    The module is stdlib-only, so the worker inherits nothing from it.
+
+    Imported and not reimplemented: the check below asks whether the key list
+    the ownership filter USED matches the parser's. A second implementation
+    that happens to agree with PyYAML would answer a different question.
+    """
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "pipeline", "chiplet_merge.py")
+    spec = importlib.util.spec_from_file_location("_chiplet_merge_worker", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _key_multiset_difference(left, right):
+    """Keys in ``left`` that ``right`` does not also have, counting repeats."""
+    rest = list(right)
+    out = []
+    for key in left:
+        if key in rest:
+            rest.remove(key)
+        else:
+            out.append(key)
+    return out
+
+
+def chiplet_top_level_key_parity_error(chiplet_path: str) -> Optional[str]:
+    """None when both parsers see the same top-level keys; else a message.
+
+    The second net under the GUI-tier layout refusal, and not a superset of it:
+    a quoted duplicate of an OWNED key passes this check (both parsers see one
+    ``components``) and is caught upstream, while a phantom key the grammar
+    invented inside a multi-line scalar passes upstream and is caught only
+    here. Each closes one direction of the same disagreement.
+    """
+    import yaml
+    merge = _chiplet_merge()
+    try:
+        text = merge.read_document(chiplet_path)
+    except (OSError, UnicodeDecodeError) as exc:
+        return f"{chiplet_path} cannot be read as UTF-8 text: {exc}"
+    # compose, not safe_load. safe_load builds a dict, and a dict COLLAPSES a
+    # repeated top-level key to one entry, which is exactly the shape being
+    # checked for: a break character PyYAML reads as a line break but the LF
+    # grammar reads as content lets a second `components:` ride inside a
+    # carried foreign block, and after collapsing, both sides report one
+    # `components` and this check says AGREE. Measured: with safe_load all four
+    # break characters (CR, NEL, U+2028, U+2029) passed. compose keeps the node
+    # tree, so duplicates survive to be compared.
+    try:
+        node = yaml.compose(text)
+    except yaml.YAMLError as exc:
+        return (f"{chiplet_path} is not valid YAML, so the block ownership "
+                f"decided during export cannot be checked.\n  {exc}")
+    if node is None or not isinstance(node, yaml.MappingNode):
+        return (f"{chiplet_path} has no mapping at the top level, so it has no "
+                f"top-level blocks to own.")
+    document = [key.value for key, _value in node.value]
+
+    # compose does not resolve scalars to Python objects, so the non-string
+    # key check has to read the resolved TAG rather than the value's type:
+    # `on:` composes to the string "on" carrying the bool tag, and it is the
+    # tag that tells us the grammar and the parser disagree about the key's
+    # identity.
+    _STR_TAG = "tag:yaml.org,2002:str"
+    unreadable = [(key.value, getattr(key, "tag", _STR_TAG))
+                  for key, _v in node.value
+                  if getattr(key, "tag", _STR_TAG) != _STR_TAG]
+    if unreadable:
+        # Name the resolved type, not just the key: "on" reads as a bool and
+        # "9" as an int, and a user who cannot see WHICH type has no way to
+        # know why quoting the key is the fix.
+        shown = ", ".join(f"{v!r} ({t.rsplit(':', 1)[-1]})" for v, t in unreadable)
+        return (f"{chiplet_path} has a top-level key YAML does not read as "
+                f"text: {shown}. The grammar and the parser disagree about "
+                f"that key's identity, so ownership cannot be decided. Quote "
+                f"the key.")
+
+    grammar = sorted(merge.top_level_key_lines(text))
+    parser = sorted(document)
+    if grammar != parser:
+        only_grammar = _key_multiset_difference(grammar, parser)
+        only_parser = _key_multiset_difference(parser, grammar)
+        lines = [
+            f"{chiplet_path}: the text grammar and the YAML parser disagree "
+            f"about the top-level keys, so the block ownership decided during "
+            f"export cannot be trusted. No GDS was written.",
+            f"  grammar sees: {', '.join(grammar) or '(none)'}",
+            f"  parser sees : {', '.join(parser) or '(none)'}",
+        ]
+        if only_grammar:
+            lines.append(f"  only in the grammar: {', '.join(only_grammar)}")
+        if only_parser:
+            lines.append(f"  only in the parser : {', '.join(only_parser)}")
+        return "\n".join(lines)
+    return None
+
+
 # Chiplet mechanical boundaries are ADK assembly metadata, not fabrication
 # geometry. They are emitted to a <gds>.boundaries.json manifest (see
 # GDSGenerator._write_boundary_manifest) and live in NO PDK layer namespace,
@@ -4546,6 +4651,18 @@ def convert_hyp_to_gds(
         True if conversion was successful
     """
     print(f"Converting: {hyp_path} -> {output_path}")
+
+    # Gate: do the text grammar and the YAML parser agree about this document's
+    # top-level keys? The GUI tier decided block ownership from the raw text
+    # with no parser available; this is the one place both exist, so it is the
+    # one place that proposition can be checked. Here at the head, before any
+    # durable artifact: a refusal after the interposer GDS is on disk is not a
+    # refusal, and update_chiplet_file runs 500 lines later, after the write.
+    if chiplet_file_path:
+        parity = chiplet_top_level_key_parity_error(chiplet_file_path)
+        if parity:
+            print("\nERROR: " + parity, file=sys.stderr)
+            return False
 
     # Load layer mapping
     layer_map = LayerMap(lyp_path)

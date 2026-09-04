@@ -1366,6 +1366,22 @@ def run_export(board, options, plugin_dir,
         # staged intermediate so flow: stays EMBEDDED (FlowEngine reads it only
         # from the embedded block) and survives the finalizer's round-trip.
         if options.emit_chiplet:
+            # Before anything reads the existing document for ownership: does
+            # this exporter understand its top-level layout at all? The guard
+            # below decides who owns which lines from the raw text, and on a
+            # layout it does not model that decision is wrong in one of two
+            # ways -- a block attributed to the wrong key, or a block whose
+            # bytes were never captured -- and the copy2 further down then
+            # destroys the evidence. Refuse the export instead, naming the
+            # line. NOT force-gated: force overrides the hand-edit tripwire,
+            # not a document we cannot read, and carry_over_foreign_blocks runs
+            # on the force path too. NOT "carry nothing and continue" either:
+            # dropping the block silently is the data loss this guard exists to
+            # prevent.
+            layout_refusal = chiplet_merge.unwritable_reason(chiplet_final)
+            if layout_refusal:
+                _log(layout_refusal)
+                return ExportResult(error=layout_refusal)
             # force short-circuits the whole tripwire: it bypasses BOTH a tripped
             # wire AND a corrupt/undecodable canonical file, because the
             # detector below is never called when force is set. Guard the
@@ -1400,6 +1416,23 @@ def run_export(board, options, plugin_dir,
             try:
                 carried = chiplet_merge.carry_over_foreign_blocks(
                     chiplet_final, chiplet_intermediate)
+            except chiplet_merge.TopLevelGrammarRefusal as exc:
+                # A refusal must NOT be degraded into "carried nothing": that
+                # is precisely the silent data loss. Reaching here means the
+                # STAGED document is the unmodelled one (the existing file was
+                # checked above), i.e. our own writer emitted a layout the
+                # grammar cannot attribute -- an internal defect, and the
+                # honest response is still to leave the user's file alone.
+                message = (
+                    "The .chiplet this export just generated has a top-level "
+                    "line the guard cannot attribute to a block, so carrying "
+                    "the existing foreign blocks over would be a guess. "
+                    "Refusing; the file on disk is unchanged.\n"
+                    "  File: %s\n  Staged: %s\n  Line %d: %s\n  Why: %s"
+                    % (chiplet_final, chiplet_intermediate,
+                       exc.lineno, exc.line, exc.reason))
+                _log(message)
+                return ExportResult(error=message)
             except Exception as exc:
                 # A malformed canonical file must not crash the export; the
                 # worst case degrades to the pre-guard behaviour (no carry-over),

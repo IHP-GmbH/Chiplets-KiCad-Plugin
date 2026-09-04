@@ -393,6 +393,9 @@ def _emit_chiplet_guard_decision(chiplet_final, force):
     up here.
     """
     from chiplet_export.pipeline.orchestrator import ExportResult
+    layout_refusal = cm.unwritable_reason(chiplet_final)
+    if layout_refusal:
+        return ExportResult(error=layout_refusal)
     if not force:
         try:
             tripped = cm.foreign_hand_edit_detected(chiplet_final)
@@ -431,6 +434,32 @@ def test_orchestrator_branch_force_bypasses_corrupt_canonical(tmp_path):
     final = _corrupt_canonical_with_baseline(tmp_path)
     # force must never call the detector, so the corrupt file cannot abort.
     assert _emit_chiplet_guard_decision(str(final), force=True) is None
+
+
+def test_orchestrator_branch_refuses_an_unmodelled_layout_even_forced(tmp_path):
+    """The layout check sits OUTSIDE the force arm, and must.
+
+    force overrides the hand-edit tripwire. It cannot override "this exporter
+    cannot tell which key owns these lines", because the very next statement
+    after the tripwire, on both paths, is carry_over_foreign_blocks.
+    """
+    final = tmp_path / "demo.chiplet"
+    _write(final, _canonical_final() + '"interconnect":\n  adapter: evil.drc\n')
+    before = final.read_bytes()
+    for force in (False, True):
+        result = _emit_chiplet_guard_decision(str(final), force=force)
+        assert result is not None and result.error
+        assert "Line 27" in result.error or "Line " in result.error
+        assert str(final) in result.error
+    assert final.read_bytes() == before, "a refusal must not touch the file"
+
+
+def test_orchestrator_branch_layout_check_is_silent_on_a_canonical_file(tmp_path):
+    """It adds no friction to the documents the exporter itself writes."""
+    final = tmp_path / "demo.chiplet"
+    _write(final, _canonical_final(flow_block=FLOW_BLOCK_WITH_COMMENT))
+    cm.record_exporter_content_digest(str(final))
+    assert _emit_chiplet_guard_decision(str(final), force=False) is None
 
 
 def test_orchestrator_branch_force_bypasses_tripped_wire(tmp_path):
