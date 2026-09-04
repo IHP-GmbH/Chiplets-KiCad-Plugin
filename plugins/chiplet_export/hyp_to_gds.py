@@ -3599,9 +3599,19 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
         data['format_version'] = _vendored_cfio().check_format_version(
             data.get('format_version'))
 
-        # Write back the updated file
-        with open(chiplet_file, 'w') as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        # Write back the updated file, atomically. A plain open(..., 'w')
+        # truncates the existing document before a single byte of the new one
+        # is written, so ANY failure in yaml.dump -- an unserializable value, a
+        # full disk, the process being killed -- left a truncated .chiplet
+        # where a valid one used to be. That is a data-loss window on the file
+        # this whole module exists to protect, and it is not specific to any
+        # one failure: it makes the class moot rather than handling members of
+        # it. The temp file is a sibling so os.replace stays on one filesystem,
+        # where it is atomic; a cross-device rename would not be.
+        _atomic_write_text(
+            chiplet_file,
+            yaml.dump(data, default_flow_style=False, sort_keys=False),
+        )
 
         print(f"Chiplet file updated: {chiplet_path}")
         return True
@@ -3621,6 +3631,57 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
             raise SourceRefused(str(e), exit_code=EXIT_SOURCE_VERSION) from e
         print(f"Error updating chiplet file: {e}", file=sys.stderr)
         return False
+
+
+def _manifest_refusal(exc, what):
+    """Wrap a reader exception as a typed refusal naming what could not be read.
+
+    The manifest helpers used to let the reader's own exception escape raw.
+    That was better than swallowing it, but it surfaced as a traceback out of
+    main with exit 1, which means bad caller input, and in
+    ``convert_hyp_to_gds`` it arrived AFTER the interposer GDS was already on
+    disk. A refusal that lands after the artifact exists is a report, not a
+    refusal. Typed, it is reported by the boundary with the shared table's code.
+    """
+    return SourceRefused(
+        "the interconnect PDK manifest is present but unusable, so %s could "
+        "not be read (%s: %s)" % (what, type(exc).__name__, exc),
+        exit_code=_source_refusal_exit_code(exc),
+    )
+
+
+def _atomic_write_text(path, text):
+    """Replace ``path`` with ``text`` atomically, or leave it untouched.
+
+    Writes a sibling temp file, flushes it to the platter, then ``os.replace``,
+    which is atomic within one filesystem. A reader either sees the whole old
+    document or the whole new one, never a half-written one.
+
+    The sibling directory matters: ``os.replace`` across filesystems is not
+    atomic (and on some platforms not even permitted), so a temp file in /tmp
+    would silently give back the guarantee this exists to provide.
+
+    The fsync is what makes the guarantee survive a power loss rather than only
+    a crashed process. Without it the rename can reach the disk before the
+    bytes do, which is the one ordering that produces an empty file where a
+    valid document used to be.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".chiplet-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        # Never leave the temp file behind on a failure; the original document
+        # is still intact because os.replace has not run.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _is_manifest_version_error(exc):
@@ -3905,7 +3966,12 @@ def _connection_to_body_diameter(connection_type):
     try:
         method = im.get_method(connection_type)
     except (KeyError, FileNotFoundError):
+        # KeyError IS the "unknown method" signal here, unlike at the
+        # technology-block site: this looks a method up BY ID, so the reader
+        # raising KeyError means that id is not in the manifest. Keep the arm.
         return None  # unknown method, or a partial PDK install
+    except Exception as exc:
+        raise _manifest_refusal(exc, "body geometry for '%s'" % connection_type)
     layers = method.get("connection_stack", {}).get("layers", [])
     if any("Ball" in layer.get("name", "") for layer in layers):
         return None
@@ -3928,6 +3994,8 @@ def _connection_to_adapter(connection_type):
         method = im.get_method(connection_type)
     except (KeyError, FileNotFoundError):
         return None  # unknown method, or a partial PDK install
+    except Exception as exc:
+        raise _manifest_refusal(exc, "the adapter for '%s'" % connection_type)
     return method.get("adapter")
 
 
