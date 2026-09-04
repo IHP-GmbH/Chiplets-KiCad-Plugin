@@ -26,6 +26,12 @@ jobs:
         working-directory: plugins/${{ matrix.plugin }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The vendored-copy gates compare a file against the previous commit
+          # that CHANGED it, so they need history. At the default depth 1 they
+          # do not fail, they SKIP, which is the worst outcome available: the
+          # checks exist, the log says green, and nothing was ever compared.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:

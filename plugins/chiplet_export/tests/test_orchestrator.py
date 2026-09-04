@@ -19,6 +19,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT.parent))
 
+from chiplet_export.pipeline import orchestrator  # noqa: E402
 from chiplet_export.pipeline.orchestrator import (  # noqa: E402
     DEFAULT_INTERPOSER_ADAPTER,
     DEFAULT_INTERCONNECT_ADAPTER,
@@ -508,6 +509,36 @@ components:
 """
 
 
+class _StubManifestReader(object):
+    """Stands in for the interconnect PDK's own manifest reader.
+
+    Injected rather than relying on a sibling PDK checkout, because these tests
+    are about what the ORCHESTRATOR does with what a reader returns; what the
+    PDK's reader accepts is the PDK's test. Running them against whichever copy
+    happened to be on the machine tested neither: on a bare runner there was no
+    reader at all, the loader returned {} and these assertions were being made
+    against the hardcoded fallback list. Local runs were green for months and
+    the first CI run on a lone checkout failed all four.
+    """
+
+    def __init__(self, require_version=True):
+        self.require_version = require_version
+
+    def load_manifest(self, path):
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        if self.require_version and "schema_version" not in data:
+            raise ValueError("manifest declares no schema_version")
+        return data
+
+
+@pytest.fixture
+def stub_reader(monkeypatch):
+    """A reader that is always there, so the test measures the orchestrator."""
+    stub = _StubManifestReader()
+    monkeypatch.setattr(orchestrator, "_interconnect_reader", lambda: stub)
+    return stub
+
+
 def _write_fake_interconnect_root(tmp_path):
     root = tmp_path / "interconnect_pdk_root"
     manifest_dir = root / "manifest"
@@ -557,7 +588,7 @@ def test_read_component_connections_indented_items(tmp_path):
                                               ("die_b", "m_b")]
 
 
-def test_derive_interconnect_methods_groups_dies_per_method(tmp_path):
+def test_derive_interconnect_methods_groups_dies_per_method(tmp_path, stub_reader):
     chiplet = _write_chiplet(tmp_path, MIXED_CHIPLET)
     root = _write_fake_interconnect_root(tmp_path)
     methods = derive_interconnect_methods(chiplet, interconnect_root=root)
@@ -724,7 +755,7 @@ def test_discover_interposer_lyp_no_source_returns_empty(tmp_path, monkeypatch):
     assert found == ""
 
 
-def test_available_connection_types_explicit_root(tmp_path):
+def test_available_connection_types_explicit_root(tmp_path, stub_reader):
     """An explicit root's manifest defines the dropdown, declaration order
     preserved -- pointing the dialog at a vendor checkout swaps the list."""
     root = tmp_path / "vendor_pdk"
@@ -786,7 +817,7 @@ def test_connection_label_without_manifest_is_the_bare_id():
     assert describe_connection_method("legacy_stack", {}) == "legacy_stack"
 
 
-def test_connection_label_survives_a_partial_manifest_entry(tmp_path):
+def test_connection_label_survives_a_partial_manifest_entry(tmp_path, stub_reader):
     """A vendor entry missing pitch_rules degrades field by field instead of
     dropping the method from the dialog."""
     root = tmp_path / "vendor_pdk"
@@ -1033,7 +1064,31 @@ def test_a_refused_adapter_is_not_reportable_as_a_skip():
     assert refused != skipped and refused != passed
 
 
-def test_a_manifest_without_a_version_is_refused(tmp_path):
+def test_a_present_manifest_with_no_reader_is_refused(tmp_path, monkeypatch):
+    """No reader plus a manifest sitting right there is not absence.
+
+    This is the case a bare runner is in, and the one the first version of the
+    rewrite got wrong: it returned {} with the comment "the PDK is not
+    installed", but the file had already been found on disk two lines above. The
+    caller then reads "no methods" and available_connection_types serves its
+    hardcoded list, so the export succeeds against invented data while a real
+    manifest lies unread beside it. Absence is handled earlier, by the root and
+    the file check; reaching the reader means present, and present-and-unusable
+    refuses.
+    """
+    from chiplet_export.pipeline.orchestrator import (
+        InterconnectSourceRefused, _load_interconnect_methods)
+
+    root = _write_fake_interconnect_root(tmp_path)
+    monkeypatch.setattr(orchestrator, "_interconnect_reader", lambda: None)
+    with pytest.raises(InterconnectSourceRefused) as excinfo:
+        _load_interconnect_methods(interconnect_root=root)
+    # The message has to say what to do, since the user's PDK may be fine and
+    # only the python path wrong.
+    assert "INTERCONNECT_PDK_ROOT" in str(excinfo.value)
+
+
+def test_a_manifest_without_a_version_is_refused(tmp_path, stub_reader):
     """PLUG-12's break-it-once: the gate is what the raw json.load skipped.
 
     The loader used to read this file directly under a bare except that

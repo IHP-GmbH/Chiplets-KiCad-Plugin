@@ -503,7 +503,20 @@ def _load_interconnect_methods(interconnect_root: str = "",
         return {}
     reader = _interconnect_reader()
     if reader is None:
-        return {}                      # no reader: the PDK is not installed
+        # The manifest file is RIGHT THERE (checked above) and the thing that
+        # applies the version policy to it is not. Returning {} here would have
+        # been the same fail-open this function was rewritten to close, one step
+        # further along: the caller reads "no methods", falls back to the
+        # hardcoded list in available_connection_types, and the export succeeds
+        # against invented data while a real manifest sits unread beside it.
+        #
+        # Absence is already handled above (no root, or no file). Reaching here
+        # means present-and-unusable, which the docstring says refuses.
+        raise InterconnectSourceRefused(
+            "the interconnect PDK manifest at %s is present but its reader is "
+            "not importable, so the schema version cannot be checked. Install "
+            "the interconnect PDK's interconnect_manifest module, or unset "
+            "INTERCONNECT_PDK_ROOT to export without it." % root)
     try:
         methods = reader.load_manifest(manifest_path)
     except FileNotFoundError:
