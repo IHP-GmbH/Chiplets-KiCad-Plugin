@@ -2,7 +2,8 @@
 """Score ``chiplet_merge.split_top_level_blocks`` against the chiplet-spec oracle.
 
 Read-only conformance harness for the TOP-LEVEL BLOCK GRAMMAR fixture
-``conformance/fixtures/top_level_blocks_cases.json`` (chiplet-spec 8a2e6be).
+``conformance/fixtures/top_level_blocks_cases.json`` (chiplet-spec 6e640fb,
+oracle version 3).
 It never edits the plugin; it only reports which oracle rows the current
 splitter agrees with.
 
@@ -18,9 +19,13 @@ Exit code 0 when every row agrees, 1 otherwise. Groups scored:
                            ``blocks`` list EXACTLY: same keys, same order, same
                            text bytes. The lossless property (concatenation of
                            every slice reproduces ``doc``) is checked too.
-* ``refuse``            -- the splitter must REFUSE the document. "Refuse" is
-                           observed as raising an exception; a splitter that
-                           returns blocks has not refused.
+* ``refuse.splitter``   -- rows whose ``refused_by`` names the splitter: it must
+                           REFUSE, observed as raising; returning blocks is not
+                           a refusal.
+* ``refuse.reader_only``-- rows a READER refuses and the splitter must not. The
+                           grammar has an answer for a forbidden line break (no
+                           key line starts there), so refusing would be wrong;
+                           scored as "split, and still lossless".
 * ``not_delimitable``   -- the splitter must succeed and produce NO ``flow`` key
                            (the flow node exists to a YAML reader but the grammar
                            cannot delimit its bytes).
@@ -40,11 +45,20 @@ if _PLUGIN_ROOT not in sys.path:
 
 from chiplet_export.pipeline import chiplet_merge  # noqa: E402
 
+#: The vendored copy, which is pinned and gated (see ``VENDORED.md``). It used
+#: to default to a scratch copy under /tmp, which existed on exactly one machine
+#: for exactly one session: the harness then reported a perfect score against a
+#: file nobody else had, and against a version of the oracle that predated the
+#: ``refused_by`` field. Default to the copy the suite also runs.
 DEFAULT_ORACLE = os.path.join(
-    "/tmp/claude-30034/-home-montanares-git-heterogenic-chip-design-project-"
-    "chiplet-kicad-plugin/7b18af77-1e4a-4ab7-8610-0871b2b4a1e0/scratchpad",
-    "oracle.json",
+    os.path.dirname(_HERE), "plugins", "chiplet_export", "tests", "fixtures",
+    "top_level_blocks_cases.json",
 )
+
+#: Oracle version this harness understands; see the note in
+#: ``test_top_level_block_grammar.py``. Reading ``refused_by`` off an older copy
+#: yields ``None`` for every row and scores a vacuous 100%.
+ORACLE_VERSION = 3
 
 
 def _q(text: str) -> str:
@@ -115,18 +129,46 @@ def score_splits(oracle, rep):
 
 
 def score_refuse(oracle, rep):
+    """Score BOTH directions of the refuse group, split by ``refused_by``.
+
+    The group is "documents SOME implementation refuses". Scoring the whole of
+    it as "the splitter must raise" was correct only while every row happened to
+    be a splitter row; the reader-only rows (a forbidden line break, which the
+    grammar has a perfectly good answer for) invert the verdict underneath. A
+    harness that keeps scoring them the old way reports a failure where the
+    splitter is right, which is the same defect as reporting a pass where it is
+    wrong, only in the direction people notice.
+    """
     for case in oracle["refuse"]:
         name = case["name"]
+        must_refuse = "splitter" in case["refused_by"]
+        group = "refuse.splitter" if must_refuse else "refuse.reader_only"
         try:
             got = list(chiplet_merge.split_top_level_blocks(case["doc"]).items())
         except Exception as exc:                      # noqa: BLE001
-            rep.add("refuse", name, True, "refused with %s: %s" % (type(exc).__name__, exc))
+            rep.add(group, name, must_refuse,
+                    "refused with %s: %s" % (type(exc).__name__, exc)
+                    if must_refuse else
+                    "kind=%s: refused with %s, but this row is refused_by=%r. "
+                    "The splitter loses nothing here: no key line starts at "
+                    "that character, so the block is attributed correctly.\n"
+                    "      %s: %s"
+                    % (case.get("kind"), case["refused_by"],
+                       type(exc).__name__, exc))
+            continue
+        if not must_refuse:
+            # It must also still be LOSSLESS, or "did not refuse" is hiding a
+            # silent drop rather than a correct attribution.
+            joined = "".join(t for _k, t in got)
+            rep.add(group, name, joined == case["doc"],
+                    "did not refuse (correct) but concat != doc\n"
+                    "      concat %s\n      doc    %s" % (_q(joined), _q(case["doc"])))
             continue
         detail = ("kind=%s: did NOT refuse; returned keys %r"
                   % (case.get("kind"), [k for k, _ in got]))
         for k, t in got:
             detail += "\n      %s -> %s" % (_q(k), _q(t))
-        rep.add("refuse", name, False, detail)
+        rep.add(group, name, False, detail)
 
 
 def score_not_delimitable(oracle, rep):
@@ -148,6 +190,14 @@ def main(argv):
     path = argv[1] if len(argv) > 1 else DEFAULT_ORACLE
     with open(path, "r", encoding="utf-8") as fh:
         oracle = json.load(fh)
+
+    got_version = oracle.get("version")
+    if got_version != ORACLE_VERSION:
+        print("oracle: %s" % path)
+        print("REFUSING to score: oracle version %r, this harness reads %d.\n"
+              "A copy without 'refused_by' scores every refuse row the old way "
+              "and reports a number that means nothing." % (got_version, ORACLE_VERSION))
+        return 1
 
     rep = Report()
     score_key_lines(oracle, rep)

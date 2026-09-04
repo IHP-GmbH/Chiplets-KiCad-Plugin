@@ -34,8 +34,8 @@ PLUGIN_ROOT = os.path.dirname(HERE)
 #: the same three facts and must be updated in the same commit as the copy.
 READER_PATH = os.path.join(PLUGIN_ROOT, "vendor", "chiplet_format_io", "__init__.py")
 READER_UPSTREAM = "reference/python/chiplet_format_io/__init__.py"
-READER_COMMIT = "a5cd3ef"
-READER_SHA256 = "dfc2497f8d4a2fc42da590b25e72536fc87c41b400bd113da61bab999262d3ab"
+READER_COMMIT = "6e640fb"
+READER_SHA256 = "c93775683e5be09ccb968d3d0840b31174630daf677caaf2b6c4773462ae31df"
 
 
 def _sha256(blob):

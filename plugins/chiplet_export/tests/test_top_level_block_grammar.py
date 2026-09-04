@@ -39,19 +39,54 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 from chiplet_export.pipeline import chiplet_merge  # noqa: E402
 
-#: Vendored byte-for-byte from chiplet-spec 8a2e6be
+#: Vendored byte-for-byte from chiplet-spec 6e640fb
 #: ``conformance/fixtures/top_level_blocks_cases.json``. Re-vendor with a plain
-#: copy; never edit it here (add a case upstream, in the fixture).
+#: copy; never edit it here (add a case upstream, in the fixture). Provenance
+#: is also declared in ``VENDORED.md`` and gated by ``test_vendored_copies.py``.
 ORACLE_PATH = os.path.join(HERE, "fixtures", "top_level_blocks_cases.json")
-ORACLE_SHA256 = "20a80fc0623346643479cebeab697cc3883060ffe2e9a305fa9e44add64e0de3"
-ORACLE_COMMIT = "8a2e6be"
+ORACLE_SHA256 = "bd641d4f7de029c8b270abb454db4bde31b740db0126143d6ac5d2d94c618788"
+ORACLE_COMMIT = "6e640fb"
 
 with open(ORACLE_PATH, "r", encoding="utf-8") as _fh:
     ORACLE = json.load(_fh)
 
+#: The oracle's own version. Version 1 is any copy with no ``version`` key,
+#: where the whole ``refuse`` group meant "a splitter refuses"; version 2 added
+#: the per-case ``refused_by`` list and the U+000D rows; version 3 turned
+#: ``loadable`` into an obligation in both directions.
+#:
+#: This is asserted rather than tolerated. A consumer that reads ``refused_by``
+#: off a version 1 copy gets ``None`` for every row and silently tests nothing,
+#: which is the exact shape of failure the field was added to prevent: the
+#: verdict inverts underneath and the suite stays green. Failing on the version
+#: makes a stale re-vendor loud.
+ORACLE_VERSION = 3
+assert ORACLE.get("version") == ORACLE_VERSION, (
+    "the vendored oracle is version %r, this consumer reads version %d. A copy "
+    "without 'refused_by' would make every refusal test below vacuous."
+    % (ORACLE.get("version"), ORACLE_VERSION))
+
 
 def _ids(rows, key="name"):
     return [row[key] for row in rows]
+
+
+def _refused_by(who, rows=None):
+    """The refuse rows THIS kind of implementation must reject.
+
+    Read the field, never the group name. The group is "documents SOME
+    implementation refuses"; it was "documents a splitter refuses" only while
+    every row in it happened to be one. When reader-only rows arrived (a
+    forbidden line break, which a splitter has a perfectly good answer for),
+    every consumer that had parametrized "the splitter must raise" over the
+    whole group went red on a verdict that had been inverted under it.
+    """
+    return [row for row in (ORACLE["refuse"] if rows is None else rows)
+            if who in row["refused_by"]]
+
+
+SPLITTER_REFUSES = _refused_by("splitter")
+READER_REFUSES = _refused_by("reader")
 
 
 # --------------------------------------------------------------------------
@@ -157,13 +192,29 @@ def test_split_is_lossless(case):
 # refuse / not_delimitable: the two verdicts people keep conflating.
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("case", ORACLE["refuse"], ids=_ids(ORACLE["refuse"]))
+@pytest.mark.parametrize("case", SPLITTER_REFUSES, ids=_ids(SPLITTER_REFUSES))
 def test_splitter_refuses(case):
     with pytest.raises(chiplet_merge.TopLevelGrammarRefusal) as excinfo:
         chiplet_merge.split_top_level_blocks(case["doc"])
     # The message must name the line, since that is what the user has to fix.
     assert excinfo.value.lineno >= 1
     assert excinfo.value.line in case["doc"]
+
+
+@pytest.mark.parametrize("case", READER_REFUSES, ids=_ids(READER_REFUSES))
+def test_a_reader_only_refusal_is_not_the_splitters_job(case):
+    """The grammar has an answer for these bytes, and giving it is correct.
+
+    A forbidden line break is a character a YAML parser breaks a line on and
+    this grammar does not. That is a READER's refusal: the splitter sees no key
+    line there, so it attaches nothing and loses nothing. Asserting the split
+    still succeeds is what stops a future "just refuse everything in the refuse
+    group" from being mistaken for conformance.
+    """
+    if "splitter" in case["refused_by"]:
+        pytest.skip("also a splitter refusal; covered above")
+    blocks = chiplet_merge.split_top_level_blocks(case["doc"])
+    assert "".join(blocks.values()) == case["doc"]
 
 
 @pytest.mark.parametrize("case", ORACLE["not_delimitable"],
@@ -177,6 +228,98 @@ def test_splitter_does_not_refuse_a_merely_undelimitable_document(case):
     blocks = chiplet_merge.split_top_level_blocks(case["doc"])
     assert "flow" not in blocks
     assert "".join(blocks.values()) == case["doc"]
+
+
+# --------------------------------------------------------------------------
+# The other half of the oracle: what a READER owes.
+# --------------------------------------------------------------------------
+
+def _vendored_reader():
+    """The vendored reference reader, worker tier only (it needs PyYAML)."""
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "vendor"))
+    import chiplet_format_io  # noqa: E402
+    return chiplet_format_io
+
+
+def _assert_refused_for_the_right_reason(cfio, row):
+    """Refused, AND the refusal is about the thing the row is about.
+
+    ``pytest.raises(Exception)`` is not enough here and the first version of
+    this test made exactly that mistake. Every one of these documents is a
+    fragment with no ``format_version``, so the reader refuses all of them with
+    ``ChipletFormatError`` whether or not it knows anything about line breaks;
+    the check passed against a reader that had never heard of them. So the
+    proposition is the MESSAGE: it has to name the code point and the line, and
+    the oracle carries both, which is what makes it discriminating.
+    """
+    with pytest.raises(cfio.ChipletFormatError) as excinfo:
+        cfio.loads(row["doc"])
+    message = str(excinfo.value)
+    if row.get("code_point"):
+        assert row["code_point"] in message, (
+            "refused, but not for the line break: %r" % message)
+        assert "line %d" % row["line"] in message, (
+            "refusal does not name line %d: %r" % (row["line"], message))
+    return message
+
+
+@pytest.mark.parametrize("case", READER_REFUSES, ids=_ids(READER_REFUSES))
+def test_the_vendored_reader_refuses_what_a_reader_must(case):
+    """The copy in ``vendor/`` has to satisfy the oracle it is shipped beside.
+
+    Worth its own test because the copy is the thing that goes stale. The reader
+    vendored before this one was ten commits behind and predated the CR row of
+    the line-break set, so it LOADED a document the oracle says every reader
+    refuses, and nothing here said so: the fixture was gated, the reader was
+    not. Pinning the reader against the same fixture closes that gap, and the
+    next stale re-vendor fails on the row it actually gets wrong.
+
+    Measured against that older copy, this test fails on nine of nine rows, and
+    four of them fail with ``unsupported format_version '9.0'``: the reader had
+    read the SMUGGLED ``format_version`` past the line break, so the attack the
+    row describes is visible succeeding in the error message.
+    """
+    _assert_refused_for_the_right_reason(_vendored_reader(), case)
+
+
+def test_the_vendored_reader_refuses_the_unloadable_split_cases():
+    """``loadable: false`` is an obligation in version 3, in both directions.
+
+    It used to mean "no reader is REQUIRED to load this", a permission, and one
+    row carried a false claim under it while every test stayed green. So the
+    rows that carry it are executed, not read.
+    """
+    cfio = _vendored_reader()
+    unloadable = [row for group in ("splits", "not_delimitable")
+                  for row in ORACLE[group] if row.get("loadable") is False]
+    assert unloadable, "no loadable:false row left; this test has lost its subject"
+    for row in unloadable:
+        _assert_refused_for_the_right_reason(cfio, row)
+
+
+def test_a_loadable_row_really_does_load():
+    """The other half, or the tests above only prove the reader says no a lot.
+
+    A reader that refused every document would satisfy every assertion in this
+    section. The oracle's rule is that a case WITHOUT the flag is one every
+    reader loads, so at least the complete documents in it have to come back.
+    """
+    cfio = _vendored_reader()
+    loaded = 0
+    for group in ("splits", "not_delimitable"):
+        for row in ORACLE[group]:
+            if row.get("loadable") is False:
+                continue
+            try:
+                cfio.loads(row["doc"])
+            except cfio.ChipletFormatError as exc:
+                # Most rows are fragments written to exercise the grammar, not
+                # whole documents, so a missing required key is expected. A
+                # line-break complaint is NOT, and that is the discrimination.
+                assert "line breaks are LF and CRLF" not in str(exc), row["name"]
+                continue
+            loaded += 1
+    assert loaded, "no oracle row loads at all; the reader is refusing everything"
 
 
 # --------------------------------------------------------------------------
@@ -215,7 +358,7 @@ def test_rewrite_accepts_every_splittable_document(case):
 
     One documented exception, above. The oracle constrains a SPLITTER, and
     ``split_top_level_blocks`` does accept that row (the parity harness scores
-    40/40); what this pipeline declines is writing it back.
+    50/50); what this pipeline declines is writing it back.
     """
     if case["name"] in _REWRITE_REFUSES_ANYWAY:
         with pytest.raises(chiplet_merge.TopLevelGrammarRefusal) as refused:

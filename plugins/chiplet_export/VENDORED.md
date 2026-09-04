@@ -15,17 +15,25 @@ Upstream `git@github.com:IHP-GmbH/chiplet-spec.git`. The gates look for a checko
 beside this repository, or at `CHIPLET_SPEC_ROOT`, and skip where there is none, so the
 suite still runs standalone.
 
+Both copies come from the same upstream state, `6e640fb` on `dev`, which is a
+merge commit whose gate ran green on all five jobs. Pinning the gated head rather
+than the last commit that happened to touch each file means the pin names a state
+somebody verified, not just a state that exists.
+
 **`vendor/chiplet_format_io/__init__.py`**
-from `reference/python/chiplet_format_io/__init__.py` at commit `a5cd3ef`
-("Export a reader release so vendored copies are gateable"),
-sha256 `dfc2497f8d4a2fc42da590b25e72536fc87c41b400bd113da61bab999262d3ab`.
+from `reference/python/chiplet_format_io/__init__.py` at commit `6e640fb`,
+sha256 `c93775683e5be09ccb968d3d0840b31174630daf677caaf2b6c4773462ae31df`.
 Gated by `tests/test_vendored_copies.py`.
 
 **`tests/fixtures/top_level_blocks_cases.json`**
-from `conformance/fixtures/top_level_blocks_cases.json` at commit `8a2e6be`,
-sha256 `20a80fc0623346643479cebeab697cc3883060ffe2e9a305fa9e44add64e0de3`.
+from `conformance/fixtures/top_level_blocks_cases.json` at commit `6e640fb`,
+sha256 `bd641d4f7de029c8b270abb454db4bde31b740db0126143d6ac5d2d94c618788`,
+oracle version 3.
 Gated by `tests/test_top_level_block_grammar.py`
-(`test_oracle_copy_is_unmodified` and `test_oracle_copy_matches_the_spec_checkout_when_present`).
+(`test_oracle_copy_is_unmodified` and `test_oracle_copy_matches_the_spec_checkout_when_present`),
+which also asserts the oracle version it was written against, because a consumer
+reading `refused_by` off a version 1 copy gets `None` for every row and tests
+nothing while staying green.
 
 The two gates ask different questions on purpose. The reader is pinned to the bytes of a
 named commit, and is checked against that commit's blob rather than against whatever the
