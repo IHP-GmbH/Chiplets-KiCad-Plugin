@@ -1,0 +1,483 @@
+{
+  "format": "interposer_pnr.export",
+  "version": 1,
+  "rules_source": {
+    "physical_stack": {
+      "source": "<interposer>/libs.tech/intm4tm2_stack.json",
+      "sha256": "46a5879540ece79cec3267975a29af51d617e81fb77e358dfd5af67452d24117",
+      "version": "1.1"
+    },
+    "routing_tech": {
+      "source": "<interposer-pnr>/src/interposer_pnr/descriptors/ihp_sg13g2_intm4tm2_rdl2.routing_tech.json",
+      "sha256": "d4a888c1408f3ef7ef655827df6b541606128bb00e1b6cc1b554e166baf08c6a",
+      "version": "1.2"
+    }
+  },
+  "board": "<tmp>/draft.kicad_pcb",
+  "board_sha256": "96f8f19f577cd9b2297c9bb9c9308a9ebcc74fccfd78acb53486574aa3424f46",
+  "source_board": null,
+  "source_board_sha256": null,
+  "board_kind": "synthesized",
+  "kicad_rules": {
+    "kicad_dru": {
+      "path": "<tmp>/draft.kicad_dru",
+      "sha256": "24d501fb24d688f62b1b8c470e4bc8b909d9428d937e1bb33cebf539ecf0c2fb",
+      "source": "<interposer>/libs.tech/kicad/interposer_template.kicad_dru"
+    },
+    "kicad_pro": {
+      "path": "<tmp>/draft.kicad_pro",
+      "sha256": "a19eac3df6c400cbb4ee061acb777a03fd1a970bf83aed431f0963252845e128",
+      "source": "<interposer>/libs.tech/kicad/interposer_template.kicad_pro"
+    }
+  },
+  "origin_mm": [
+    0.0,
+    0.0
+  ],
+  "segments_written": 2,
+  "segments_skipped_existing": 0,
+  "nets_added": [
+    "SIG",
+    "OUT",
+    "vss",
+    "unconnected-(D_ROT-A1-Pad2)"
+  ],
+  "nets_reused": [],
+  "layers_used": [
+    "In1.Cu",
+    "F.Cu"
+  ],
+  "vias_written": 1,
+  "width_fallbacks": 0,
+  "notes": [],
+  "round_trip": {
+    "net_names": {
+      "D_UP_A0": "OUT",
+      "sig0": "SIG",
+      "vss": "vss"
+    },
+    "endpoints": [
+      {
+        "net": "sig0",
+        "component": "D_FLIP",
+        "pad": "A0",
+        "x_um": 200.0,
+        "y_um": 150.0,
+        "layer": "TopMetal2"
+      }
+    ],
+    "outline_mm": [
+      0.0,
+      -5.0,
+      6.0,
+      0.0
+    ],
+    "layers": {
+      "F.Cu": "TopMetal2",
+      "In1.Cu": "TopMetal1",
+      "In2.Cu": "Metal5",
+      "B.Cu": "Metal4"
+    },
+    "nets": {
+      "SIG": {
+        "layers": [
+          "TopMetal1",
+          "TopMetal2"
+        ],
+        "via_spans": [
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ]
+        ]
+      }
+    },
+    "footprints": {
+      "D_FLIP": {
+        "at_mm": [
+          4.0,
+          -1.0
+        ],
+        "rotation_deg": 0.0,
+        "layer": "F.Cu",
+        "gds_file": "<tmp>/D_FLIP.gds",
+        "gds_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "pads_sha256": "4036446affed10c59af6d49d55ad09a1094a4cfa97bfe8b9dd751fa6e00bdbb5",
+        "properties": {
+          "orientation": "flip_chip",
+          "connection": "cupillar_opt1",
+          "die_thickness_um": "750",
+          "pad_domains": {
+            "attachments": [
+              {
+                "pad_index": 0,
+                "pad_number": "A0"
+              },
+              {
+                "pad_index": 1,
+                "pad_number": "A1"
+              }
+            ],
+            "carrier": {
+              "diameter_um": 50.0,
+              "frame": "die_local_gds_y_up",
+              "kicad_layer": "F.Cu",
+              "layer": "TopMetal2",
+              "shape": "circle",
+              "tech_sha256": "d4a888c1408f3ef7ef655827df6b541606128bb00e1b6cc1b554e166baf08c6a"
+            },
+            "component": "D_FLIP",
+            "die": {
+              "frame": "die_local_gds_y_up",
+              "pin_list": {
+                "chiplet_name": "D_FLIP",
+                "dbu_um": 0.001,
+                "die_bbox_dbu": {
+                  "x_max": 1000000,
+                  "x_min": 0,
+                  "y_max": 1000000,
+                  "y_min": 0
+                },
+                "pins": [
+                  {
+                    "center_x_dbu": 120000,
+                    "center_y_dbu": 250000,
+                    "height_dbu": 70000,
+                    "name": "A0",
+                    "pad_index": 0,
+                    "width_dbu": 70000
+                  },
+                  {
+                    "center_x_dbu": 880000,
+                    "center_y_dbu": 750000,
+                    "height_dbu": 70000,
+                    "name": "A1",
+                    "pad_index": 1,
+                    "width_dbu": 70000
+                  }
+                ],
+                "version": 1
+              },
+              "pins_sha256": "cff3f83cee866a9dc5c25e54e46070b246ae400f7b26e387be3e8711071a5a44"
+            },
+            "format": "chiplet_kicad.pad_domains",
+            "interconnect": {
+              "body_diameter_um": 44.0,
+              "fab_anchor": "ihp_cupillar_anchor",
+              "manifest_sha256": "e18bfaba4fa9b74edc51c9654497828fba9ecbfa12a4d94c16cb05b4c212c41c",
+              "method": "cupillar_opt1",
+              "passiv_opening_um": 35.0,
+              "tm2_enclosure_um": 7.5
+            },
+            "version": 1
+          }
+        }
+      },
+      "D_FR": {
+        "at_mm": [
+          4.0,
+          -3.5
+        ],
+        "rotation_deg": 90.0,
+        "layer": "F.Cu",
+        "gds_file": "<tmp>/D_FR.gds",
+        "gds_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "pads_sha256": "0e6b48e8757386e7f8f57a90b0188b66ad4849a9f5e68a3471e347c3ce9c0fa1",
+        "properties": {
+          "orientation": "flip_chip",
+          "connection": "cupillar_opt1",
+          "die_thickness_um": "750",
+          "pad_domains": {
+            "attachments": [
+              {
+                "pad_index": 0,
+                "pad_number": "A0"
+              },
+              {
+                "pad_index": 1,
+                "pad_number": "A1"
+              }
+            ],
+            "carrier": {
+              "diameter_um": 50.0,
+              "frame": "die_local_gds_y_up",
+              "kicad_layer": "F.Cu",
+              "layer": "TopMetal2",
+              "shape": "circle",
+              "tech_sha256": "d4a888c1408f3ef7ef655827df6b541606128bb00e1b6cc1b554e166baf08c6a"
+            },
+            "component": "D_FR",
+            "die": {
+              "frame": "die_local_gds_y_up",
+              "pin_list": {
+                "chiplet_name": "D_FR",
+                "dbu_um": 0.001,
+                "die_bbox_dbu": {
+                  "x_max": 1000000,
+                  "x_min": 0,
+                  "y_max": 1000000,
+                  "y_min": 0
+                },
+                "pins": [
+                  {
+                    "center_x_dbu": 120000,
+                    "center_y_dbu": 250000,
+                    "height_dbu": 70000,
+                    "name": "A0",
+                    "pad_index": 0,
+                    "width_dbu": 70000
+                  },
+                  {
+                    "center_x_dbu": 880000,
+                    "center_y_dbu": 750000,
+                    "height_dbu": 70000,
+                    "name": "A1",
+                    "pad_index": 1,
+                    "width_dbu": 70000
+                  }
+                ],
+                "version": 1
+              },
+              "pins_sha256": "a7a1258c6f508edd9714bceb65934a06830f39b33f032ce335c63dd29fa94de4"
+            },
+            "format": "chiplet_kicad.pad_domains",
+            "interconnect": {
+              "body_diameter_um": 44.0,
+              "fab_anchor": "ihp_cupillar_anchor",
+              "manifest_sha256": "e18bfaba4fa9b74edc51c9654497828fba9ecbfa12a4d94c16cb05b4c212c41c",
+              "method": "cupillar_opt1",
+              "passiv_opening_um": 35.0,
+              "tm2_enclosure_um": 7.5
+            },
+            "version": 1
+          }
+        }
+      },
+      "D_ROT": {
+        "at_mm": [
+          2.5,
+          -4.0
+        ],
+        "rotation_deg": 90.0,
+        "layer": "F.Cu",
+        "gds_file": "<tmp>/D_ROT.gds",
+        "gds_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "pads_sha256": "a1056a49cf7432fc5607bd90242fe8c7cf8bab9c95cf89ad9f8015d970930475",
+        "properties": {
+          "orientation": "flip_chip",
+          "connection": "cupillar_opt1",
+          "pad_domains": {
+            "attachments": [
+              {
+                "pad_index": 0,
+                "pad_number": "A0"
+              },
+              {
+                "pad_index": 1,
+                "pad_number": "A1"
+              }
+            ],
+            "carrier": {
+              "diameter_um": 50.0,
+              "frame": "die_local_gds_y_up",
+              "kicad_layer": "F.Cu",
+              "layer": "TopMetal2",
+              "shape": "circle",
+              "tech_sha256": "d4a888c1408f3ef7ef655827df6b541606128bb00e1b6cc1b554e166baf08c6a"
+            },
+            "component": "D_ROT",
+            "die": {
+              "frame": "die_local_gds_y_up",
+              "pin_list": {
+                "chiplet_name": "D_ROT",
+                "dbu_um": 0.001,
+                "die_bbox_dbu": {
+                  "x_max": 1000000,
+                  "x_min": 0,
+                  "y_max": 1000000,
+                  "y_min": 0
+                },
+                "pins": [
+                  {
+                    "center_x_dbu": 120000,
+                    "center_y_dbu": 250000,
+                    "height_dbu": 70000,
+                    "name": "A0",
+                    "pad_index": 0,
+                    "width_dbu": 70000
+                  },
+                  {
+                    "center_x_dbu": 880000,
+                    "center_y_dbu": 750000,
+                    "height_dbu": 70000,
+                    "name": "A1",
+                    "pad_index": 1,
+                    "width_dbu": 70000
+                  }
+                ],
+                "version": 1
+              },
+              "pins_sha256": "a055d9f04bb04cbf1400c4426f9ad6705b37fe94b18fd149a5bff5941e1a4986"
+            },
+            "format": "chiplet_kicad.pad_domains",
+            "interconnect": {
+              "body_diameter_um": 44.0,
+              "fab_anchor": "ihp_cupillar_anchor",
+              "manifest_sha256": "e18bfaba4fa9b74edc51c9654497828fba9ecbfa12a4d94c16cb05b4c212c41c",
+              "method": "cupillar_opt1",
+              "passiv_opening_um": 35.0,
+              "tm2_enclosure_um": 7.5
+            },
+            "version": 1
+          }
+        }
+      },
+      "D_UP": {
+        "at_mm": [
+          2.5,
+          -1.0
+        ],
+        "rotation_deg": 0.0,
+        "layer": "F.Cu",
+        "gds_file": "<tmp>/D_UP.gds",
+        "gds_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "pads_sha256": "87ebd833c52984bdf7673446dd572ae401f2a592f3f77d3bb4aeb6107fb19da2",
+        "properties": {
+          "orientation": "flip_chip",
+          "connection": "cupillar_opt1",
+          "die_thickness_um": "750",
+          "pad_domains": {
+            "attachments": [
+              {
+                "pad_index": 0,
+                "pad_number": "A0"
+              },
+              {
+                "pad_index": 1,
+                "pad_number": "A1"
+              }
+            ],
+            "carrier": {
+              "diameter_um": 50.0,
+              "frame": "die_local_gds_y_up",
+              "kicad_layer": "F.Cu",
+              "layer": "TopMetal2",
+              "shape": "circle",
+              "tech_sha256": "d4a888c1408f3ef7ef655827df6b541606128bb00e1b6cc1b554e166baf08c6a"
+            },
+            "component": "D_UP",
+            "die": {
+              "frame": "die_local_gds_y_up",
+              "pin_list": {
+                "chiplet_name": "D_UP",
+                "dbu_um": 0.001,
+                "die_bbox_dbu": {
+                  "x_max": 1000000,
+                  "x_min": 0,
+                  "y_max": 1000000,
+                  "y_min": 0
+                },
+                "pins": [
+                  {
+                    "center_x_dbu": 120000,
+                    "center_y_dbu": 250000,
+                    "height_dbu": 70000,
+                    "name": "A0",
+                    "pad_index": 0,
+                    "width_dbu": 70000
+                  },
+                  {
+                    "center_x_dbu": 880000,
+                    "center_y_dbu": 750000,
+                    "height_dbu": 70000,
+                    "name": "A1",
+                    "pad_index": 1,
+                    "width_dbu": 70000
+                  }
+                ],
+                "version": 1
+              },
+              "pins_sha256": "6b549eea16fea4a92fd2ba9ea215db3f1c09555708fe0a9f09130378309b7437"
+            },
+            "format": "chiplet_kicad.pad_domains",
+            "interconnect": {
+              "body_diameter_um": 44.0,
+              "fab_anchor": "ihp_cupillar_anchor",
+              "manifest_sha256": "e18bfaba4fa9b74edc51c9654497828fba9ecbfa12a4d94c16cb05b4c212c41c",
+              "method": "cupillar_opt1",
+              "passiv_opening_um": 35.0,
+              "tm2_enclosure_um": 7.5
+            },
+            "version": 1
+          }
+        }
+      }
+    },
+    "io_pads": {
+      "J1": {
+        "at_mm": [
+          0.2,
+          -0.19
+        ],
+        "rotation_deg": 0.0,
+        "layer": "F.Cu",
+        "pads_sha256": "1614713058e5004446c51cdc437748314115c16d61c977376414069811c0e695",
+        "properties": {
+          "io_class": "wire_bond",
+          "io_pad_size_um": "80x80",
+          "io_pad_id": "J_EXT"
+        }
+      },
+      "J10": {
+        "at_mm": [
+          5.8,
+          -3.0
+        ],
+        "rotation_deg": 0.0,
+        "layer": "F.Cu",
+        "pads_sha256": "28e2999dee4a134ad392e373e8c540eb548596a64321cf3cd96df01899cc4c00",
+        "properties": {
+          "io_class": "wire_bond",
+          "io_pad_size_um": "80x80",
+          "io_pad_id": "J_VSS2"
+        }
+      },
+      "J2": {
+        "at_mm": [
+          5.8,
+          -2.5
+        ],
+        "rotation_deg": 0.0,
+        "layer": "F.Cu",
+        "pads_sha256": "28e2999dee4a134ad392e373e8c540eb548596a64321cf3cd96df01899cc4c00",
+        "properties": {
+          "io_class": "wire_bond",
+          "io_pad_size_um": "80x80",
+          "io_pad_id": "J_VSS"
+        }
+      }
+    },
+    "sheet_nets": {
+      "unconnected-(D_ROT-A1-Pad2)": [
+        "D_ROT",
+        "A1"
+      ]
+    },
+    "grid_um": 0.005,
+    "version": 3
+  },
+  "sheet": {
+    "form": {
+      "path": "<tmp>/design.form.json",
+      "sha256": "ff69f919fb6a063742d07a5619846bcd1f82480dc8652eb1f2167666f4e881ec"
+    },
+    "libraries": {
+      "chiplet_carrier.pretty/EXT_PAD_80um.kicad_mod": "e72cfe0a68ea4d72502349c3bbd35303b1f924f4f45fbae9458fb2e1a63619f0",
+      "chiplet_dies.pretty/CELL_D_FLIP.kicad_mod": "f0cf14574bc97bd1f6e67497bdcd828ea401ea08751836cb697fe9f990c7ee09",
+      "chiplet_dies.pretty/CELL_D_FR.kicad_mod": "49db15675f237373b6c9de07d6aa9e94d831912373559bc41a07032cda6ee7f7",
+      "chiplet_dies.pretty/CELL_D_ROT.kicad_mod": "92d7dc23b771a7be3aee08e52f8b7d53c754543120d0d4d907ca9a496d641540",
+      "chiplet_dies.pretty/CELL_D_UP.kicad_mod": "1202bfed0fa26496865d39f4cb0a41cd51354b1db4a25d43d8de0b5695b7a0d7",
+      "fp-lib-table": "52a93dfd4d0ee1e108c8497b9e50bc76e81dbc31eab97ec2274b4c457f8da99a"
+    }
+  }
+}

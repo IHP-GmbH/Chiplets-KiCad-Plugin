@@ -1,0 +1,403 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""
+Byte-exact regression: Python writers vs C++ exporters.
+
+Both writers must produce files that are byte-identical to the C++
+reference exporters (export_chiplet.cpp / export_hyperlynx.cpp), so
+the Python port can drop into the same downstream pipelines (chiplet-
+studio, hyp_to_gds.py) without introducing silent format drift.
+
+The C++ reference is reached via the headless helpers added in the
+kicad fork:
+
+  pcbnew.ExportBoardToChipletFile(board, path)
+  pcbnew.ExportBoardToHyperlynxFile(board, path)
+
+Both writers in this module require ``pcbnew`` and run only inside
+the kicad-builder Docker image. ``pytest.importorskip("pcbnew")``
+keeps host-side runs clean.
+"""
+
+import difflib
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+if str(PLUGIN_ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_ROOT.parent))
+
+pcbnew = pytest.importorskip(
+    "pcbnew", reason="needs pcbnew (KiCad Python)")
+
+if not hasattr(pcbnew, "ExportBoardToChipletFile") or \
+        not hasattr(pcbnew, "ExportBoardToHyperlynxFile"):
+    pytest.skip(
+        "C++ headless exporter helpers not present in this pcbnew "
+        "build. Rebuild the kicad fork with the export_chiplet.h / "
+        "export_hyperlynx.h SWIG patch.",
+        allow_module_level=True,
+    )
+
+from chiplet_export.writers.chiplet_writer import (  # noqa: E402
+    write_chiplet,
+)
+from chiplet_export.writers.hyperlynx_writer import (  # noqa: E402
+    write_hyperlynx,
+)
+
+
+# ---------------------------------------------------------------------------
+# Fixture discovery (mirrors the structural-invariant tests)
+# ---------------------------------------------------------------------------
+
+def _candidate_chiplet_boards():
+    candidates = [os.environ.get("CHIPLET_WRITER_BOARD")]
+    # adk-tools image / meta-repo layout: the demos ship under examples/,
+    # each split into a kicad/ source dir and an outputs/ dir. Every ancestor
+    # is searched and every demo accepted: the plugin sits at
+    # <repo>/plugins/chiplet_export, so examples/ is three levels up, not one,
+    # and the image ships two_die_interposer rather than the wire-bond demo.
+    # Getting either of those wrong skips the whole parity guard silently,
+    # which is how it came to be inert in the shipping image.
+    for base in PLUGIN_ROOT.parents:
+        examples = base / "examples"
+        if examples.is_dir():
+            candidates.extend(
+                str(p) for p in sorted(examples.glob("*/kicad/*.kicad_pcb")))
+    return [c for c in candidates if c]
+
+
+def _candidate_hyperlynx_boards():
+    project_root = PLUGIN_ROOT.parent
+    candidates = [
+        os.environ.get("HYPERLYNX_WRITER_BOARD"),
+        # KiCad upstream demo: closed Edge.Cuts and rich stackup so
+        # both the dielectric and copper branches of the writer are
+        # exercised end-to-end.
+        str(project_root / "kicad" / "demos" / "interf_u"
+            / "interf_u.kicad_pcb"),
+    ]
+    return [c for c in candidates if c]
+
+
+def _has_closed_outline(board_path):
+    try:
+        board = pcbnew.LoadBoard(board_path)
+    except Exception:
+        return False
+    return bool(board.GetBoardPolygonOutlines(pcbnew.SHAPE_POLY_SET()))
+
+
+@pytest.fixture(scope="module")
+def chiplet_board_path():
+    for candidate in _candidate_chiplet_boards():
+        if candidate and Path(candidate).exists():
+            return candidate
+    pytest.skip("No chiplet fixture .kicad_pcb available.")
+
+
+@pytest.fixture(scope="module")
+def hyperlynx_board_path():
+    for candidate in _candidate_hyperlynx_boards():
+        if candidate and Path(candidate).exists() \
+                and _has_closed_outline(candidate):
+            return candidate
+    pytest.skip(
+        "No hyperlynx fixture .kicad_pcb with a closed Edge.Cuts "
+        "outline available."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Diff helper
+# ---------------------------------------------------------------------------
+
+def _assert_byte_exact(label, baseline_path, candidate_path):
+    """Assert two files are byte-identical; on failure print a context diff."""
+    with open(baseline_path, "rb") as f:
+        baseline_bytes = f.read()
+    with open(candidate_path, "rb") as f:
+        candidate_bytes = f.read()
+    if baseline_bytes == candidate_bytes:
+        return
+    # Decode best-effort for a readable diff. Replace undecodable bytes
+    # rather than aborting so even binary differences produce output.
+    baseline_text = baseline_bytes.decode("utf-8", errors="replace")
+    candidate_text = candidate_bytes.decode("utf-8", errors="replace")
+    diff = "\n".join(difflib.unified_diff(
+        baseline_text.splitlines(),
+        candidate_text.splitlines(),
+        fromfile="cpp_baseline (%d bytes)" % len(baseline_bytes),
+        tofile="python_port (%d bytes)" % len(candidate_bytes),
+        n=2,
+        lineterm="",
+    ))
+    # Truncate the diff so a wholesale mismatch does not flood the
+    # test output; show the first ~80 differing lines.
+    diff_lines = diff.splitlines()
+    if len(diff_lines) > 200:
+        diff = "\n".join(diff_lines[:200]) + "\n... [truncated]"
+    pytest.fail(
+        "%s: Python writer output is not byte-identical to the C++ "
+        "exporter baseline.\n\n%s" % (label, diff)
+    )
+
+
+def _build_courtyards(board):
+    """Warm the lazily-built footprint courtyard caches.
+
+    A headless ``pcbnew.LoadBoard`` leaves these caches empty while the KiCad GUI
+    editor keeps them warm. Both the C++ exporter and ``write_chiplet`` derive a
+    die's width/height from ``GetCourtyard()``, which reads this cache, so a cold
+    cache silently falls back to ``GetBoundingBox`` (a larger, silk/fab-text
+    polluted box). ``write_chiplet`` now builds the cache itself so its die
+    geometry is context-independent; the C++ baseline does not, so the parity
+    tests build it on both boards to compare the real (courtyard) die outline
+    rather than the cold-cache fallback that no GUI user ever sees.
+    """
+    for fp in board.Footprints():
+        fp.BuildCourtyardCaches()
+    return board
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+def test_chiplet_byte_exact(tmp_path, chiplet_board_path):
+    """write_chiplet must byte-match ExportBoardToChipletFile."""
+    cpp_path = tmp_path / "cpp_baseline.chiplet"
+    py_path = tmp_path / "python_port.chiplet"
+
+    board = _build_courtyards(pcbnew.LoadBoard(chiplet_board_path))
+    assert pcbnew.ExportBoardToChipletFile(board, str(cpp_path)) is True, \
+        "C++ chiplet exporter returned False"
+
+    board_py = _build_courtyards(pcbnew.LoadBoard(chiplet_board_path))
+    assert write_chiplet(board_py, str(py_path)) is True, \
+        "Python chiplet writer returned False"
+
+    _assert_byte_exact("chiplet", cpp_path, py_path)
+
+
+def test_chiplet_byte_exact_with_project_text_vars(tmp_path,
+                                                   chiplet_board_path):
+    """The parity that matters most, because it has no other guard.
+
+    INTERPOSER_ADAPTER and INTERCONNECT_ADAPTER are read from the project text
+    variables and from nowhere else, on both sides (export_chiplet.cpp reads
+    PROJECT::GetTextVars directly; the Python writer must not fall back to
+    board properties or a board property would shadow the variable and diverge).
+
+    No committed fixture sets either one, so the plain parity test above passes
+    for the uninteresting reason that both sides read nothing. This synthesises
+    a project that does set them. It caught a real divergence: SWIG never
+    wrapped PROJECT, so the Python lookup returned "" for years while the C++
+    exporter honoured the variables, and the .chiplet silently lost its
+    interposer adapter and its whole interconnect block.
+    """
+    project = tmp_path / "textvars"
+    project.mkdir()
+    board_file = project / "board.kicad_pcb"
+    board_file.write_bytes(Path(chiplet_board_path).read_bytes())
+    (project / "board.kicad_pro").write_text(
+        '{\n'
+        '  "board": {"design_settings": {}},\n'
+        '  "meta": {"filename": "board.kicad_pro", "version": 1},\n'
+        '  "text_variables": {\n'
+        '    "INTERPOSER_ADAPTER": "textvar_probe_adapter",\n'
+        '    "INTERCONNECT_ADAPTER": "ihp_cupillar"\n'
+        '  }\n'
+        '}\n'
+    )
+
+    cpp_path = tmp_path / "cpp_baseline.chiplet"
+    py_path = tmp_path / "python_port.chiplet"
+
+    # One LoadBoard per writer, each used immediately: a PROJECT* fetched from
+    # a board is invalidated by the next LoadBoard, and touching it afterwards
+    # takes the interpreter down with SIGSEGV rather than failing the test.
+    # Courtyards warmed on both, as in every other parity test here: the C++
+    # baseline does not build them itself, so without this the comparison is
+    # against the cold-cache bounding-box fallback that no GUI user ever sees.
+    board = _build_courtyards(pcbnew.LoadBoard(str(board_file)))
+    assert pcbnew.ExportBoardToChipletFile(board, str(cpp_path)) is True
+    baseline = cpp_path.read_text()
+    assert 'adapter: "textvar_probe_adapter"' in baseline, (
+        "the C++ exporter did not pick the text variable up; the fixture "
+        "project is not being loaded, so this test proves nothing")
+    assert "interconnect:" in baseline
+
+    board_py = pcbnew.LoadBoard(str(board_file))
+    assert write_chiplet(board_py, str(py_path)) is True
+
+    _assert_byte_exact("chiplet (project text variables)", cpp_path, py_path)
+
+def test_chiplet_die_dims_context_independent(tmp_path, chiplet_board_path):
+    """write_chiplet emits the same die geometry from a cold or warm courtyard
+    cache -- the GUI-vs-headless determinism fix.
+
+    Before the fix, a fresh headless ``LoadBoard`` (cold cache) fell back to
+    ``GetBoundingBox`` (e.g. 801x3359 for the demo dies) while the GUI (warm
+    cache) used the courtyard (770x2606), so the shipped .chiplet depended on
+    where it was produced. ``write_chiplet`` now builds the cache itself, so both
+    boards must yield byte-identical output; a regression that drops the internal
+    ``BuildCourtyardCaches`` would diverge here.
+    """
+    cold = tmp_path / "cold.chiplet"
+    warm = tmp_path / "warm.chiplet"
+
+    board_cold = pcbnew.LoadBoard(chiplet_board_path)  # cold: no _build_courtyards
+    assert write_chiplet(board_cold, str(cold)) is True
+
+    board_warm = _build_courtyards(pcbnew.LoadBoard(chiplet_board_path))
+    assert write_chiplet(board_warm, str(warm)) is True
+
+    _assert_byte_exact("chiplet context-independence (cold vs warm)", cold, warm)
+
+
+def test_hyperlynx_byte_exact(tmp_path, hyperlynx_board_path):
+    """write_hyperlynx must byte-match ExportBoardToHyperlynxFile."""
+    cpp_path = tmp_path / "cpp_baseline.hyp"
+    py_path = tmp_path / "python_port.hyp"
+
+    board = pcbnew.LoadBoard(hyperlynx_board_path)
+    assert pcbnew.ExportBoardToHyperlynxFile(board, str(cpp_path)) is True, \
+        "C++ hyperlynx exporter returned False"
+
+    board_py = pcbnew.LoadBoard(hyperlynx_board_path)
+    assert write_hyperlynx(board_py, str(py_path)) is True, \
+        "Python hyperlynx writer returned False"
+
+    _assert_byte_exact("hyperlynx", cpp_path, py_path)
+
+
+# ---------------------------------------------------------------------------
+# Latent-divergence guards. The shipping single-PDK / 2-layer fixtures cannot
+# exercise the technologies-block ordering or the inner-copper PADSTACK
+# ordering, so each test synthesizes the triggering geometry on top of a real
+# fixture board. Both diverged before the parity fix (sorted std::map / .Seq).
+# ---------------------------------------------------------------------------
+
+def _add_die_footprint(board, ref, lyp, gds, x_mm, y_mm):
+    """Add a bare die footprint carrying LYP_FILE + GDS_FILE fields."""
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference(ref)
+    fp.SetField("LYP_FILE", lyp)
+    fp.SetField("GDS_FILE", gds)
+    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x_mm), pcbnew.FromMM(y_mm)))
+    board.Add(fp)
+    return fp
+
+
+def test_chiplet_byte_exact_multi_tech(tmp_path, chiplet_board_path):
+    """Multi-PDK technologies block stays byte-identical to the C++ exporter.
+
+    The C++ techMap is a std::map (sorted iteration); a Python dict emits in
+    insertion order. Two extra dies are added with LYP ids whose insertion
+    order ('zzz' then 'aaa') is NOT sorted, so an insertion-order regression
+    diverges here even though the single-tech demo cannot trigger it.
+    """
+    cpp_path = tmp_path / "cpp_multi.chiplet"
+    py_path = tmp_path / "py_multi.chiplet"
+
+    def prep():
+        board = pcbnew.LoadBoard(chiplet_board_path)
+        _add_die_footprint(board, "ZZZ1", "zzz_tech.lyp", "ZZZ1.gds", 1.0, 1.0)
+        _add_die_footprint(board, "AAA1", "aaa_tech.lyp", "AAA1.gds", 2.0, 2.0)
+        return _build_courtyards(board)
+
+    assert pcbnew.ExportBoardToChipletFile(prep(), str(cpp_path)) is True
+    assert write_chiplet(prep(), str(py_path)) is True
+    _assert_byte_exact("chiplet multi-tech", cpp_path, py_path)
+
+
+def test_chiplet_byte_exact_hostile_names(tmp_path, chiplet_board_path):
+    """Hostile footprint names/fields are escaped identically by both writers.
+
+    Reference designators and field text (GDS_FILE/LYP_FILE/net) are
+    third-party data and can carry YAML metacharacters. A die is added whose
+    reference and GDS_FILE contain a double-quote, a colon and a backslash;
+    both writers must (a) stay byte-identical and (b) emit valid YAML that
+    round-trips the hostile strings, instead of a broken/injectable file.
+    """
+    yaml = pytest.importorskip("yaml")
+    cpp_path = tmp_path / "cpp_hostile.chiplet"
+    py_path = tmp_path / "py_hostile.chiplet"
+
+    hostile_ref = 'U"X: 1'
+    hostile_gds = 'C:\\pdk\\a"b.gds'
+
+    def prep():
+        board = pcbnew.LoadBoard(chiplet_board_path)
+        _add_die_footprint(board, hostile_ref, "sg13g2.lyp", hostile_gds,
+                           1.0, 1.0)
+        return _build_courtyards(board)
+
+    assert pcbnew.ExportBoardToChipletFile(prep(), str(cpp_path)) is True
+    assert write_chiplet(prep(), str(py_path)) is True
+    _assert_byte_exact("chiplet hostile names", cpp_path, py_path)
+
+    doc = yaml.safe_load(py_path.read_text(encoding="utf-8"))
+    die = next(c for c in doc["components"] if c.get("id") == hostile_ref)
+    assert die["layout"] == hostile_gds, "hostile GDS path did not round-trip"
+
+
+@pytest.mark.parametrize("boundary_ref", ["U1\n", "on", "-x"])
+def test_chiplet_byte_exact_bare_boundary(tmp_path, chiplet_board_path,
+                                          boundary_ref):
+    """The bare-vs-quoted classifier must agree on both producers at the
+    boundary, where the two escapers are most likely to diverge.
+
+    A reference ending in a newline previously diverged: the Python `$` regex
+    emitted it bare (with a raw newline) while the C++ byte loop quoted it.
+    Reserved words ('on') and a leading non-bare char ('-x') exercise the rest.
+    """
+    yaml = pytest.importorskip("yaml")
+    cpp_path = tmp_path / "cpp_bnd.chiplet"
+    py_path = tmp_path / "py_bnd.chiplet"
+
+    def prep():
+        board = pcbnew.LoadBoard(chiplet_board_path)
+        _add_die_footprint(board, boundary_ref, "sg13g2.lyp", "x.gds", 1.0, 1.0)
+        return _build_courtyards(board)
+
+    assert pcbnew.ExportBoardToChipletFile(prep(), str(cpp_path)) is True
+    assert write_chiplet(prep(), str(py_path)) is True
+    _assert_byte_exact("chiplet bare-boundary %r" % boundary_ref,
+                       cpp_path, py_path)
+    doc = yaml.safe_load(py_path.read_text(encoding="utf-8"))
+    assert any(c.get("id") == boundary_ref for c in doc["components"]), \
+        "boundary ref %r did not round-trip" % boundary_ref
+
+
+def test_hyperlynx_byte_exact_inner_copper(tmp_path, hyperlynx_board_path):
+    """Inner-copper PADSTACK ordering stays byte-identical to the C++ exporter.
+
+    A through via on a 4-layer board makes the C++ WritePadStack emit its
+    copper layers in raw-bit (.Seq) order -- top, bottom, In1, In2 -- where a
+    .CuStack()-ordered Python writer would interleave the inner layers. The
+    2-layer interf_u fixture cannot trigger it.
+    """
+    cpp_path = tmp_path / "cpp_inner.hyp"
+    py_path = tmp_path / "py_inner.hyp"
+
+    def prep():
+        board = pcbnew.LoadBoard(hyperlynx_board_path)
+        board.SetCopperLayerCount(4)
+        via = pcbnew.PCB_VIA(board)
+        via.SetViaType(pcbnew.VIATYPE_THROUGH)
+        via.SetPosition(board.GetBoardEdgesBoundingBox().GetCenter())
+        via.SetWidth(pcbnew.FromMM(0.6))
+        via.SetDrill(pcbnew.FromMM(0.3))
+        via.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+        board.Add(via)
+        return board
+
+    assert pcbnew.ExportBoardToHyperlynxFile(prep(), str(cpp_path)) is True
+    assert write_hyperlynx(prep(), str(py_path)) is True
+    _assert_byte_exact("hyperlynx inner-copper", cpp_path, py_path)

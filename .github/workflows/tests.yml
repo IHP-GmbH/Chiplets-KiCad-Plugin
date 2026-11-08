@@ -2,24 +2,68 @@ name: tests
 
 on:
   push:
+    branches: [dev, main]
   pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest: a runner image that rolls forward
+    # under the project changes what a green run means without a commit.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # One entry per plugin under plugins/. Add a new plugin's directory
+        # name here to bring it into CI.
+        plugin: [chiplet_export, resizer_passive_elements]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The vendored-copy gates compare a file against the previous commit
+          # that CHANGED it, so they need history. At the default depth 1 they
+          # do not fail, they SKIP, which is the worst outcome available: the
+          # checks exist, the log says green, and nothing was ever compared.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
+          cache-dependency-path: plugins/${{ matrix.plugin }}/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest psutil
+        run: pip install -r plugins/${{ matrix.plugin }}/requirements.txt pytest psutil
 
-      # pcbnew (KiCad Python) is not available on the runner; tests that need
-      # it skip via importorskip. Tests that need sibling ecosystem checkouts
-      # (interconnect PDK, interposer PDK) skip via their module guards.
+      # From the repository root, so the root pyproject.toml is the pytest
+      # configuration. pcbnew (KiCad Python) is not available on the runner;
+      # tests that need it skip via importorskip. Tests that need sibling
+      # ecosystem checkouts (interconnect PDK, interposer PDK) skip via their
+      # module guards.
       - name: Run tests
-        run: pytest tests -q
+        run: pytest plugins/${{ matrix.plugin }}/tests -q
+
+  # The one required status check. A single collector context per repository
+  # means a ruleset names `ci-gate` everywhere and never has to be edited when
+  # the job list inside a workflow changes. It also solves the matrix problem:
+  # `tests (chiplet_export)` and `tests (resizer_passive_elements)` are two
+  # context names that change whenever a plugin is added, so requiring them
+  # directly would leave a new plugin ungated or an old one required forever.
+  ci-gate:
+    needs: [tests]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every gating job to have succeeded
+        # A matrix job's result is success only when every leg succeeded, and
+        # fail-fast: false above means every leg reports rather than the first
+        # failure cancelling the rest. `needs` alone does not gate: with
+        # `if: always()` this job runs even when a dependency failed, so the
+        # result has to be compared explicitly.
+        run: |
+          echo "tests: ${{ needs.tests.result }}"
+          test "${{ needs.tests.result }}" = "success"

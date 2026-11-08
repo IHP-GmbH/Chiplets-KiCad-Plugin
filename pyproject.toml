@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chiplet-kicad-plugins"
+version = "0.1.0"
+description = "KiCad pcbnew plugins for chiplet interposer design on IHP IntM4TM2."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+# The union of plugins/*/requirements.txt, which stay for each plugin's worker
+# venv. One requirement per entry, no markers.
+dependencies = ["klayout>=0.30.5", "PyYAML>=6.0.3"]
+
+[project.optional-dependencies]
+# pytest 8.1 is the first whose importlib mode resolves the suites' relative
+# imports (`from .conftest import ...`).
+test = ["pytest>=8.1", "psutil"]
+
+# Nothing at the root is a package: KiCad loads each plugin from its own
+# directory under plugins/, so an install provides no module.
+[tool.setuptools]
+packages = []
+
+[tool.pytest.ini_options]
+testpaths = ["plugins/chiplet_export/tests", "plugins/resizer_passive_elements/tests"]
+# Both suites live in a package named `tests` with its own conftest.py; the
+# default import mode would load the second as the first. importlib mode keys
+# each by its path.
+#
+# -ra prints the reason for every skip. This suite skips harder than any other
+# in the ecosystem: without pcbnew, the KLayout module and the sibling
+# checkouts, roughly half of it disappears and the run still looks green.
+# --strict-markers and --strict-config turn a typo in a marker or an ini key
+# into an error instead of a silently ignored line.
+#
+# A bare `pytest` starts no external tool: the cases that run the klayout
+# binary are deselected here, because a klayout on PATH is enough to start
+# them. A command-line -m replaces this one, so they are one flag away:
+#   pytest -m klayout_binary
+addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib",
+           "-m", "not klayout_binary"]
+markers = [
+    "klayout_binary: runs the klayout application, found on PATH (opt-in, pytest -m klayout_binary)",
+    "needs_sibling_sources: reads a sibling repository's tree, found from the variable that names it or HCDP_ROOT (see conftest.py)",
+]
+
+# The skips a test runner accepts, each a reason fragment and a node id
+# fragment; any other skip fails the run.
+[tool.tierrun]
+declared-skips = [
+    # KiCad's own Python is not installed on a plain host. The module skips
+    # while it is collected.
+    {reason = "needs pcbnew (KiCad Python)", nodeid = "plugins/chiplet_export/tests/test_byte_exact_writers.py"},
+    {reason = "needs pcbnew (KiCad Python)", nodeid = "plugins/chiplet_export/tests/test_chiplet_writer.py"},
+    {reason = "needs pcbnew (KiCad Python)", nodeid = "plugins/chiplet_export/tests/test_cmim_extraction.py"},
+    {reason = "needs pcbnew (KiCad Python)", nodeid = "plugins/chiplet_export/tests/test_hyperlynx_writer.py"},
+    {reason = "needs pcbnew (KiCad Python)", nodeid = "plugins/resizer_passive_elements/tests/test_apply_to_instance.py"},
+    {reason = "needs pcbnew (KiCad Python)", nodeid = "plugins/chiplet_export/tests/test_board_save.py"},
+    {reason = "needs pcbnew (KiCad Python)", nodeid = "plugins/chiplet_export/tests/test_io_pad_ids.py"},
+    {reason = "needs pcbnew (KiCad Python)", nodeid = "plugins/chiplet_export/tests/test_plugin_registration.py::test_both_packages_import_beside_kicads_pcbnew", tiers = ["T0"]},
+    {reason = "native dialog smoke needs wxPython", nodeid = "plugins/chiplet_export/tests/test_dialog_catalogue_wx.py"},
+    # The KiCad image has wxPython but no display. It runs on a KiCad desktop
+    # host, or under xvfb-run.
+    {reason = "native dialog smoke requires DISPLAY", nodeid = "plugins/chiplet_export/tests/test_dialog_catalogue_wx.py", tiers = ["T2"]},
+    # The SG13G2 PDK is not installed on a plain host; the KiCad image has it.
+    {reason = "needs the SG13G2 PDK (PDK_ROOT) the pinned bytes were written with", nodeid = "plugins/chiplet_export/tests/test_seal_ring.py::test_the_flag_off_bytes_are_the_bytes_from_before", tiers = ["T0"]},
+    {reason = "needs SG13G2 (PDK_ROOT)", nodeid = "plugins/chiplet_export/tests/test_intm4tm2_cni_scope.py", tiers = ["T1"]},
+    {reason = "SG13G2 PCells unavailable", nodeid = "plugins/chiplet_export/tests/test_cmim_devices.py::test_sg13g2_via_pcells_survive_the_intm4tm2_rebind", tiers = ["T1"]},
+    {reason = "No SG13G2 PDK discoverable", nodeid = "plugins/chiplet_export/tests/test_via_geometry.py::test_pcells_bootstrap_with_pdk_present", tiers = ["T1"]},
+    {reason = "SG13_dev via_stack PCell not available", nodeid = "plugins/chiplet_export/tests/test_via_geometry.py::test_landing_pad_draws_its_own_array[True]", tiers = ["T1"]},
+    {reason = "SG13_dev via_stack PCell not available", nodeid = "plugins/chiplet_export/tests/test_via_geometry.py::test_signal_via_hyp_draws_one_cut_per_via[True]", tiers = ["T1"]},
+    # Opt-in by variable: a host run that sets it (CHIPLET_COMPOSITION_NATIVE_TESTS=1,
+    # CHIPLET_DRIVER_PIN_LIST, CHIPLET_BOARD_SAVE_INPUT) runs them.
+    {reason = "explicit native allocation required", nodeid = "plugins/chiplet_export/tests/test_existing_carrier_composition.py::NativeComposition", tiers = ["T0", "T2"]},
+    {reason = "CHIPLET_DRIVER_PIN_LIST unset", nodeid = "plugins/chiplet_export/tests/test_pad_domains.py::test_real_saved_driver_pin_list_remains_accepted", tiers = ["T0", "T2"]},
+    {reason = "CHIPLET_BOARD_SAVE_INPUT unset", nodeid = "plugins/chiplet_export/tests/test_board_save.py::test_a_board_the_flow_wrote_keeps_its_root_keys", tiers = ["T2"]},
+    # Parametrized cases another case already covers; they run nowhere.
+    {reason = "also a splitter refusal", nodeid = "plugins/chiplet_export/tests/test_top_level_block_grammar.py", tiers = ["T0", "T2"]},
+]

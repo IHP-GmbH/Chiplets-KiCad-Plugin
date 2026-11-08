@@ -1,0 +1,83 @@
+usage: chiplet-export [-h] --board BOARD --output-dir OUTPUT_DIR
+                      [--require-drc | --allow-drc-fail]
+                      [--interposer-adapter INTERPOSER_ADAPTER]
+                      [--interconnect-adapter INTERCONNECT_ADAPTER]
+                      [--connection CONNECTION] [--insert-metal-fill]
+                      [--fill-mode {single-pass,closure}] [--seal-ring]
+                      [--system-chiplet SYSTEM_CHIPLET]
+                      [--nofill-regions NOFILL_REGIONS]
+                      [--export-report EXPORT_REPORT]
+                      [--die-layouts DIE_LAYOUTS]
+
+Export a chiplet assembly headless (board -> .chiplet + .hyp + GDS + assembly DRC).
+
+options:
+  -h, --help            show this help message and exit
+  --board BOARD         Path to the assembly .kicad_pcb to export.
+  --output-dir OUTPUT_DIR
+                        Directory for the export outputs (created if absent).
+                        GDS goes under layout/, the DRC report under reports/.
+  --require-drc         Accepted for older callers; changes nothing. The
+                        assembly DRC is required by default: exit 3 unless it
+                        PASSED.
+  --allow-drc-fail      Exit 0 when the files were written even if the
+                        assembly DRC FAILED, was REFUSED or did NOT RUN; the
+                        last line says which.
+  --interposer-adapter INTERPOSER_ADAPTER
+                        Interposer adapter override. Empty = read
+                        interposer.adapter from the .chiplet (final fallback
+                        intm4tm2).
+  --interconnect-adapter INTERCONNECT_ADAPTER
+                        Interconnect adapter override. Empty = read
+                        interconnect.adapter from the .chiplet (absent there =
+                        no interconnect axis).
+  --connection CONNECTION
+                        Connection stack (e.g. cupillar_opt1/2/3,
+                        sbump_sac305). A cupillar stack auto-generates pillars
+                        from the die pads.
+  --insert-metal-fill   Stamp metal density fill on the interposer GDS via the
+                        interposer PDK engine. Needs the PDK fill work and the
+                        klayout binary; off by default.
+  --fill-mode {single-pass,closure}
+                        single-pass (fast, all four metals) or closure (M4/M5
+                        density-feedback, deck-verified). Ignored without
+                        --insert-metal-fill.
+  --seal-ring           Draw the interposer PDK seal ring on the board outline
+                        (one axis-aligned rectangle). Refused, with nothing
+                        written, when the outline cannot take it or drawn
+                        geometry crowds it; off by default.
+  --system-chiplet SYSTEM_CHIPLET
+                        The System .chiplet the assembly was built from. Each
+                        component's technology, and the technologies block,
+                        are taken from it by component id; the export is
+                        refused, with nothing written, when one has no match
+                        there. Empty = as the board gives them.
+  --nofill-regions NOFILL_REGIONS
+                        Sidecar JSON of no-fill keep-outs. Empty = auto-
+                        extract from the board's NoMetFiller / <metal>.nofill
+                        layers.
+  --export-report EXPORT_REPORT
+                        The report interposer-pnr export wrote with the board.
+                        Required when a carrier pad export drew (from
+                        chiplet_carrier, or carrying IO_PAD_ID) links a sheet
+                        symbol, as on a board drawn against a sheet or a draft
+                        updated from its draft sheet: the io_pad nets take the
+                        planner's names from it. Never guessed.
+  --die-layouts DIE_LAYOUTS
+                        Sidecar JSON naming, per die, its full layout and the
+                        contract's top_cell and bbox_um. The .chiplet then
+                        names that die's full layout; the complete GDS keeps
+                        the abstract its GDS_FILE gives. Refused, with nothing
+                        written, when either file does not match the contract.
+                        Empty = each die's layout is its GDS_FILE.
+
+exit codes:
+  0  the files were written and the assembly DRC PASSED
+     (or did not pass, under --allow-drc-fail)
+  1  nothing trustworthy was written: a refused board, a failed worker,
+     a .chiplet that could not be replaced, or a crash before the DRC
+  2  the board is missing or KiCad cannot read it; also a usage error
+  3  the files were written, the assembly DRC did not pass: FAILED,
+     REFUSED or NOT RUN (a DRC stage that raised included)
+
+reference: plugins/chiplet_export/CLI.md

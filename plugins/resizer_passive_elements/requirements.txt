@@ -1,0 +1,10 @@
+# Runtime dependencies of the resizer passive elements plugin.
+#
+# There are none to install: the plugin is stdlib-only plus the two libraries
+# that come with KiCad itself and cannot be pip-installed usefully here --
+# `pcbnew` (imported lazily, only by apply_to_instance) and `wx` (the dialog).
+# The IntM4TM2 generator it drives is loaded from the interposer PDK checkout
+# by path, never vendored.
+#
+# The file is kept for the repository's per-plugin contract: CI installs from
+# it and caches on it, so every plugin directory has one.

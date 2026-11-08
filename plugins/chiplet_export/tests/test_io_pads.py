@@ -1,0 +1,228 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Tests for the I/O pad support added to hyp_to_gds.GDSGenerator."""
+import json
+import sys
+from pathlib import Path
+
+import klayout.db as db
+import pytest
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+
+from hyp_to_gds import (GDSGenerator, LayerMap,  # noqa: E402
+                        MANUFACTURING_GRID_NM, update_chiplet_file)
+
+# Interposer LYP via the ecosystem discovery convention (env -> PDK
+# env/walk); the .lyp belongs to the interposer PDK, not the plugin.
+# INTERPOSER_LYP still overrides. The old fixed ../interposer path silently
+# skipped this whole module on hosts and in the adk-tools image, letting the
+# io_pads frame assertions rot.
+import os  # noqa: E402
+import hyp_to_gds as _h  # noqa: E402
+LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", _h._find_default_lyp()))
+# Every case draws with the interposer PDK's .lyp, a sibling tree.
+pytestmark = pytest.mark.needs_sibling_sources
+TM2_LAYER = (134, 0)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _require_lyp():
+    if not LYP_PATH.exists():
+        pytest.skip(f"interposer LYP not found: {LYP_PATH}")
+
+
+def _make_generator() -> GDSGenerator:
+    return GDSGenerator(LayerMap(str(LYP_PATH)), "TOP", "METRIC", [], None)
+
+
+def _read_top_cell(gds_path: Path):
+    layout = db.Layout()
+    layout.read(str(gds_path))
+    layout.flatten(layout.top_cell().cell_index(), -1, True)
+    return layout, layout.top_cell()
+
+
+def test_add_io_pads_places_pads_on_topmetal2(tmp_path):
+    gen = _make_generator()
+    pads = {
+        "io_pads": [
+            {"ref": "J1", "io_class": "wire_bond",
+             "x_um": 0.0, "y_um": 0.0,
+             "size_x_um": 100.0, "size_y_um": 100.0, "net": "VDD_EXT"},
+            {"ref": "J2", "io_class": "wire_bond",
+             "x_um": 200.0, "y_um": 50.0,
+             "size_x_um": 100.0, "size_y_um": 100.0, "net": "OUT0"},
+        ]
+    }
+    json_path = tmp_path / "io_pads.json"
+    json_path.write_text(json.dumps(pads))
+
+    placed = gen.add_io_pads(str(json_path))
+    assert len(placed) == 2
+
+    out_gds = tmp_path / "out.gds"
+    gen.write(str(out_gds))
+
+    layout, top = _read_top_cell(out_gds)
+    layer_idx = layout.find_layer(*TM2_LAYER)
+    assert layer_idx is not None, "TopMetal2 (134/0) layer missing in output"
+
+    # Shape-agnostic on purpose: the pad geometry belongs to the PDK's
+    # bondpad PyCell (an octagon today), so this pins where the pads are and
+    # how big, not what they look like.
+    pads = [s.polygon.bbox() for s in top.shapes(layer_idx).each()]
+    assert len(pads) == 2
+
+    # Coordinates are in DBU (1 DBU = 1 nm) -> 100 um = 100_000 nm
+    centers = sorted(((b.left + b.right) // 2, (b.bottom + b.top) // 2)
+                      for b in pads)
+    assert centers == [(0, 0), (200_000, 50_000)]
+
+    # Each pad must span 100 um, to within the grid step the PyCell adds to
+    # each side of its octagon's minor axis (rady + 0.005).
+    for b in pads:
+        assert (b.right - b.left) == 100_000
+        assert abs((b.top - b.bottom) - 100_000) <= 2 * MANUFACTURING_GRID_NM
+
+
+def test_io_class_dispatch_skips_reserved(tmp_path):
+    gen = _make_generator()
+    pads = {
+        "io_pads": [
+            {"ref": "J1", "io_class": "wire_bond", "x_um": 0.0, "y_um": 0.0,
+             "size_x_um": 100.0, "size_y_um": 100.0, "net": "A"},
+            {"ref": "J2", "io_class": "flipped_bump", "x_um": 100.0, "y_um": 0.0,
+             "size_x_um": 80.0, "size_y_um": 80.0, "net": "B"},
+            {"ref": "J3", "io_class": "tsv_bump", "x_um": -100.0, "y_um": 0.0,
+             "size_x_um": 60.0, "size_y_um": 60.0, "net": "C"},
+        ]
+    }
+    json_path = tmp_path / "io_pads.json"
+    json_path.write_text(json.dumps(pads))
+
+    placed = gen.add_io_pads(str(json_path))
+    assert len(placed) == 1
+    assert placed[0]["ref"] == "J1"
+
+
+def test_add_io_pads_handles_missing_file(tmp_path):
+    gen = _make_generator()
+    placed = gen.add_io_pads(str(tmp_path / "does_not_exist.json"))
+    assert placed == []
+
+
+def test_add_io_pads_skips_invalid_size(tmp_path):
+    gen = _make_generator()
+    pads = {"io_pads": [
+        {"ref": "J1", "io_class": "wire_bond",
+         "x_um": 0.0, "y_um": 0.0,
+         "size_x_um": 0.0, "size_y_um": 100.0, "net": "X"},
+    ]}
+    json_path = tmp_path / "io_pads.json"
+    json_path.write_text(json.dumps(pads))
+    placed = gen.add_io_pads(str(json_path))
+    assert placed == []
+
+
+def test_update_chiplet_file_injects_io_pads(tmp_path):
+    chiplet_path = tmp_path / "demo.chiplet"
+    chiplet_path.write_text(
+        "format_version: '1.0'\n"
+        "assembly:\n"
+        "  name: demo\n"
+        "  units: um\n"
+        "components:\n"
+        "- id: interposer\n"
+        "  type: interposer\n"
+        "  technology: intm4tm2\n"
+        "  layout: ''\n"
+        "  dimensions:\n"
+        "    width: 1000.0\n"
+        "    height: 1000.0\n"
+        "    thickness: 13.83\n"
+    )
+    # Create a minimal interposer GDS so update_chiplet_file can compute bbox
+    layout = db.Layout()
+    layout.dbu = 0.001
+    cell = layout.create_cell("TOP")
+    layer_idx = layout.layer(*TM2_LAYER)
+    cell.shapes(layer_idx).insert(db.DBox(-500.0, -500.0, 500.0, 500.0))
+    interposer_gds = tmp_path / "interposer.gds"
+    layout.write(str(interposer_gds))
+
+    placed = [
+        {"ref": "J1", "io_class": "wire_bond",
+         "x_um": 100.0, "y_um": 200.0,
+         "size_x_um": 100.0, "size_y_um": 100.0, "net": "VDD_EXT"},
+        {"ref": "J2", "io_class": "wire_bond",
+         "x_um": -100.0, "y_um": 200.0,
+         "size_x_um": 150.0, "size_y_um": 150.0, "net": "OUT0"},
+    ]
+    ok = update_chiplet_file(str(chiplet_path), str(interposer_gds),
+                              io_pads=placed)
+    assert ok
+
+    import yaml
+    with chiplet_path.open() as f:
+        data = yaml.safe_load(f)
+    interposer = next(c for c in data["components"] if c["id"] == "interposer")
+    assert "io_pads" in interposer
+    pads = interposer["io_pads"]
+    assert len(pads) == 2
+    j1 = next(p for p in pads if p["id"] == "J1")
+    assert j1["io_class"] == "wire_bond"
+    assert j1["net"] == "VDD_EXT"
+    # Re-anchored to the GDS-bbox-corner frame (coord_frame_contract section 1):
+    # input (100, 200) minus bbox lower-left (-500, -500).
+    assert j1["position"] == {"x": 600.0, "y": 700.0}
+    assert j1["size"] == {"x": 100.0, "y": 100.0}
+    assert j1["layer"] == "TopMetal2"
+
+    # Colocated GDS -> relative reference (readers anchor on the
+    # .chiplet's directory), keeping the exported set portable.
+    assert interposer["layout"] == "interposer.gds"
+
+
+def test_update_chiplet_layout_ref_is_relative_to_the_chiplet(tmp_path):
+    """GDS beside the .chiplet's tree, sharing its root, is named with '..';
+    inside it, by a plain relative path."""
+    chiplet_dir = tmp_path / "proj"
+    chiplet_dir.mkdir()
+    chiplet_path = chiplet_dir / "demo.chiplet"
+    chiplet_path.write_text(
+        "format_version: '1.0'\n"
+        "assembly:\n"
+        "  name: demo\n"
+        "  units: um\n"
+        "components:\n"
+        "- id: interposer\n"
+        "  type: interposer\n"
+        "  technology: intm4tm2\n"
+        "  layout: ''\n"
+    )
+    layout = db.Layout()
+    layout.dbu = 0.001
+    cell = layout.create_cell("TOP")
+    layer_idx = layout.layer(*TM2_LAYER)
+    cell.shapes(layer_idx).insert(db.DBox(0.0, 0.0, 100.0, 100.0))
+    outside_gds = tmp_path / "elsewhere.gds"
+    layout.write(str(outside_gds))
+
+    import yaml
+    assert update_chiplet_file(str(chiplet_path), str(outside_gds))
+    with chiplet_path.open() as f:
+        data = yaml.safe_load(f)
+    interposer = next(c for c in data["components"]
+                      if c["id"] == "interposer")
+    assert interposer["layout"] == str(Path("..") / "elsewhere.gds")
+
+    subdir_gds = chiplet_dir / "out" / "inside.gds"
+    subdir_gds.parent.mkdir()
+    layout.write(str(subdir_gds))
+    assert update_chiplet_file(str(chiplet_path), str(subdir_gds))
+    with chiplet_path.open() as f:
+        data = yaml.safe_load(f)
+    interposer = next(c for c in data["components"]
+                      if c["id"] == "interposer")
+    assert interposer["layout"] == str(Path("out") / "inside.gds")
