@@ -2,9 +2,9 @@
 """
 Regenerate the wire-bond demo via the Python plugin pipeline.
 
-Used by gate 47.7e to feed the chiplet-studio CoordFrameContract*
-gtests with output produced by the plugin's writers + hyp_to_gds.py
-worker (instead of the legacy C++ menu actions).
+Feeds the chiplet-studio CoordFrameContract* gtests with output
+produced by the plugin's writers + hyp_to_gds.py worker (instead of
+the legacy C++ menu actions).
 
 Two modes:
 
@@ -16,6 +16,17 @@ Two modes:
   the rest of the pipeline against the supplied .hyp. Needed while
   the wire-bond demo .kicad_pcb still ships without Edge.Cuts (the
   legacy .hyp on disk was captured when the board had an outline).
+  The die outline flags come from the board the way run_export
+  derives them (die_outline.preflight_die_outline_layers), and a
+  board that preflight refuses stops the run before anything is
+  written. This mode runs no assembly DRC: a worker that exits 0
+  exits 0 here, and the last line says no DRC ran.
+
+The default mode exits with chiplet-export's table
+(pipeline/export_exit.py): 0 when the files were written and the
+assembly DRC PASSED, 1 when nothing trustworthy was written, 3 when
+the files were written but the DRC did not pass. --allow-drc-fail
+turns that 3 into 0 and says so; --require-drc changes nothing.
 
 Headless: must run inside kicad-builder with pcbnew on PYTHONPATH and
 the worker venv discoverable.
@@ -35,11 +46,17 @@ if str(PLUGIN_ROOT.parent) not in sys.path:
 
 import pcbnew  # noqa: E402
 
+from chiplet_export.die_outline import (  # noqa: E402
+    DieOutlineLayerRefused, format_layer, preflight_die_outline_layers,
+)
+from chiplet_export.pad_domains import PadDomainError  # noqa: E402
 from chiplet_export.pipeline.discovery import (  # noqa: E402
     find_worker_python, find_hyp_to_gds,
 )
+from chiplet_export.pipeline.export_exit import export_exit  # noqa: E402
 from chiplet_export.pipeline.orchestrator import (  # noqa: E402
-    ExportOptions, run_export, describe_assembly_drc, layout_dir, layout_path,
+    ExportOptions, run_export, describe_assembly_drc,
+    describe_die_outline_layers, layout_dir, layout_path,
 )
 from chiplet_export.writers.chiplet_writer import (  # noqa: E402
     write_chiplet,
@@ -56,6 +73,25 @@ def _run_with_existing_hyp(board_path, hyp_path, lyp_path,
     """
     board = pcbnew.LoadBoard(board_path)
     board_name = Path(board_path).stem
+
+    # The worker sizes every die from the outline layer the board declares
+    # for it, and leaves the marked dies at their archived size. Derived and
+    # checked here the way run_export does it, before anything is written.
+    print("Stage 0: die outline layers (board fields)")
+    try:
+        outline_layers, outline_exempt = preflight_die_outline_layers(board)
+    except DieOutlineLayerRefused as exc:
+        print("  ERROR: Die outline layer refused:")
+        for ref, cause in exc.offenders:
+            print("    %s: %s" % (ref, cause))
+        return 1
+    except PadDomainError as exc:
+        print("  ERROR: Carrier pad domains refused: %s" % exc)
+        return 1
+    outline_line = describe_die_outline_layers(outline_layers, outline_exempt)
+    if outline_line:
+        print("  %s" % outline_line)
+
     output_dir = str(Path(output_dir).absolute())
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     # GDS layouts go under layout/; the .chiplet stays at the output-dir root.
@@ -92,6 +128,14 @@ def _run_with_existing_hyp(board_path, hyp_path, lyp_path,
         cmd += ["--io-pads", io_pads_path]
     if cupillar_gds_path:
         cmd += ["--cupillar-gds", cupillar_gds_path]
+    # The --flag=VALUE form, as build_cli_args writes it: a reference may
+    # start with '-', which argparse would take for an option.
+    if outline_layers:
+        cmd.append("--die-outline-layers=" + ",".join(
+            "%s=%s" % (ref, format_layer(layer))
+            for ref, layer in sorted(outline_layers.items())))
+    if outline_exempt:
+        cmd.append("--die-outline-exempt=" + ",".join(outline_exempt))
     print("  $ %s" % " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.stdout:
@@ -143,12 +187,17 @@ def main():
         help="Pre-generated cu-pillar GDS to merge into the interposer "
              "(forwarded to hyp_to_gds.py).",
     )
-    parser.add_argument(
+    drc = parser.add_mutually_exclusive_group()
+    drc.add_argument(
         "--require-drc", action="store_true",
-        help="Exit nonzero unless the ADK assembly DRC ran and PASSED "
-             "(ExportResult.assembly_drc_exit_code == 0). Off by default "
-             "so environments without the klayout CLI can still "
-             "regenerate artifacts.",
+        help="Accepted for older callers; changes nothing. The assembly DRC "
+             "is required by default: exit 3 unless it PASSED.",
+    )
+    drc.add_argument(
+        "--allow-drc-fail", action="store_true",
+        help="Exit 0 when the files were written even if the assembly DRC "
+             "FAILED, was REFUSED or did NOT RUN; the last line says which. "
+             "--use-existing-hyp runs no DRC and ignores both flags.",
     )
     parser.add_argument(
         "--connection",
@@ -159,8 +208,10 @@ def main():
     )
     args = parser.parse_args()
 
+    # An --output-dir is not created here: both paths create it once the
+    # board passes their preflights, so a refused board leaves nothing
+    # behind. The default is a fresh, empty tmpdir.
     output_dir = args.output_dir or tempfile.mkdtemp(prefix="wirebond_regen_")
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     print("Regenerating wire-bond demo via plugin pipeline ...")
     print("  board:       %s" % args.board)
@@ -175,6 +226,8 @@ def main():
             args.board, args.use_existing_hyp, args.lyp,
             args.io_pads, args.cupillar_gds, output_dir,
         )
+        if rc == 0:
+            print("No assembly DRC ran (--use-existing-hyp runs none); exit 0")
         sys.exit(rc)
 
     board = pcbnew.LoadBoard(args.board)
@@ -211,11 +264,12 @@ def main():
     if result.assembly_drc_report_path:
         print("assembly_drc_report: %s" % result.assembly_drc_report_path)
 
-    ok = result.exit_code == 0 and not result.error
-    if args.require_drc and result.assembly_drc_exit_code != 0:
-        print("FAIL: --require-drc set and assembly DRC did not pass")
-        ok = False
-    sys.exit(0 if ok else 1)
+    if result.assembly_drc_error:
+        sys.stderr.write(result.assembly_drc_error)
+    code, last_line = export_exit(result, args.allow_drc_fail)
+    if last_line:
+        print(last_line)
+    sys.exit(code)
 
 
 if __name__ == "__main__":

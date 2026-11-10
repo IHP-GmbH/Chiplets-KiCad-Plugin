@@ -10,6 +10,25 @@ Registered automatically when pcbnew scans the scripting/plugins
 directory.
 """
 
+import sys
+
+
+def _loaded_by_pcbnew():
+    """True while pcbnew's plugin loader imports this package.
+
+    Only a running pcbnew calls pcbnew.LoadPlugins. Registering an action
+    anywhere else (tests, headless tooling) has no KiCad program behind it:
+    the first registration trips an assert and the second aborts the process.
+    """
+    frame = sys._getframe(1)
+    while frame is not None:
+        if (frame.f_code.co_name in ("LoadPlugins", "LoadPluginModule")
+                and frame.f_globals.get("__name__") == "pcbnew"):
+            return True
+        frame = frame.f_back
+    return False
+
+
 try:
     from .chiplet_export_action import ChipletExportPlugin
 except (ImportError, AttributeError):
@@ -19,4 +38,5 @@ except (ImportError, AttributeError):
     # usable for tests and headless tooling.
     ChipletExportPlugin = None
 else:
-    ChipletExportPlugin().register()
+    if _loaded_by_pcbnew():
+        ChipletExportPlugin().register()

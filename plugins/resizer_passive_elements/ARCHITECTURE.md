@@ -39,8 +39,8 @@ Two design rules run through every file below:
 - **`cmim_footprint_gen.py` (and everything else under `OpenIntM4TM2/`)
   is never modified, ever.** It is imported dynamically, by file path
   (`apply_resize._load_generator_module`), from wherever it currently
-  lives, and called only through the small set of functions the
-  original spec named as its public contract (`load_tech`,
+  lives, and called only through the small set of functions that
+  make up its public interface (`load_tech`,
   `cap_to_width`, `cmim_capacitance_fF`, `cap_bounds_fF`,
   `footprint_name`, `write_footprint`). Anything the generator's raw
   output doesn't get right for KiCad's rendering (see Section 4) is
@@ -242,8 +242,7 @@ property's text (the footprint's own name) -- redundant, and rendered
 enormous at that position relative to the tiny device. A newer version
 instead places three *intentional* polarity-marker texts there
 (`"+ TopMetal1"`, `"- Metal5"`, `"PLUS=In1.Cu  MINUS=In2.Cu"`), which
-must never be removed -- they're the layer legend, confirmed explicitly
-relevant by the project supervisor.
+must never be removed -- they're the layer legend.
 
 `_strip_visible_name_label()` therefore matches by **exact text content
 equal to the footprint's own `name`**, never "the first `fp_text` found

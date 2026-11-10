@@ -27,6 +27,8 @@ from hyp_to_gds import GDSGenerator, LayerMap  # noqa: E402
 # fixture below skips when no PDK resolves. INTERPOSER_LYP still overrides.
 import hyp_to_gds as _h  # noqa: E402
 LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", _h._find_default_lyp()))
+# Every case draws with the interposer PDK's .lyp, a sibling tree.
+pytestmark = pytest.mark.needs_sibling_sources
 EXCHANGE0 = (190, 0)
 DEFAULT_VIZ = (1000, 0)
 

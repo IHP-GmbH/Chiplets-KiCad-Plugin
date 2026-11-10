@@ -16,9 +16,43 @@ sibling-repo search, then imported.
 import os
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Dict, Optional
 
 from ._yaml import escape_yaml_dq
+
+
+@dataclass(frozen=True)
+class InterconnectManifestSnapshot:
+    """One run's authoritative interconnect-manifest read.
+
+    ``manifest=None`` records that discovery found no manifest.  Wrapping that
+    verdict is important: a bare ``None`` has historically meant "discover it
+    now" to the reader helpers, which could make a run preflight one PDK root
+    and then silently use another one while writing the document.
+
+    The wrapper is frozen so consumers cannot replace the selected document.
+    The reader-owned dictionary itself is deliberately not copied: every
+    in-process consumer must receive that exact object, and the query helpers
+    already avoid mutating it.
+    """
+
+    manifest: Optional[dict]
+    root: str = ""
+
+    @property
+    def methods(self) -> Dict[str, dict]:
+        if self.manifest is None:
+            return {}
+        return self.manifest["methods"]
+
+
+def _snapshot_data(manifest):
+    """Return ``(is_snapshot, data)`` without changing legacy ``None``."""
+    if isinstance(manifest, InterconnectManifestSnapshot):
+        return True, manifest.manifest
+    return False, manifest
 
 
 def _manifest_reader():
@@ -70,8 +104,14 @@ def emit_connection_stacks_block(manifest=None):
     each method's description and layer list. Ends with a single newline; the
     caller adds the blank-line separator, mirroring the old code.
     """
+    is_snapshot, manifest_data = _snapshot_data(manifest)
+    if is_snapshot and manifest_data is None:
+        # A known-absent source is authoritative for this run.  Omitting the
+        # optional block is the only honest representation; rediscovering here
+        # could inject stacks from a different checkout.
+        return ""
     im = _manifest_reader()
-    library = im.get_connection_library(manifest)
+    library = im.get_connection_library(manifest_data)
     lines = ["connection_stacks:"]
     for method_id, stack in library.items():
         lines.append("  %s:" % method_id)
@@ -166,7 +206,7 @@ def validate_adapter_id(value, source):
         )
 
 
-def validate_interconnect_ids(adapter=None, die_methods=None):
+def validate_interconnect_ids(adapter=None, die_methods=None, manifest=None):
     """Fail loudly on interconnect ids the manifest does not know.
 
     Called at export time so a typo in the INTERCONNECT_ADAPTER text variable
@@ -183,6 +223,17 @@ def validate_interconnect_ids(adapter=None, die_methods=None):
     if not wanted_adapter and not wanted_methods:
         return
 
+    is_snapshot, manifest_data = _snapshot_data(manifest)
+    if is_snapshot and manifest_data is None:
+        # Match the legacy genuinely-absent behavior without asking discovery
+        # a second time (where an env/sibling source could answer differently).
+        sys.stderr.write(
+            "Warning: interconnect manifest was not found during export "
+            "preflight; skipping adapter/method validation -- studio and "
+            "the assembly DRC validate downstream.\n"
+        )
+        return
+
     try:
         im = _manifest_reader()
     except ImportError as exc:
@@ -197,8 +248,9 @@ def validate_interconnect_ids(adapter=None, die_methods=None):
     # A present-but-malformed manifest must surface a real error here rather
     # than be swallowed into a skipped validation, so build the lists outside
     # the catch above.
-    methods = list(im.list_methods())
-    adapters = sorted({im.adapter_for(m) for m in methods} - {None, ""})
+    methods = list(im.list_methods(manifest_data))
+    adapters = sorted(
+        {im.adapter_for(m, manifest_data) for m in methods} - {None, ""})
 
     if wanted_adapter and wanted_adapter not in adapters:
         raise ValueError(

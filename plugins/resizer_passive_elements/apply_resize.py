@@ -150,33 +150,6 @@ def _normalise_graphic_width_literals(mod_path):
             handle.write(normalised)
 
 
-_VALUE_PROPERTY_RE = re.compile(
-    r'(\(property\s+"Value"\s+")[^"]*(")'
-)
-
-
-def _set_value_label(mod_path, value):
-    """Set the visible Value text without changing the internal footprint name."""
-    with open(mod_path, "r") as handle:
-        text = handle.read()
-
-    def replace_value(match):
-        return match.group(1) + str(value) + match.group(2)
-
-    normalised = _VALUE_PROPERTY_RE.sub(replace_value, text, count=1)
-    if normalised != text:
-        with open(mod_path, "w") as handle:
-            handle.write(normalised)
-
-
-def _format_value_label(cap_fF):
-    """Format a schematic-style visible label, e.g. 10 fF."""
-    value = float(cap_fF)
-    if value >= 1000.0:
-        return "{:g} pF".format(round(value / 1000.0, 3))
-    return "{:g} fF".format(round(value, 3))
-
-
 def _format_nominal_label(cap_fF):
     """The round-value label, e.g. 100 -> '100fF', 1500 -> '1.5pF'.
 
@@ -337,12 +310,6 @@ def _generate_cap_cmim_footprint(params, tech, output_dir, on_log=None, gen_scri
         cap_fF_result = gen.cmim_capacitance_fF(w_um, l_um, tech)
     except Exception:
         cap_fF_result = None
-
-    display_cap_fF = params.get("capacitance_fF")
-    if display_cap_fF is None:
-        display_cap_fF = cap_fF_result
-    if display_cap_fF is not None:
-        _set_value_label(out_path, _format_value_label(display_cap_fF))
 
     params["w_um"] = w_um
     params["l_um"] = l_um

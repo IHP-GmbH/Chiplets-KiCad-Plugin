@@ -215,7 +215,7 @@ checkout on its own. The saved root also feeds the discovery chain above.
 The file holds absolute, machine-local paths, so it is worth adding both it
 and the output folder to the project's `.gitignore`:
 
-```gitignore
+```text
 .resizer_passive_elements.json
 local_footprints.pretty/
 ```

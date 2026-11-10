@@ -21,6 +21,7 @@ if str(PLUGIN_ROOT.parent) not in sys.path:
 
 from chiplet_export.writers.connection_stacks import (  # noqa: E402
     ADAPTER_ID_RE,
+    InterconnectManifestSnapshot,
     _manifest_reader,
     emit_connection_stacks_block,
     emit_interconnect_block,
@@ -71,17 +72,85 @@ EXPECTED_BLOCK = (
 )
 
 
+@pytest.mark.needs_sibling_sources
 @needs_manifest
 def test_connection_stacks_block_byte_exact():
     assert emit_connection_stacks_block() == EXPECTED_BLOCK
 
 
+@pytest.mark.needs_sibling_sources
 @needs_manifest
 def test_vendorx_excluded_from_default_library():
     """The non-IHP demo method must not leak into the default emitted block."""
     block = emit_connection_stacks_block()
     assert "vendorx" not in block.lower()
     assert "VendorXBump" not in block
+
+
+def test_snapshot_a_prevents_catalogue_b_rediscovery(monkeypatch):
+    """Every query gets the preflight data, never the reader's default B."""
+    manifest_a = {
+        "schema_version": "1.0",
+        "methods": {"method_a": {"adapter": "adapter_a"}},
+    }
+    snapshot_a = InterconnectManifestSnapshot(manifest_a)
+    seen = []
+
+    class PoisonDefaultReader:
+        """Its implicit/default catalogue is B and must remain unreachable."""
+
+        @staticmethod
+        def _require_a(manifest):
+            if manifest is None:
+                raise AssertionError("rediscovered catalogue B")
+            assert manifest is manifest_a
+            seen.append(manifest)
+
+        def get_connection_library(self, manifest=None):
+            self._require_a(manifest)
+            return {
+                "method_a": {
+                    "description": "catalogue A",
+                    "layers": [{
+                        "name": "A_layer",
+                        "material": "A_material",
+                        "height": 1.0,
+                        "diameter": 2.0,
+                    }],
+                },
+            }
+
+        def list_methods(self, manifest=None):
+            self._require_a(manifest)
+            return ["method_a"]
+
+        def adapter_for(self, method_id, manifest=None):
+            self._require_a(manifest)
+            assert method_id == "method_a"
+            return "adapter_a"
+
+    monkeypatch.setattr(
+        connection_stacks, "_manifest_reader", PoisonDefaultReader)
+
+    block = emit_connection_stacks_block(snapshot_a)
+    assert "method_a" in block and "catalogue A" in block
+    assert "catalogue B" not in block
+    validate_interconnect_ids(
+        adapter="adapter_a", die_methods=["method_a"], manifest=snapshot_a)
+    with pytest.raises(ValueError, match="adapter_b"):
+        validate_interconnect_ids(adapter="adapter_b", manifest=snapshot_a)
+    assert seen and all(item is manifest_a for item in seen)
+
+
+def test_known_absent_snapshot_never_discovers_a_fallback(monkeypatch):
+    snapshot = InterconnectManifestSnapshot(None)
+
+    def forbid_discovery():
+        raise AssertionError("a known-absent snapshot rediscovered a PDK")
+
+    monkeypatch.setattr(connection_stacks, "_manifest_reader", forbid_discovery)
+    assert emit_connection_stacks_block(snapshot) == ""
+    validate_interconnect_ids(adapter="adapter_x", manifest=snapshot)
 
 
 def test_interconnect_block_empty_when_no_adapter():
@@ -105,12 +174,14 @@ def test_validate_noop_when_nothing_requested():
     validate_interconnect_ids(adapter="", die_methods=[])
 
 
+@pytest.mark.needs_sibling_sources
 @needs_manifest
 def test_validate_known_ids_pass():
     validate_interconnect_ids(adapter="vendorx_microbump",
                               die_methods=["cupillar_opt2"])
 
 
+@pytest.mark.needs_sibling_sources
 @needs_manifest
 def test_validate_unknown_adapter_fails_listing_valid():
     with pytest.raises(ValueError) as exc:
@@ -120,6 +191,7 @@ def test_validate_unknown_adapter_fails_listing_valid():
     assert "ihp_cupillar" in msg  # the valid set is listed
 
 
+@pytest.mark.needs_sibling_sources
 @needs_manifest
 def test_validate_unknown_method_fails_listing_valid():
     with pytest.raises(ValueError) as exc:

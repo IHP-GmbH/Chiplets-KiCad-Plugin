@@ -147,17 +147,24 @@ def run_async(cmd, on_stdout=None, on_stderr=None, cancel_event=None,
     # Block in the kernel on proc.wait (cancel-responsive via the short
     # timeout) instead of spinning on a sleep poll.
     cancelled = False
-    while True:
-        if (cancel_event is not None and cancel_event.is_set()
-                and proc.poll() is None):
-            cancelled = True
-            _terminate(proc)
-            break
-        try:
-            proc.wait(timeout=_POLL_INTERVAL)
-            break
-        except subprocess.TimeoutExpired:
-            continue
+    try:
+        while True:
+            if (cancel_event is not None and cancel_event.is_set()
+                    and proc.poll() is None):
+                cancelled = True
+                _terminate(proc)
+                break
+            try:
+                proc.wait(timeout=_POLL_INTERVAL)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except BaseException:
+        # An interrupt (Ctrl-C in the CLI) propagates, but not past a child
+        # that is still running: it would go on writing outputs its caller
+        # has already given up on and started cleaning up after.
+        _terminate(proc)
+        raise
 
     # Pumps end when the pipes close (process exit / terminate) and enqueue a
     # sentinel that ends each dispatcher. Bound the total wait by one shared

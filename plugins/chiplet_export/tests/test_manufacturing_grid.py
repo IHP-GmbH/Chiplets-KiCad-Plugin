@@ -24,6 +24,8 @@ import hyp_to_gds as _h  # noqa: E402
 from hyp_to_gds import GDSGenerator, LayerMap, MANUFACTURING_GRID_NM  # noqa: E402
 
 LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", _h._find_default_lyp()))
+# Every case draws with the interposer PDK's .lyp, a sibling tree.
+pytestmark = pytest.mark.needs_sibling_sources
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -235,7 +237,7 @@ def test_wire_bond_pad_too_small_for_the_pycell_is_refused():
 
 
 def test_grid_can_be_disabled_for_debugging():
-    """grid_nm=0 keeps the historical path geometry, unsnapped."""
+    """grid_nm=0 draws each trace as a plain path, unsnapped."""
     gen = _make_generator(grid_nm=0)
     gen.add_path([(0.000001, 0.000003), (50.000002, 0.000003)], 4.0, "TopMetal2")
     kinds = [sh.is_path() for li in gen.layout.layer_indexes()

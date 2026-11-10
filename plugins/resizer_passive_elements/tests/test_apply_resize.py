@@ -73,20 +73,6 @@ def test_graphic_width_literals_use_fixed_point(tmp_path):
     )
 
 
-def test_value_label_uses_spaced_fF_without_changing_internal_name(tmp_path):
-    mod_path = tmp_path / "tiny.kicad_mod"
-    mod_path.write_text('(footprint "CMIM_10p006fF"\n'
-                        '    (property "Value" "CMIM_10p006fF"))\n')
-
-    apply_resize._set_value_label(str(mod_path),
-                                  apply_resize._format_value_label(10.0))
-
-    assert mod_path.read_text() == (
-        '(footprint "CMIM_10p006fF"\n'
-        '    (property "Value" "10 fF"))\n'
-    )
-
-
 def test_managed_fields_cover_everything_the_plugin_writes():
     # Any field the plugin writes itself must be excluded from the
     # carry-over of the replaced instance's fields, or the stale value wins.
@@ -95,6 +81,7 @@ def test_managed_fields_cover_everything_the_plugin_writes():
         assert name in apply_resize._MANAGED_FIELDS
 
 
+@pytest.mark.needs_sibling_sources
 @needs_pdk
 def test_the_bound_is_on_capacitance_not_on_the_side(gen, tech):
     over = apply_resize._over_max_capacitance
@@ -122,6 +109,7 @@ def test_the_bound_degrades_to_none_on_a_broken_generator():
     assert apply_resize._over_max_capacitance(Broken(), {}, 1.0, 1.0) is None
 
 
+@pytest.mark.needs_sibling_sources
 @needs_pdk
 def test_an_oversized_w_is_rejected_instead_of_hanging(tmp_path, tech):
     # A bare "8.11" in the w field reads as metres (board_reader._parse_um),
@@ -141,6 +129,7 @@ def test_an_oversized_w_is_rejected_instead_of_hanging(tmp_path, tech):
     assert not list(tmp_path.iterdir()), "nothing should have been written"
 
 
+@pytest.mark.needs_sibling_sources
 @needs_pdk
 def test_an_in_spec_rectangle_still_generates(tmp_path, tech):
     # 100 x 50 um is 7512 fF, inside Cmax: bounding by the square side at Cmax
@@ -157,6 +146,7 @@ def test_an_in_spec_rectangle_still_generates(tmp_path, tech):
     assert params["capacitance_fF"] == pytest.approx(7512.0, rel=1e-4)
 
 
+@pytest.mark.needs_sibling_sources
 @needs_pdk
 def test_an_undersized_w_is_still_rejected(tmp_path, tech):
     logged = []
@@ -171,6 +161,7 @@ def test_an_undersized_w_is_still_rejected(tmp_path, tech):
     assert any("below the device minimum" in line for line in logged), logged
 
 
+@pytest.mark.needs_sibling_sources
 @needs_pdk
 def test_a_legitimate_size_still_generates(tmp_path, tech):
     logged = []
@@ -186,6 +177,7 @@ def test_a_legitimate_size_still_generates(tmp_path, tech):
     assert params["capacitance_fF"] == pytest.approx(99.95575, rel=1e-4)
 
 
+@pytest.mark.needs_sibling_sources
 @needs_pdk
 def test_an_out_of_range_capacitance_is_rejected(tmp_path, tech):
     logged = []
@@ -209,6 +201,7 @@ def test_nominal_label_keeps_the_decimal_point(cap_fF, label):
     assert apply_resize._format_nominal_label(cap_fF) == label
 
 
+@pytest.mark.needs_sibling_sources
 @needs_pdk
 def test_a_nominal_survives_only_while_it_describes_the_geometry(gen, tech):
     live = apply_resize._live_nominal_fF
@@ -224,6 +217,7 @@ def test_a_nominal_survives_only_while_it_describes_the_geometry(gen, tech):
     assert live(gen, tech, 0.0, 8.11, 8.11) is None
 
 
+@pytest.mark.needs_sibling_sources
 @needs_pdk
 def test_a_stock_part_keeps_its_name_across_runs(tmp_path, tech):
     """The plugin rewrites Capacitance with the recomputed value; that value
@@ -243,6 +237,7 @@ def test_a_stock_part_keeps_its_name_across_runs(tmp_path, tech):
     assert all(n.endswith("CMIM_100fF.kicad_mod") for n in names), names
 
 
+@pytest.mark.needs_sibling_sources
 @needs_pdk
 def test_a_resized_part_is_named_for_what_it_now_is(tmp_path, tech):
     # Stale Nominal left at 100fF while w/l describe a larger plate.
@@ -257,22 +252,10 @@ def test_a_resized_part_is_named_for_what_it_now_is(tmp_path, tech):
     assert params["nominal_fF"] is None
 
 
+@pytest.mark.needs_sibling_sources
 @needs_pdk
 def test_the_generated_part_matches_the_committed_one(tmp_path, tech):
-    """Regenerating a family member must reproduce the PDK's own footprint.
-
-    Every property except the visible ``Value`` text. Since 5e256ff this
-    generator writes a schematic-style label there ("100 fF") while the PDK
-    library still carries the footprint name ("CMIM_100fF"), so the two
-    conventions diverge deliberately. That decision is pinned on its own by
-    ``test_value_label_uses_spaced_fF_without_changing_internal_name``; here
-    the divergence is asserted from BOTH sides so a move on either one is
-    named rather than silently absorbed.
-
-    Closing the divergence is the PDK library's call, not this plugin's: the
-    committed CMIM_* footprints live in the repository that owns them, so
-    regenerating them is not a change this repo can make.
-    """
+    """Regenerating a family member must reproduce the PDK's own footprint."""
     committed = (paths.Path(paths.discover_tech_json_path()).parents[3]
                  / "kicad" / "footprints" / "intm4tm2.pretty"
                  / "CMIM_100fF.kicad_mod")
@@ -289,14 +272,8 @@ def test_the_generated_part_matches_the_committed_one(tmp_path, tech):
 
     generated = properties(paths.Path(out).read_text())
     reference = properties(committed.read_text())
-    for key in ("Nominal", "Capacitance", "w", "l", "m"):
+    for key in ("Value", "Nominal", "Capacitance", "w", "l", "m"):
         assert generated[key] == reference[key], key
-
-    assert generated["Value"] == "100 fF"
-    if reference["Value"] != generated["Value"]:
-        # Still the old library convention. If the PDK ever adopts the label
-        # the branch above goes green on its own; a THIRD format lands here.
-        assert reference["Value"] == "CMIM_100fF", reference["Value"]
 
 
 def test_an_unregistered_model_is_reported(tmp_path):

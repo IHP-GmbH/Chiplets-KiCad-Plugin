@@ -251,3 +251,26 @@ def test_a_reader_that_is_here_but_will_not_import_refuses(tmp_path, monkeypatch
     monkeypatch.delitem(sys.modules, "interconnect_manifest", raising=False)
     with pytest.raises(h.SourceRefused):
         h._import_interconnect_manifest()
+
+
+def _help(monkeypatch, capsys, methods):
+    monkeypatch.setattr(h, "_connection_type_cli_choices", lambda: methods)
+    monkeypatch.setattr(sys, "argv", ["hyp_to_gds.py", "--help"])
+    monkeypatch.setenv("COLUMNS", "80")
+    with pytest.raises(SystemExit) as exited:
+        h.main()
+    assert exited.value.code == 0
+    out = capsys.readouterr().out
+    assert "--connection-type" in out
+    return out
+
+
+def test_the_help_reads_the_same_whatever_manifest_is_found(monkeypatch,
+                                                           capsys):
+    # docs/reference/hyp-to-gds.txt is this --help, compared on whatever host
+    # the tests run on; printing the methods found made it stale on every
+    # host with another interconnect PDK, or none.
+    without = _help(monkeypatch, capsys, None)
+    found = _help(monkeypatch, capsys, ["cupillar_opt1", "another_method"])
+    assert "another_method" not in found
+    assert found == without

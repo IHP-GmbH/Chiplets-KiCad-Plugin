@@ -1,0 +1,208 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Frozen test oracle: the plugin's hyp_to_gds.py of 2026-09-20 (file sha256
+# 6b30087599118d057c9915bd33dabacfbf0f77abc657e9eb3d39c423d5141350).
+# Original definitions verbatim; never imported by production code.
+import os
+from pathlib import Path
+import re
+import sys
+from typing import Dict, Optional, Tuple
+import xml.etree.ElementTree as ET
+
+
+class LayerMap:
+    """Manages PDK layer definitions from KLayout LYP file."""
+
+    def __init__(self, lyp_path: str):
+        self.layers: Dict[str, Tuple[int, int]] = {}
+        self._load_lyp(lyp_path)
+
+    def _load_lyp(self, lyp_path: str) -> None:
+        """Load layer definitions from KLayout LYP (XML) file.
+
+        LYP format per layer:
+            <properties>
+                <name>Metal4.drawing</name>
+                <source>50/0</source>   (or "50/0@1" with cell view suffix)
+            </properties>
+        """
+        try:
+            tree = ET.parse(lyp_path)
+            root = tree.getroot()
+
+            for props in root.findall('.//properties'):
+                name_elem = props.find('name')
+                source_elem = props.find('source')
+                if name_elem is None or source_elem is None:
+                    continue
+                if name_elem.text is None or source_elem.text is None:
+                    continue
+
+                full_name = name_elem.text.strip()
+                source = source_elem.text.strip()
+
+                # Strip @N cell view suffix (e.g. "50/0@1" -> "50/0")
+                if '@' in source:
+                    source = source.split('@')[0]
+
+                # Parse layer/datatype from source
+                try:
+                    parts = source.split('/')
+                    layer_num = int(parts[0])
+                    datatype = int(parts[1]) if len(parts) > 1 else 0
+                except (ValueError, IndexError):
+                    continue
+
+                # Split "Name.purpose" into name and purpose
+                if '.' in full_name:
+                    name, purpose = full_name.split('.', 1)
+                else:
+                    name = full_name
+                    purpose = "drawing"
+
+                # Store with "name:purpose" key
+                key = f"{name}:{purpose}"
+                self.layers[key] = (layer_num, datatype)
+
+                # Also store drawing layers with just name for convenience
+                if purpose == "drawing":
+                    self.layers[name] = (layer_num, datatype)
+
+        except FileNotFoundError:
+            print(f"Error: Could not find {lyp_path}", file=sys.stderr)
+            sys.exit(1)
+        except ET.ParseError as e:
+            print(f"Error parsing LYP file: {e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error reading layer table: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    def get_layer(self, name: str, purpose: str = "drawing") -> Tuple[int, int]:
+        """Get GDS layer and datatype for a given layer name."""
+        key = f"{name}:{purpose}"
+        if key in self.layers:
+            return self.layers[key]
+        if name in self.layers:
+            return self.layers[name]
+        raise KeyError(f"Layer '{name}' with purpose '{purpose}' not found in PDK")
+
+    def __repr__(self) -> str:
+        return f"LayerMap({len(self.layers)} layers from LYP)"
+
+
+_PATH_VAR_MARKERS = {
+    "INTERPOSER_PDK_ROOT": (("interposer", "OpenIntM4TM2"),
+                            ("libs.tech", "klayout")),
+    "GDS_TO_KICAD_ROOT": (("gds_to_kicad", "gds-to-kicad"), ("pdks",)),
+    "ADK_ROOT": (("adk", "ADK"), ("klayout", "drc")),
+    "INTERCONNECT_PDK_ROOT": (("interconnect_pdk",
+                               "IHP-Interconnect-IntM4TM2"), ("manifest",)),
+    # Base SG13G2 PDK (via_stack PCell library). Standard IHP convention:
+    # $PDK_ROOT/ihp-sg13g2/...
+    "PDK_ROOT": (("IHP-Open-PDK",), ("ihp-sg13g2", "libs.tech", "klayout")),
+}
+
+
+_PATH_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _discover_path_var(name: str) -> Optional[str]:
+    """Resolve an ecosystem-root variable: env first, then sibling walk.
+
+    A set-but-invalid environment value (marker subpath missing) falls
+    through to the walk, mirroring _find_interposer_pdk_python.
+    Returns the root as a string, or None when unresolvable.
+    """
+    marker = _PATH_VAR_MARKERS.get(name)
+    if marker is None:
+        # Only the known ecosystem-root variables are expandable. An unknown
+        # ${NAME} is a typo/misuse, not a licence to expand an arbitrary
+        # environment variable; return None so _expand_path_vars fails loudly.
+        return None
+    env = os.environ.get(name)
+    if env and Path(env).joinpath(*marker[1]).is_dir():
+        return env
+    dirnames, sub = marker
+    here = Path(__file__).resolve()
+    for base in here.parents:
+        for dirname in dirnames:
+            cand = base / dirname
+            if cand.joinpath(*sub).is_dir():
+                return str(cand)
+    return None
+
+
+def _expand_path_vars(path: Optional[str]) -> Optional[str]:
+    """Expand ${VAR} ecosystem-root references in a path input.
+
+    Resolution per variable: environment -> sibling-checkout walk ->
+    LOUD failure (a path that silently keeps a literal ``${VAR}``
+    component would just "not exist" downstream and mask the real
+    problem). Paths without ``${`` pass through untouched, so absolute
+    and relative inputs keep their normal semantics.
+    """
+    if not path or "${" not in path:
+        return path
+
+    def _repl(match):
+        name = match.group(1)
+        value = _discover_path_var(name)
+        if value is None:
+            sys.exit(
+                "ERROR: cannot resolve ${%s} in path '%s'. Set the %s "
+                "environment variable or keep the checkout next to this "
+                "tool (ecosystem discovery convention, see "
+                "adk/docs/integration.md)." % (name, path, name))
+        return value
+
+    result = _PATH_VAR_RE.sub(_repl, path)
+    if "${" in result:
+        # A malformed reference (e.g. unterminated ${, or an invalid name) the
+        # regex could not match survived: fail loud rather than letting a
+        # literal ${...} component silently "not exist" downstream.
+        sys.exit(
+            "ERROR: malformed variable reference in path '%s'. Use ${NAME} "
+            "with an ecosystem-root name (see adk/docs/integration.md)." % path)
+    return result
+
+
+def _find_default_lyp() -> str:
+    """Default layer-properties file for the interposer GDS.
+
+    Resolves the interposer PDK's canonical
+    ``libs.tech/klayout/tech/intm4tm2.lyp`` via env/walk discovery. The
+    file belongs to the interposer PDK, not the plugin, so there is no
+    vendored copy: when no checkout resolves, return the unexpanded
+    ``${INTERPOSER_PDK_ROOT}`` form (mirrors _find_interposer_template) so
+    the error text points somewhere actionable instead of silently using a
+    stale bundled .lyp.
+    """
+    python_dir = _find_interposer_pdk_python()
+    if python_dir is not None:
+        cand = python_dir.parent / "tech" / "intm4tm2.lyp"
+        if cand.is_file():
+            return str(cand)
+    return "${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp"
+
+
+def _find_interposer_pdk_python():
+    """Locate the interposer PDK's python tooling dir (bump_mirror.py).
+
+    Ecosystem discovery convention (same shape as ADK_ROOT /
+    INTERCONNECT_PDK_ROOT): explicit root via $INTERPOSER_PDK_ROOT first,
+    then an upward walk from this file for a sibling interposer/ checkout.
+    Returns the directory as a Path, or None.
+    """
+    env = os.environ.get("INTERPOSER_PDK_ROOT")
+    if env:
+        cand = Path(env) / "libs.tech" / "klayout" / "python"
+        if (cand / "bump_mirror.py").is_file():
+            return cand
+    here = Path(__file__).resolve()
+    for base in here.parents:
+        for dirname in _PATH_VAR_MARKERS["INTERPOSER_PDK_ROOT"][0]:
+            cand = base / dirname / "libs.tech" / "klayout" / "python"
+            if (cand / "bump_mirror.py").is_file():
+                return cand
+    return None

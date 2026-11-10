@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("klayout.db")
+import klayout.db as db  # noqa: E402
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT) not in sys.path:
@@ -36,6 +37,8 @@ import hyp_to_gds as h  # noqa: E402
 UM = 1e-6
 
 LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", h._find_default_lyp()))
+# Every case draws with the interposer PDK's .lyp, a sibling tree.
+pytestmark = pytest.mark.needs_sibling_sources
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -47,9 +50,9 @@ def _require_lyp():
         pytest.skip(f"interposer LYP not found: {LYP_PATH}")
 
 
-def _make_generator(tech_json_path=None):
-    return h.GDSGenerator(h.LayerMap(str(LYP_PATH)), "TOP", "METRIC", [],
-                          tech_json_path)
+def _make_generator(tech_json_path=None, units="METRIC", stackup=()):
+    return h.GDSGenerator(h.LayerMap(str(LYP_PATH)), "TOP", units,
+                          list(stackup), tech_json_path)
 
 
 def _via_and_padstack(pad_um, layers):
@@ -182,3 +185,95 @@ def test_bootstrap_quiet_false_without_pdk(monkeypatch):
     gen = _make_generator(None)
     monkeypatch.setattr(h, "_discover_path_var", lambda name: None)
     assert gen._bootstrap_sg13g2_pcells() is False
+
+
+# ---------------------------------------------------------------------------
+# Via count at the landing: integer dbu, not a float ceil
+# ---------------------------------------------------------------------------
+
+# The span as the HYP's STACKUP gives it in the flow; the PCell path orders
+# the via layers by it.
+_TOP_SPAN = ("TopMetal2", "TopMetal1")
+
+# HYP length unit per UNITS value, in um.
+_UNIT_UM = {"METRIC": h.GDSGenerator.METER_TO_UM,
+            "ENGLISH": h.GDSGenerator.INCH_TO_UM}
+
+
+def _tv2_landing_um(gen, k):
+    """The landing a k x k TopVia2 array draws: the top of k's interval."""
+    p = gen.PDK_VIA_PARAMS["TV2"]
+    return k * (p["size"] + p["sep"]) - p["sep"] + 2 * p["enc"]
+
+
+def _cut_boxes(gen, layer_name):
+    """Every shape of the layer under the top cell, PCell instances included."""
+    idx = gen._get_gds_layer(layer_name)
+    return list(db.Region(gen.top_cell.begin_shapes_rec(idx)).each())
+
+
+def _via_generator(pcells, units="METRIC"):
+    gen = _make_generator(None, units, _TOP_SPAN)
+    if pcells and not gen._pcells_available:
+        pytest.skip("SG13_dev via_stack PCell not available")
+    gen._pcells_available = pcells
+    return gen
+
+
+@pytest.mark.parametrize("units", ["METRIC", "ENGLISH"])
+@pytest.mark.parametrize("k", [1, 3, 10])
+def test_via_count_at_landing_and_one_dbu_above(units, k):
+    """A pad equal to the k x k landing gives k; one dbu more gives k+1,
+    whichever unit the HYP length arrives in."""
+    gen = _make_generator(None, units)
+    landing = _tv2_landing_um(gen, k)
+    for pad_um, want in ((landing, k), (landing + gen.layout.dbu, k + 1)):
+        target = gen._to_um(pad_um / _UNIT_UM[units])
+        assert gen._calculate_via_array(target, "TV2") == want
+
+
+@pytest.mark.parametrize("pcells", [False, True])
+def test_landing_pad_draws_its_own_array(pcells):
+    """A 3x3 landing draws 9 TopVia2 cuts on either via path."""
+    gen = _via_generator(pcells)
+    via, padstack = _via_and_padstack(_tv2_landing_um(gen, 3), _TOP_SPAN)
+    assert gen.add_via(via, padstack) is True
+    assert len(_cut_boxes(gen, "TopVia2")) == 9
+
+
+# A dieless HYP with a TopMetal2-TopMetal1 padstack of a 1.9 um pad and a
+# 0.9 um drill, METRIC: the one-cut via KiCad writes for a TopVia2.
+_SIGNAL_VIA_HYP = (
+    "{VERSION=2.14}\n{UNITS=METRIC LENGTH}\n\n"
+    '{BOARD "board.kicad_pcb"\n'
+    "  (PERIMETER_SEGMENT X1=0.000100000 Y1=0.000000000 X2=0.000000000 Y2=0.000000000)\n"
+    "  (PERIMETER_SEGMENT X1=0.000000000 Y1=0.000000000 X2=0.000000000 Y2=0.000100000)\n"
+    "  (PERIMETER_SEGMENT X1=0.000000000 Y1=0.000100000 X2=0.000100000 Y2=0.000100000)\n"
+    "  (PERIMETER_SEGMENT X1=0.000100000 Y1=0.000100000 X2=0.000100000 Y2=0.000000000)\n"
+    "}\n\n"
+    "{PADSTACK=2, 0.000000900\n"
+    '  ("TopMetal2", 0, 0.000001900, 0.000001900, 0.0, M)\n'
+    '  ("TopMetal1", 0, 0.000001900, 0.000001900, 0.0, M)\n'
+    "}\n\n"
+    '{NET="N1"\n'
+    "  (VIA X=0.0000200000 Y=0.0000200000 P=2)\n"
+    "  (VIA X=0.0000400000 Y=0.0000200000 P=2)\n"
+    "  (VIA X=0.0000600000 Y=0.0000409280 P=2)\n"
+    "}\n"
+)
+
+
+@pytest.mark.parametrize("pcells", [False, True])
+def test_signal_via_hyp_draws_one_cut_per_via(tmp_path, pcells):
+    """Each 1.9 um one-cut via stays one 0.9 um TopVia2 cut."""
+    hyp = tmp_path / "signal_vias.hyp"
+    hyp.write_text(_SIGNAL_VIA_HYP)
+    parser = h.HYPParser(str(hyp))
+    parser.parse()
+    assert len(parser.vias) == 3
+    gen = _via_generator(pcells, parser.units)
+    for via in parser.vias:
+        assert gen.add_via(via, parser.padstacks[via.padstack_index]) is True
+    cuts = _cut_boxes(gen, "TopVia2")
+    assert len(cuts) == 3
+    assert {c.bbox().width() for c in cuts} == {round(0.9 / gen.layout.dbu)}

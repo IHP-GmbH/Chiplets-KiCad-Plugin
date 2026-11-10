@@ -16,11 +16,24 @@ from pathlib import Path
 
 import wx
 
+from .die_outline import (
+    ARCHIVED_DIE, FIELD as DIE_OUTLINE_LAYER_FIELD, OUTLINE_DIE,
+    DieOutlineLayerRefused, die_roles,
+    preflight_die_outline_layers, read_die_outline_layers,
+    _NOT_A_DIE as _NOT_A_DIE_REASONS,
+)
+from .pad_domains import PROPERTY as PAD_DOMAINS_PROPERTY, PadDomainError
 from .pipeline.orchestrator import (
-    ExportOptions, ExportResult, run_export, available_connection_types,
+    ExportOptions, ExportResult, InterconnectSourceRefused, run_export,
+    available_connection_types,
     connection_method_specs, describe_assembly_drc, describe_connection_method,
     discover_dependency_root, discover_interposer_lyp, format_connection_label,
+    discover_interconnect_root, INTERCONNECT_ABSENCE_WARNING,
+    _preflight_interconnect_manifest, worker_reads_die_outlines,
 )
+
+
+EXPORT_REPORT_LABEL = "Interposer export report"
 
 
 class _DirBrowseDialog(wx.Dialog):
@@ -162,6 +175,10 @@ class ChipletExportDialog(wx.Dialog):
                             else str(Path(__file__).resolve().parent))
         self._cancel_event = threading.Event()
         self._worker_thread = None
+        self._catalogue_error = ""
+        self._catalogue_reported_error = ""
+        self._catalogue_warning = ""
+        self._catalogue_reported_warning = ""
         # Set when the dialog is closing so a late wx.CallAfter from the worker
         # thread no-ops instead of touching a window that is being destroyed.
         self._closing = False
@@ -271,20 +288,23 @@ class ChipletExportDialog(wx.Dialog):
             "Interposer PDK checkout. Supplies the fab pad openings and the "
             "Cu-pillar placement tooling (bump_mirror). Resolved via "
             "$INTERPOSER_PDK_ROOT, the project text variable, or a sibling "
-            "checkout; override to export against a different interposer PDK.")
+            "checkout; override to use another IntM4TM2 checkout (a fork or a "
+            "release tag). A tree that is not IntM4TM2 is refused.")
         pdk_grid.Add(self._interposer_root_ctrl, 1, wx.EXPAND)
 
         pdk_grid.Add(wx.StaticText(panel, label="Interconnect PDK:"),
                      0, wx.ALIGN_CENTER_VERTICAL)
         self._interconnect_root_ctrl = _DirField(
             panel,
-            path=discover_dependency_root("INTERCONNECT_PDK_ROOT", self._board),
+            path=discover_interconnect_root(board=self._board),
             on_change=self._schedule_connection_refresh)
         self._interconnect_root_ctrl.SetToolTip(
             "Interconnect PDK checkout. Its manifest defines the connection "
             "stacks below (changing this re-reads the list) plus the 3D "
             "bodies and pitch rules. Resolved via $INTERCONNECT_PDK_ROOT, "
-            "the project text variable, or a sibling checkout.")
+            "the project text variable, or a sibling checkout containing "
+            "manifest/interconnect_methods.json. Explicit roots are checked "
+            "as selected; an incomplete root is not replaced by a fallback.")
         pdk_grid.Add(self._interconnect_root_ctrl, 1, wx.EXPAND)
 
         pdk_grid.Add(wx.StaticText(panel, label="ADK:"),
@@ -304,7 +324,7 @@ class ChipletExportDialog(wx.Dialog):
 
         # Pipeline options
         opts_box = wx.StaticBoxSizer(wx.VERTICAL, panel, "Pipeline options")
-        grid = wx.FlexGridSizer(rows=4, cols=2, vgap=4, hgap=8)
+        grid = wx.FlexGridSizer(rows=5, cols=2, vgap=4, hgap=8)
         grid.AddGrowableCol(1, 1)
 
         grid.Add(wx.StaticText(panel, label="Top cell:"),
@@ -328,7 +348,8 @@ class ChipletExportDialog(wx.Dialog):
         self._conn_specs = {}
         self._load_connection_catalogue()
         self._conn_ctrl = wx.Choice(panel, choices=self._conn_labels)
-        self._conn_ctrl.SetSelection(0)
+        if self._conn_choices:
+            self._conn_ctrl.SetSelection(0)
         self._conn_ctrl.Bind(wx.EVT_CHOICE, self._on_conn_selected)
         grid.Add(self._conn_ctrl, 1, wx.EXPAND)
 
@@ -360,36 +381,55 @@ class ChipletExportDialog(wx.Dialog):
             "you to set it.")
         grid.Add(self._lyp_ctrl, 1, wx.EXPAND)
 
+        grid.Add(wx.StaticText(panel, label=EXPORT_REPORT_LABEL + ":"),
+                 0, wx.ALIGN_CENTER_VERTICAL)
+        self._export_report_ctrl = wx.FilePickerCtrl(
+            panel, wildcard="Export report (*.json)|*.json|All files|*")
+        self._export_report_ctrl.SetToolTip(
+            "The report interposer-pnr export wrote with this board. "
+            "Required when its carrier pads came from export and link sheet "
+            "symbols (a board drawn against a sheet, or a draft updated from "
+            "its draft sheet): the io_pad nets take the planner's names from "
+            "it.")
+        grid.Add(self._export_report_ctrl, 1, wx.EXPAND)
+
         opts_box.Add(grid, 0, wx.EXPAND | wx.ALL, 4)
         outer.Add(opts_box, 0, wx.EXPAND | wx.ALL, 8)
 
-        # Per-die connection method and physical thickness: one row per die
-        # footprint (GDS_FILE field). Initialized from each footprint's
-        # CONNECTION / DIE_THICKNESS_UM fields and written back on Run, so
-        # the board stays the source of truth for per-die selection. A die
-        # on "(use default)" follows the assembly-wide stack above; mixed
-        # selections give each die its own method's 3D bodies, connection
-        # stack and DRC numbers. An empty thickness keeps the .chiplet
-        # format default of 0.0.
+        # Per-die connection method, outline layer and physical thickness:
+        # one row per die footprint (GDS_FILE field). Initialized from each
+        # footprint's CONNECTION / DIE_OUTLINE_LAYER / DIE_THICKNESS_UM
+        # fields and written back on Run, so the board stays the source of
+        # truth for per-die selection. A die on "(use default)" follows the
+        # assembly-wide stack above; mixed selections give each die its own
+        # method's 3D bodies, connection stack and DRC numbers. An empty
+        # thickness keeps the .chiplet format default of 0.0; an empty
+        # outline layer refuses the run, since it has no default.
         self._die_conn_ctrls = {}
         self._die_conn_items = {}
         self._die_thick_ctrls = {}
+        self._die_outline_ctrls = {}
         die_refs = self._die_refs()
         if die_refs:
             # Interconnect method: the primary per-die choice. It drives the
             # die's 3D bodies, connection stack and DRC numbers, and is saved
-            # to the footprint's CONNECTION field. One row per die footprint.
+            # to the footprint's CONNECTION field. Outline layer: the layer of
+            # the die's own GDS that sizes it in the .chiplet and the complete
+            # GDS, saved to DIE_OUTLINE_LAYER. It is required and it changes
+            # the 2D die, so it sits here, not in the collapsed 3D pane.
             die_box = wx.StaticBoxSizer(
                 wx.VERTICAL, panel,
-                "Per-die interconnect method (saved to the footprint's "
-                "CONNECTION field)")
-            conn_grid = wx.FlexGridSizer(rows=len(die_refs) + 1, cols=2,
+                "Per-die settings (saved to the footprint's CONNECTION and "
+                "%s fields)" % DIE_OUTLINE_LAYER_FIELD)
+            conn_grid = wx.FlexGridSizer(rows=len(die_refs) + 1, cols=3,
                                          vgap=2, hgap=8)
             conn_grid.AddGrowableCol(1, 1)
-            for header in ("Die", "Interconnect method"):
+            for header in ("Die", "Interconnect method",
+                           "Outline layer (L/D)"):
                 conn_grid.Add(_muted(panel, header), 0,
                               wx.ALIGN_CENTER_VERTICAL)
             board_conns = self._board_die_connections()
+            outline_rows = self._board_die_outline_rows()
             for ref in die_refs:
                 conn_grid.Add(wx.StaticText(panel, label="%s:" % ref),
                               0, wx.ALIGN_CENTER_VERTICAL)
@@ -399,6 +439,9 @@ class ChipletExportDialog(wx.Dialog):
                 self._die_conn_ctrls[ref] = ctrl
                 self._set_die_choice_items(ref, board_conns.get(ref, ""))
                 conn_grid.Add(ctrl, 1, wx.EXPAND)
+                conn_grid.Add(
+                    self._die_outline_cell(panel, ref, *outline_rows),
+                    0, wx.ALIGN_CENTER_VERTICAL)
             die_box.Add(conn_grid, 0, wx.EXPAND | wx.ALL, 4)
             die_box.Add(
                 _muted(panel,
@@ -518,6 +561,7 @@ class ChipletExportDialog(wx.Dialog):
         # EVT_CHOICE does not fire for the SetSelection calls above, so the
         # detail line and tooltips need one explicit pass at build time.
         self._on_conn_selected()
+        self._apply_catalogue_state()
 
         self._panel = panel
         panel.SetSizer(outer)
@@ -594,16 +638,63 @@ class ChipletExportDialog(wx.Dialog):
         Fills the index-parallel ``_conn_choices`` (ids) / ``_conn_labels``
         (display) pair plus ``_conn_specs``. Every read-back path indexes the
         id list, so what reaches the CLI and the CONNECTION fields is always
-        the bare method id -- the labels are presentation only.
+        the bare method id -- the labels are presentation only. Returns False
+        on typed source refusal without publishing a partially read catalogue.
         """
         root = self._interconnect_root_ctrl.GetPath()
-        self._conn_choices = available_connection_types(root, board=self._board)
-        self._conn_specs = connection_method_specs(root, board=self._board)
-        self._conn_labels = [
-            "(none - keep each die's CONNECTION field)" if not method
-            else self._conn_label_for(method)
-            for method in self._conn_choices
-        ]
+        try:
+            snapshot = _preflight_interconnect_manifest(root, board=self._board)
+            choices = available_connection_types(root, board=self._board)
+            specs = connection_method_specs(root, board=self._board)
+            labels = [
+                "(none - keep each die's CONNECTION field)" if not method
+                else format_connection_label(method, specs.get(method))
+                for method in choices
+            ]
+        except InterconnectSourceRefused as exc:
+            # A refused source is not an absent PDK. Keep previous selections
+            # for recovery, but never offer them as a valid replacement source.
+            self._catalogue_error = (
+                "Interconnect catalogue unavailable for %s: %s\n"
+                "Repair the resolved PDK and make its supported manifest reader "
+                "importable in KiCad's Python, or select a compatible PDK root. "
+                "Previous connection selections, if any, are unavailable until "
+                "the resolved source can be read."
+                % (root or "the discovered interconnect PDK", exc))
+            return False
+        self._conn_choices, self._conn_specs, self._conn_labels = choices, specs, labels
+        self._catalogue_error = ""
+        self._catalogue_warning = (
+            INTERCONNECT_ABSENCE_WARNING
+            if snapshot.manifest is None else "")
+        return True
+
+    def _apply_catalogue_state(self):
+        """Present a refusal after construction or refresh, keeping root editable."""
+        valid = not self._catalogue_error
+        self._conn_ctrl.Enable(valid)
+        for ctrl in self._die_conn_ctrls.values():
+            ctrl.Enable(valid)
+        running = self._worker_thread is not None and self._worker_thread.is_alive()
+        self._run_btn.Enable(valid and not running)
+        if not valid:
+            self._conn_detail.SetLabel("Connection catalogue unavailable; see log.")
+            self._conn_ctrl.SetToolTip(self._catalogue_error)
+            self._set_status("Blocked: interconnect PDK source cannot be used")
+            if self._catalogue_reported_error != self._catalogue_error:
+                self._append_log(self._catalogue_error)
+        elif self._catalogue_warning:
+            if not running:
+                self._set_status("Idle without interconnect PDK; see warning")
+            if self._catalogue_reported_warning != self._catalogue_warning:
+                self._append_log("WARNING: " + self._catalogue_warning)
+        elif self._catalogue_reported_error or self._catalogue_reported_warning:
+            self._append_log("Interconnect catalogue loaded from the resolved source.")
+            if not running:
+                self._set_status("Idle")
+        self._catalogue_reported_error = self._catalogue_error
+        self._catalogue_reported_warning = (
+            self._catalogue_warning if valid else "")
 
     def _conn_label_for(self, method_id):
         """Display label for a method id (bare id when the manifest is mute)."""
@@ -612,6 +703,8 @@ class ChipletExportDialog(wx.Dialog):
 
     def _conn_detail_for(self, method_id):
         """Spec-sheet line for a method id, for the detail text and tooltips."""
+        if self._catalogue_warning:
+            return self._catalogue_warning
         if not method_id:
             return ("No assembly-wide default: each die keeps the method in "
                     "its own CONNECTION field.")
@@ -681,6 +774,92 @@ class ChipletExportDialog(wx.Dialog):
                     for ref, v in read_die_thicknesses(self._board).items()}
         except Exception:
             return {}
+
+    def _board_die_outline_rows(self):
+        """(roles, texts, error) behind the per-die outline-layer column.
+
+        ``roles`` is {ref: die_outline role}; ``texts`` the DIE_OUTLINE_LAYER
+        text of each die sized from its GDS, raw, a malformed value included,
+        so the row shows what the board says and Run validates exactly that.
+        A read that fails is not turned into empty rows, which Run would then
+        write back: ``error`` carries it, the rows say so, and Run's preflight
+        reads the board again and names the cause.
+        """
+        if self._board is None:
+            return {}, {}, ""
+        try:
+            return (die_roles(self._board),
+                    read_die_outline_layers(self._board), "")
+        except Exception as exc:
+            return {}, {}, str(exc) or type(exc).__name__
+
+    def _die_outline_cell(self, parent, ref, roles, texts, error):
+        """The outline-layer cell of `ref`'s per-die row.
+
+        A TextCtrl for a die sized from its GDS, a note for everything else:
+        a marked die keeps its archived size and the export never reads its
+        field, and a footprint the .chiplet does not export as a die needs
+        none.
+        """
+        if error:
+            note = _muted(parent, "board not read")
+            note.SetToolTip(
+                "Reading the die roles and %s fields failed: %s. Run reads "
+                "the board again and names the cause."
+                % (DIE_OUTLINE_LAYER_FIELD, error))
+            return note
+        role = roles.get(ref)
+        if role == OUTLINE_DIE:
+            ctrl = wx.TextCtrl(parent, size=wx.Size(100, -1))
+            ctrl.SetValue(texts.get(ref, ""))
+            # A hint, not a value: there is no default layer, and a number
+            # here would read as one.
+            ctrl.SetHint("layer/datatype")
+            ctrl.SetToolTip(
+                "The GDS layer/datatype this die's own GDS draws its outline "
+                "on, saved to %s. The export sizes the die from the one "
+                "rectangle on that layer, in the .chiplet and in the complete "
+                "GDS. SG13G2 dies use 39/4, the EdgeSeal boundary. Required: "
+                "an empty or malformed value stops Run."
+                % DIE_OUTLINE_LAYER_FIELD)
+            self._die_outline_ctrls[ref] = ctrl
+            return ctrl
+        if role == ARCHIVED_DIE:
+            note = _muted(parent, "exempt: archived PinList size")
+            note.SetToolTip(
+                "Marked with %s: the die keeps the size archived with its "
+                "PinList, and the export passes it as exempt without reading "
+                "%s." % (PAD_DOMAINS_PROPERTY, DIE_OUTLINE_LAYER_FIELD))
+            return note
+        reason = _NOT_A_DIE_REASONS.get(role)
+        note = _muted(parent, "not exported as a die")
+        note.SetToolTip(
+            "The .chiplet does not export this footprint as a die%s, so it "
+            "needs no outline layer." % (" (%s)" % reason if reason else ""))
+        return note
+
+    def _die_outline_text(self, ref):
+        """Outline-layer row text for `ref`, stripped ("" = none given)."""
+        return self._die_outline_ctrls[ref].GetValue().strip()
+
+    def _die_outline_refusal(self, options):
+        """MessageBox text for what run_export's outline preflight refuses
+        with `options`, or "" when it would pass.
+
+        The same function on the same explicit map, so one box names every
+        offender: the rows that are empty or not LAYER/DATATYPE (unlike
+        thickness, an empty row refuses, since there is no default layer),
+        and what the rows cannot show, such as a die without a GDS_FILE (no
+        row), a shared reference, or a board changed since the dialog opened.
+        """
+        try:
+            preflight_die_outline_layers(self._board,
+                                         options.die_outline_layers)
+        except DieOutlineLayerRefused as exc:
+            return _describe_die_outline_refusal(exc)
+        except PadDomainError as exc:
+            return "Carrier pad domains refused: %s" % exc
+        return ""
 
     def _set_die_choice_items(self, ref, current):
         """(Re)populate one die's method choice, selecting `current`.
@@ -756,7 +935,9 @@ class ChipletExportDialog(wx.Dialog):
         idx = self._conn_ctrl.GetSelection()
         if idx is not None and 0 <= idx < len(self._conn_choices):
             current = self._conn_choices[idx]
-        self._load_connection_catalogue()
+        if not self._load_connection_catalogue():
+            self._apply_catalogue_state()
+            return False
         if current and current not in self._conn_choices:
             self._conn_choices.append(current)
             self._conn_labels.append(self._conn_label_for(current))
@@ -771,6 +952,8 @@ class ChipletExportDialog(wx.Dialog):
         # its current selection when the new manifest still has it.
         for ref in getattr(self, "_die_conn_ctrls", {}):
             self._set_die_choice_items(ref, self._die_conn_value(ref))
+        self._apply_catalogue_state()
+        return True
 
     def _collect_options(self):
         idx = self._conn_ctrl.GetSelection()
@@ -786,6 +969,11 @@ class ChipletExportDialog(wx.Dialog):
                       for ref in self._die_thick_ctrls}
         die_thicks = {ref: t for ref, t in die_thicks.items()
                       if t is not None}
+        # Every outline row as typed, empty or malformed included: the
+        # preflight then checks exactly what the rows show, and _on_run
+        # refuses a bad row by name before anything is written back.
+        die_outlines = {ref: self._die_outline_text(ref)
+                        for ref in self._die_outline_ctrls}
         return ExportOptions(
             output_dir=self._out_dir_ctrl.GetPath(),
             emit_complete_gds=self._cb_complete.GetValue(),
@@ -797,7 +985,9 @@ class ChipletExportDialog(wx.Dialog):
             connection_type=conn,
             die_connections=die_conns,
             die_thicknesses=die_thicks,
+            die_outline_layers=die_outlines,
             lyp_override=self._lyp_ctrl.GetPath() or "",
+            export_report=self._export_report_ctrl.GetPath() or "",
             worker_python_override=self._worker_ctrl.GetValue().strip(),
             interposer_pdk_root=self._interposer_root_ctrl.GetPath() or "",
             interconnect_pdk_root=self._interconnect_root_ctrl.GetPath() or "",
@@ -810,6 +1000,11 @@ class ChipletExportDialog(wx.Dialog):
 
     def _on_run(self, _event):
         if self._worker_thread is not None and self._worker_thread.is_alive():
+            return
+
+        # The user can press Run before the path-change debounce fires. Refuse
+        # here before collecting options, changing footprint fields or exporting.
+        if not self._refresh_connection_choices():
             return
 
         options = self._collect_options()
@@ -844,8 +1039,25 @@ class ChipletExportDialog(wx.Dialog):
                 wx.OK | wx.ICON_WARNING,
             )
             return
+        # The die outline layers, for the runs whose worker reads them and
+        # with the preflight run_export applies, on the rows as typed, so a
+        # board the export would refuse stops here, in one message box: no
+        # field write-back, no worker.
+        check_outlines = (self._board is not None
+                          and worker_reads_die_outlines(options))
+        if check_outlines:
+            refusal = self._die_outline_refusal(options)
+            if refusal:
+                wx.MessageBox(
+                    refusal,
+                    "Chiplet Export",
+                    wx.OK | wx.ICON_WARNING,
+                )
+                return
 
         self._log_ctrl.SetValue("")
+        if self._catalogue_warning:
+            self._append_log("WARNING: " + self._catalogue_warning)
         self._cancel_event = threading.Event()
         self._set_running(True)
 
@@ -884,6 +1096,24 @@ class ChipletExportDialog(wx.Dialog):
                 self._append_log_safe(
                     "Warning: could not write DIE_THICKNESS_UM fields: %s"
                     % exc)
+
+        # And the outline layers. Only after the check above passed, so no
+        # row is empty or malformed here and no field is cleared.
+        if check_outlines and self._die_outline_ctrls:
+            try:
+                from .writers.chiplet_writer import write_die_outline_layers
+                changed = write_die_outline_layers(
+                    self._board,
+                    {ref: self._die_outline_text(ref)
+                     for ref in self._die_outline_ctrls})
+                if changed:
+                    self._append_log_safe(
+                        "Updated %s field on: %s (save the board to keep it)"
+                        % (DIE_OUTLINE_LAYER_FIELD, ", ".join(changed)))
+            except Exception as exc:
+                self._append_log_safe(
+                    "Warning: could not write %s fields: %s"
+                    % (DIE_OUTLINE_LAYER_FIELD, exc))
 
         def _worker():
             try:
@@ -927,8 +1157,11 @@ class ChipletExportDialog(wx.Dialog):
             return  # dialog is closing; the window may already be gone
         self._set_running(False)
         if result.error:
-            self._append_log("ERROR: " + result.error)
-            self._set_status("Error: " + _short(result.error))
+            error = result.error
+            if result.error_input == "export_report":
+                error += "; the export report is the file in '%s'" % EXPORT_REPORT_LABEL
+            self._append_log("ERROR: " + error)
+            self._set_status("Error: " + _short(error))
         elif result.cancelled:
             self._set_status("Cancelled")
         elif result.exit_code == 0:
@@ -948,7 +1181,13 @@ class ChipletExportDialog(wx.Dialog):
             if result.assembly_drc_report_path:
                 self._append_log("  report: %s"
                                  % result.assembly_drc_report_path)
-            if result.assembly_drc_exit_code > 0:
+            if result.assembly_drc_error:
+                # The DRC stage raised after the files were written. It used
+                # to reach the crash handler; it must not read as "Done".
+                for line in result.assembly_drc_error.rstrip().splitlines():
+                    self._append_log(line)
+                self._set_status("Done - assembly DRC did not complete")
+            elif result.assembly_drc_exit_code > 0:
                 self._set_status("Done - assembly DRC FAILED")
             else:
                 self._set_status("Done (exit 0)")
@@ -995,10 +1234,19 @@ class ChipletExportDialog(wx.Dialog):
         self._status.SetLabel(text)
 
     def _set_running(self, running):
-        self._run_btn.Enable(not running)
+        self._run_btn.Enable(not running and not self._catalogue_error)
         self._cancel_btn.Enable(running)
         if running:
             self._set_status("Running ...")
+
+
+def _describe_die_outline_refusal(exc):
+    """MessageBox text for a DieOutlineLayerRefused, one paragraph per cause
+    naming every reference it applies to (the exception's own message is one
+    line for the log). A paragraph per offender would grow the box past the
+    screen on a board with many parts that are not dies."""
+    return "Die outline layer refused:\n\n" + "\n\n".join(
+        "%s: %s" % (", ".join(refs), cause) for refs, cause in exc.by_cause())
 
 
 def _short(msg, limit=80):

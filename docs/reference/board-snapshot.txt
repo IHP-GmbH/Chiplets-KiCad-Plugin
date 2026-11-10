@@ -1,0 +1,9 @@
+usage: board_snapshot_cli.py [-h] --board BOARD --output OUTPUT
+
+Observe PCB placement, raw fields, pads and net membership in absolute KiCad
+millimetres (Y down).
+
+options:
+  -h, --help       show this help message and exit
+  --board BOARD    Source .kicad_pcb (read-only).
+  --output OUTPUT  Destination snapshot JSON.

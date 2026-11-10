@@ -8,7 +8,7 @@ with the `_metadata.finalize_required: true` block; the canonical
 file is produced downstream by hyp_to_gds.py --update-chiplet-file.
 
 Frame and anchor semantics follow
-chiplet-spec/docs/coord_frame_contract.md sections 1, 4.1, 4.4.
+chiplet-system-spec/docs/coord_frame_contract.md sections 1 and 2 and the writer contract (section 4).
 """
 
 import math
@@ -24,6 +24,23 @@ from .connection_stacks import (
     validate_interconnect_ids,
 )
 from ._yaml import escape_yaml_dq, yaml_scalar
+from ._technology import technology_id
+
+# is_cmim, CMIM_MODEL and die_role live next to the DIE_OUTLINE_LAYER rule so
+# the export preflight classifies footprints without importing this
+# pcbnew-bound module; they stay importable from here.
+if "." in (__package__ or ""):
+    from ..die_outline import (  # noqa: F401
+        CMIM, CMIM_MODEL, FIELD as DIE_OUTLINE_LAYER_FIELD, IO_PAD,
+        NOT_EMITTED, OUTLINE_DIE, die_role, is_cmim,
+    )
+    from ..draft_net_names import BoardCarrier, planner_net, read_board_carriers
+else:
+    from die_outline import (  # noqa: F401
+        CMIM, CMIM_MODEL, FIELD as DIE_OUTLINE_LAYER_FIELD, IO_PAD,
+        NOT_EMITTED, OUTLINE_DIE, die_role, is_cmim,
+    )
+    from draft_net_names import BoardCarrier, planner_net, read_board_carriers
 
 
 def _iu_to_um(iu):
@@ -36,6 +53,68 @@ def _field_text(footprint, name, default=""):
     if footprint.HasField(name):
         return footprint.GetFieldText(name)
     return default
+
+
+#: The hidden property interposer-pnr ``export`` writes on every carrier
+#: footprint it draws, sheet or draft. On a sheet board the reference is the
+#: sheet's ``J<n>``, so the io_pad id rides here.
+IO_PAD_ID = "IO_PAD_ID"
+
+
+def io_pad_carriers(footprints):
+    """Every IO_CLASS footprint, in order, BOM-excluded ones included.
+
+    The io_pads.json sidecar emits this set, as gds_to_kicad's reader does;
+    write_chiplet emits only the carriers on the BOM but takes their ids
+    from this set, so the two files refuse the same boards.
+    """
+    return [fp for fp in footprints if _field_text(fp, "IO_CLASS")]
+
+
+def board_carrier(fp):
+    """A carrier footprint as interposer-pnr's shared reader takes it."""
+    return BoardCarrier(fp.GetReference(), _field_text(fp, IO_PAD_ID),
+                        str(fp.GetFPID().GetLibNickname()),
+                        bool(fp.GetPath().AsString()))
+
+
+def carrier_identities(carriers, report):
+    """Each carrier's io_pad id and net as the draft writes them, in order.
+
+    The id and the names the nets go back by are interposer-pnr's rules
+    (vendor/round_trip_names.py: read_board_carriers, planner_net), from
+    ``report`` (draft_net_names.read_export_report's, or None): ids follow
+    the footprints, not their references, so two carriers sharing a
+    reference keep their own. All pads must carry the same net (empty
+    counts); a footprint without pads has no net. Raises, before either
+    writer opens its output, CarrierIdError for a carrier id, ValueError for
+    a carrier net either writer would refuse, and BoardReportError when the
+    report is missing or does not describe the board.
+    """
+    carriers = list(carriers)
+    ids, names = read_board_carriers([board_carrier(fp) for fp in carriers], report)
+    named = []
+    for fp, ident in zip(carriers, ids):
+        ref = fp.GetReference()
+        label = ref if ref == ident else "%s (io_pad %s)" % (ref, ident)
+        nets = {pad.GetNetname() for pad in fp.Pads()}
+        if len(nets) > 1:
+            raise ValueError(
+                "carrier %s: its pads carry different nets (%s); a carrier's pads carry one net"
+                % (label, ", ".join(repr(net) for net in sorted(nets))))
+        net = next(iter(nets), "")
+        if names is not None:
+            # By the reference the designer finds in KiCad, and the io_pad id
+            # where it differs: two carriers can share a reference.
+            net = planner_net(label, net, names)
+        named.append((ident, net))
+    return named
+
+
+def preflight_carriers(board, report):
+    """Refuse a board whose carriers both writers would refuse, by id or by
+    net (see carrier_identities), before any output exists."""
+    carrier_identities(io_pad_carriers(board.Footprints()), report)
 
 
 def _lookup_property(board, name):
@@ -140,23 +219,25 @@ def _lookup_text_var(board, name):
     return ""
 
 
-def write_io_pads_json(board, output_path):
+def write_io_pads_json(board, output_path, export_report=None):
     """Extract IO_CLASS footprints from `board` into an io_pads.json sidecar.
 
     Output matches gds_to_kicad/io_pads/kicad_pcb_to_iopads.py: positions in
     micrometers with Y negated (KiCad Y-down -> GDS Y-up), consumed by
     hyp_to_gds.py --io-pads to render the TopMetal2 pad geometry and inject
     the pads under the interposer component (so the GDS bbox includes them).
+    Each entry's ``ref`` is the io_pad id (carrier_identities), not necessarily the
+    footprint reference, and its ``net`` as carrier_identities names it from
+    ``export_report``.
 
     Returns the number of io_pads written (0 -> nothing written, no file).
     """
     import json
 
     pads_out = []
-    for fp in list(board.Footprints()):
+    carriers = io_pad_carriers(board.Footprints())
+    for fp, (ident, net_name) in zip(carriers, carrier_identities(carriers, export_report)):
         io_class = _field_text(fp, "IO_CLASS")
-        if not io_class:
-            continue
         size_str = _field_text(fp, "IO_PAD_SIZE_UM")
         size_x_um = 0.0
         size_y_um = 0.0
@@ -172,14 +253,13 @@ def write_io_pads_json(board, output_path):
         if (size_x_um <= 0.0 or size_y_um <= 0.0) and pads_list:
             size_x_um = _iu_to_um(pads_list[0].GetSizeX())
             size_y_um = _iu_to_um(pads_list[0].GetSizeY())
-        net_name = pads_list[0].GetNetname() if pads_list else ""
         pos = fp.GetPosition()
         try:
             layer_name = board.GetLayerName(fp.GetLayer())
         except Exception:
             layer_name = "F.Cu"
         pads_out.append({
-            "ref": fp.GetReference(),
+            "ref": ident,
             "io_class": io_class,
             "x_um": _iu_to_um(pos.x),
             "y_um": -_iu_to_um(pos.y),
@@ -195,20 +275,7 @@ def write_io_pads_json(board, output_path):
     return len(pads_out)
 
 
-CMIM_MODEL = "cap_cmim"
 CMIM_SIDECAR_VERSION = 2
-
-
-def is_cmim(footprint):
-    """True when `footprint` is an interposer-integrated MIM capacitor.
-
-    Both spellings occur: the KiCad footprint library writes `Model`, the
-    schematic symbol carries `Sim.Name`, and a footprint that came through
-    "Update PCB from Schematic" has both.
-    """
-    model = (_field_text(footprint, "Model") or
-             _field_text(footprint, "Sim.Name")).strip()
-    return model == CMIM_MODEL
 
 
 def parse_length_um(text):
@@ -410,7 +477,7 @@ def write_nofill_regions_json(board, output_path):
             shape = item.GetShape()
         except Exception:
             continue
-        if shape == pcbnew.SHAPE_T_POLYGON:
+        if shape == pcbnew.SHAPE_T_POLY:
             _emit(role, _iter_polyset_rings_um(item.GetPolyShape()))
         elif shape == pcbnew.SHAPE_T_RECT:
             a, b = item.GetStart(), item.GetEnd()
@@ -445,8 +512,10 @@ def write_nofill_regions_json(board, output_path):
 def write_die_pin_lists(board, out_dir):
     """Extract die footprint pads into per-die pin_list JSON sidecars.
 
-    A die footprint carries a GDS_FILE field; its pads ARE the chiplet's
-    bump locations. Output matches the gds_to_kicad pin_list schema
+    A marked footprint's electrical pads are carrier landings, not die metal.
+    Validate their attachment record and preserve the original die dimensions.
+    Unmarked historical footprints retain the legacy pad-derived semantics.
+    Output matches the gds_to_kicad pin_list schema
     (footprint-local coordinates in DBU = nm, Y negated for GDS Y-up),
     consumed downstream by the Cu-pillar generator (bump_mirror) to place
     DRC-validated pillars under each flip-chip die.
@@ -454,12 +523,26 @@ def write_die_pin_lists(board, out_dir):
     Returns a dict {device_ref: json_path}. Empty if no die footprints.
     """
     import json
+    if "." in __package__:
+        from ..pad_domains import footprint_pin_list
+    else:
+        from pad_domains import footprint_pin_list
 
     result = {}
     for fp in list(board.Footprints()):
         if not _field_text(fp, "GDS_FILE"):
             continue
         ref = fp.GetReference()
+        domain_pins = footprint_pin_list(fp, pcbnew)
+        if domain_pins is not None:
+            path = os.path.join(out_dir, "%s_pins.json" % ref)
+            with open(path, "w") as f:
+                json.dump(domain_pins, f, indent=2)
+            result[ref] = path
+            continue
+        print("Legacy die pad extraction for %s: no carrier-domain qualification; "
+              "regenerate the board for domain-aware export." % ref,
+              file=sys.stderr)
         pins = []
         fp_pos = fp.GetPosition()
         for idx, pad in enumerate(list(fp.Pads())):
@@ -659,12 +742,48 @@ def write_die_thicknesses(board, mapping):
     return changed
 
 
-def write_chiplet(board, output_path):
+def write_die_outline_layers(board, mapping):
+    """Persist per-die outline layers to footprint DIE_OUTLINE_LAYER fields.
+
+    `mapping` is {ref: "L/D" text}. Only the dies sized from their GDS
+    (die_role OUTLINE_DIE) are written: a marked die keeps its archived
+    PinList size and never gets the field, and a footprint the .chiplet does
+    not export as a die is left alone. An empty text is skipped, never
+    written, since a die without the field refuses the export. The text is
+    written as given (stripped); the export preflight is what validates it.
+    The field is kept hidden on F.Fab at small size (_style_managed_field).
+    Returns the refs that were modified; the caller owns saving the board.
+    """
+    changed = []
+    for fp in list(board.Footprints()):
+        ref = fp.GetReference()
+        if ref not in mapping:
+            continue
+        new = (mapping[ref] or "").strip()
+        if not new or die_role(fp, pcbnew) != OUTLINE_DIE:
+            continue
+        text_changed = _field_text(fp, DIE_OUTLINE_LAYER_FIELD) != new
+        if text_changed:
+            fp.SetField(DIE_OUTLINE_LAYER_FIELD, new)
+        field = _get_field(fp, DIE_OUTLINE_LAYER_FIELD)
+        restyled = _style_managed_field(field) if field is not None else False
+        if text_changed or restyled:
+            changed.append(ref)
+    return changed
+
+
+def write_chiplet(board, output_path, interconnect_manifest=None, export_report=None):
     """Write `board` to `output_path` as an intermediate .chiplet file.
 
     Args:
         board:        pcbnew.BOARD instance.
         output_path:  Filesystem path for the YAML output.
+        interconnect_manifest: Optional authoritative manifest snapshot from
+            the export preflight.  ``None`` preserves the standalone writer's
+            historical discovery behavior.
+        export_report: The export report's net names
+            (draft_net_names.read_export_report), or None; see
+            carrier_identities.
 
     Returns:
         True on success.
@@ -673,6 +792,10 @@ def write_chiplet(board, output_path):
         OSError if the output path is not writable.
     """
     # --- Data gathering ---
+    if "." in __package__:
+        from ..pad_domains import archived_die_dimensions
+    else:
+        from pad_domains import archived_die_dimensions
 
     interposer_lyp = _lookup_property(board, "INTERPOSER_LYP")
     interposer_tech_id = "intm4tm2"
@@ -698,7 +821,8 @@ def write_chiplet(board, output_path):
     # gate never degrades.
     validate_adapter_id(interconnect_adapter,
                         "INTERCONNECT_ADAPTER text variable")
-    validate_interconnect_ids(adapter=interconnect_adapter)
+    validate_interconnect_ids(
+        adapter=interconnect_adapter, manifest=interconnect_manifest)
 
     # Interposer adapter, emitted in the interposer: block further down. Read
     # and validated HERE, during data gathering, and not at the emit site: the
@@ -712,15 +836,22 @@ def write_chiplet(board, output_path):
     validate_adapter_id(interposer_adapter, "INTERPOSER_ADAPTER text variable")
 
     component_techs = {}
+    # Which die last named each technology id, for the two-sheets warning.
+    tech_named_by = {}
+    component_dimensions = {}
     components = []
     io_pads = []
 
-    for footprint in list(board.Footprints()):
-        if footprint.GetAttributes() & pcbnew.FP_EXCLUDE_FROM_BOM:
+    footprints = list(board.Footprints())
+    for footprint in footprints:
+        # The same classification the export preflight runs (die_role), so
+        # the two agree on which footprints are dies.
+        role = die_role(footprint, pcbnew)
+        if role == NOT_EMITTED:
             continue
 
-        io_class = _field_text(footprint, "IO_CLASS")
-        if io_class:
+        if role == IO_PAD:
+            io_class = _field_text(footprint, "IO_CLASS")
             # The reader only accepts these classes (IOPad.cpp
             # string_to_io_class throws otherwise) and the finalizer does not
             # normalize them on the no-sidecar path, so a typo would ship a
@@ -735,7 +866,7 @@ def write_chiplet(board, output_path):
             io_pads.append(footprint)
             continue
 
-        if is_cmim(footprint):
+        if role == CMIM:
             # An interposer-integrated MIM capacitor is not a die: its geometry
             # is drawn into the interposer GDS from the IntM4TM2 PCell
             # (write_cmim_devices_json -> hyp_to_gds --cmim-devices), so it has
@@ -754,21 +885,43 @@ def write_chiplet(board, output_path):
             )
 
         if lyp_file:
-            tech_id = os.path.splitext(os.path.basename(lyp_file))[0]
-            tech_id = tech_id.replace(" ", "_").replace(".", "_")
-            # A die LYP whose basename collides with the interposer's hardcoded
+            tech_id = technology_id(lyp_file)
+            # A die LYP whose id collides with the interposer's hardcoded
             # technology id ('intm4tm2') but points at a different file would
             # silently clobber the interposer entry. Disambiguate the die with
             # its reference so the interposer keeps its own layer_properties.
-            # (Two dies that share a basename keep dedup'ing to one entry.)
             if (tech_id == interposer_tech_id
                     and interposer_tech_id in tech_map
                     and tech_map[interposer_tech_id] != lyp_file):
                 tech_id = tech_id + "_" + footprint.GetReference()
+            # Two dies that share an id share one entry. When their sheets are
+            # different files, the last one wins for both, as in the C++
+            # exporter; say so rather than merge them silently.
+            if tech_id in tech_named_by and tech_map[tech_id] != lyp_file:
+                sys.stderr.write(
+                    "Warning: footprints %s and %s name technology '%s' with "
+                    "two different layer sheets (%s, %s); the .chiplet keeps "
+                    "%s for both.\n"
+                    % (tech_named_by[tech_id], footprint.GetReference(),
+                       tech_id, tech_map[tech_id], lyp_file, lyp_file))
             tech_map[tech_id] = lyp_file
+            tech_named_by[tech_id] = footprint.GetReference()
             component_techs[id(footprint)] = tech_id
 
+        # Marked footprints carry their actual die boundary in the immutable
+        # source PinList. Validate it before opening the output, and never let
+        # editable courtyard/text geometry redefine that physical die.
+        dimensions = archived_die_dimensions(footprint)
+        if dimensions is not None:
+            component_dimensions[id(footprint)] = dimensions
         components.append(footprint)
+
+    # Before opening the output, so a refused carrier leaves no file behind.
+    # Over the sidecar's carrier set, not only the emitted io_pads.
+    carriers = io_pad_carriers(footprints)
+    # Keyed on the wrappers in `footprints`, which io_pads holds too: rebuild
+    # neither list from fresh board lookups, or id() stops matching.
+    named_by_fp = dict(zip(map(id, carriers), carrier_identities(carriers, export_report)))
 
     # --- YAML emission ---
 
@@ -827,7 +980,7 @@ def write_chiplet(board, output_path):
         # interconnect PDK manifest (single source of truth); byte-identical to
         # the prior hardcoded literal so the C++ byte-exact parity gate (47.7b)
         # stays green. export_chiplet.cpp still emits the same literal.
-        f.write(emit_connection_stacks_block())
+        f.write(emit_connection_stacks_block(interconnect_manifest))
         f.write("\n")
 
         # Components
@@ -866,7 +1019,7 @@ def write_chiplet(board, output_path):
         f.write("      thickness: %.6f\n" % thickness_um)
         # Position placeholder; hyp_to_gds.py --update-chiplet-file fills
         # the canonical GDS-bbox-corner value. See coord_frame_contract.md
-        # section 4.1.
+        # section 4, item 1.
         f.write("    position:\n")
         f.write("      x: 0.0\n")
         f.write("      y: 0.0\n")
@@ -876,7 +1029,7 @@ def write_chiplet(board, output_path):
         if io_pads:
             f.write("    io_pads:\n")
             for fp in io_pads:
-                ref = fp.GetReference()
+                ident, net_name = named_by_fp[id(fp)]
                 io_class = _field_text(fp, "IO_CLASS")
                 size_str = _field_text(fp, "IO_PAD_SIZE_UM")
 
@@ -897,15 +1050,12 @@ def write_chiplet(board, output_path):
                     size_x_um = _iu_to_um(pad.GetSizeX())
                     size_y_um = _iu_to_um(pad.GetSizeY())
 
-                net_name = ""
-                if pads_list:
-                    net_name = pads_list[0].GetNetname()
 
                 pos = fp.GetPosition()
                 x_um = _iu_to_um(pos.x - interposer_x_min)
                 y_um = _iu_to_um(interposer_y_max - pos.y)
 
-                f.write("      - id: %s\n" % yaml_scalar(ref))
+                f.write("      - id: %s\n" % yaml_scalar(ident))
                 f.write("        io_class: %s\n" % yaml_scalar(io_class))
                 f.write('        net: "%s"\n' % escape_yaml_dq(net_name))
                 f.write(
@@ -940,7 +1090,7 @@ def write_chiplet(board, output_path):
 
             f.write("  - id: %s\n" % yaml_scalar(ref))
             f.write("    type: die\n")
-            # See coord_frame_contract.md sections 2 and 4.4: dies use
+            # See coord_frame_contract.md section 2: dies use
             # gds_origin as the mesh anchor.
             f.write("    anchor: gds_origin\n")
 
@@ -956,33 +1106,28 @@ def write_chiplet(board, output_path):
             if is_flip_chip:
                 f.write("    orientation: flip_chip\n")
 
-            fp_bbox = footprint.GetBoundingBox()
-            courtyard_layer = (
-                pcbnew.B_CrtYd if footprint.GetLayer() == pcbnew.B_Cu
-                else pcbnew.F_CrtYd
-            )
-            # Courtyard caches are built lazily: a headless pcbnew.LoadBoard()
-            # leaves them empty while the live GUI editor keeps them warm, so die
-            # width/height silently depended on GUI-vs-headless run context
-            # (GetBoundingBox fallback vs courtyard.BBox()). Force the build so
-            # both paths deterministically take the courtyard branch.
-            try:
-                footprint.BuildCourtyardCaches()
-            except Exception as exc:
-                # Do not swallow silently: the headless CLI relies solely on
-                # this call for deterministic die geometry, so a failure (e.g. a
-                # KiCad-fork rebase that shifts the binding) would silently
-                # revert width/height to the text-inflated GetBoundingBox
-                # fallback and reintroduce the GUI-vs-headless divergence.
-                print("WARNING: %s: BuildCourtyardCaches failed (%s); die "
-                      "width/height fall back to the footprint bounding box"
-                      % (ref, exc), file=sys.stderr)
-            courtyard = footprint.GetCourtyard(courtyard_layer)
-            if not courtyard.IsEmpty():
-                fp_bbox = courtyard.BBox()
+            if id(footprint) in component_dimensions:
+                comp_width, comp_height = component_dimensions[id(footprint)]
+            else:
+                fp_bbox = footprint.GetBoundingBox()
+                courtyard_layer = (
+                    pcbnew.B_CrtYd if footprint.GetLayer() == pcbnew.B_Cu
+                    else pcbnew.F_CrtYd
+                )
+                # Preserve the historical path for unmarked footprints. Build
+                # the lazy cache so GUI/headless legacy exports agree.
+                try:
+                    footprint.BuildCourtyardCaches()
+                except Exception as exc:
+                    print("WARNING: %s: BuildCourtyardCaches failed (%s); die "
+                          "width/height fall back to the footprint bounding box"
+                          % (ref, exc), file=sys.stderr)
+                courtyard = footprint.GetCourtyard(courtyard_layer)
+                if not courtyard.IsEmpty():
+                    fp_bbox = courtyard.BBox()
 
-            comp_width = _iu_to_um(fp_bbox.GetWidth())
-            comp_height = _iu_to_um(fp_bbox.GetHeight())
+                comp_width = _iu_to_um(fp_bbox.GetWidth())
+                comp_height = _iu_to_um(fp_bbox.GetHeight())
 
             f.write("    dimensions:\n")
             f.write("      width: %.6f\n" % comp_width)
