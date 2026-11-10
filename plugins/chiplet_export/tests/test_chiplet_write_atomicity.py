@@ -69,13 +69,13 @@ def test_the_temp_file_is_a_sibling_so_replace_stays_atomic(tmp_path, monkeypatc
     target.write_text(ORIGINAL)
 
     seen = {}
-    real_mkstemp = h.tempfile.mkstemp
+    real_replace = h.os.replace
 
-    def spy(*args, **kwargs):
-        seen["dir"] = kwargs.get("dir")
-        return real_mkstemp(*args, **kwargs)
+    def spy(source, destination):
+        seen["dir"] = Path(source).parent
+        return real_replace(source, destination)
 
-    monkeypatch.setattr(h.tempfile, "mkstemp", spy)
+    monkeypatch.setattr(h.os, "replace", spy)
     h._atomic_write_text(str(target), "x\n")
     assert Path(seen["dir"]).resolve() == target.parent.resolve()
 

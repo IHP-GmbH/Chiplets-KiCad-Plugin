@@ -14,9 +14,12 @@ Three verdicts, and they are independent (the fixture's own words):
 * ``splits``          -- the split is the exact expected slice per key.
 * ``refuse``          -- the SPLITTER refuses. A document here may still LOAD
                          (``loads``); refusal is about splitting, not reading.
-* ``not_delimitable`` -- the splitter SUCCEEDS and simply produces no ``flow``
-                         key. These documents are valid and loadable; the
-                         grammar just never captured that node's bytes.
+* ``not_delimitable`` -- the flow node has no source slice: these documents are
+                         valid and LOAD, the grammar just never captured that
+                         node's bytes. Whether the splitter also refuses them is
+                         a SEPARATE verdict carried per row in ``refused_by``,
+                         and since version 5 both rows say it does. The group
+                         name is not the verdict; the field is.
 
 The pipeline's own, stricter verdict (``split_for_rewrite``, which also refuses
 the not-delimitable documents because THIS caller is about to overwrite the
@@ -39,13 +42,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 from chiplet_export.pipeline import chiplet_merge  # noqa: E402
 
-#: Vendored byte-for-byte from chiplet-spec cdfa737
-#: ``conformance/fixtures/top_level_blocks_cases.json``. Re-vendor with a plain
-#: copy; never edit it here (add a case upstream, in the fixture). Provenance
-#: is also declared in ``VENDORED.md`` and gated by ``test_vendored_copies.py``.
+from .conftest import chiplet_spec_pin, spec_blob_at_pin, spec_root  # noqa: E402
+
+#: Vendored byte-for-byte from chiplet-spec's
+#: ``conformance/fixtures/top_level_blocks_cases.json`` at ``ORACLE_COMMIT``.
+#: Re-vendor with a plain copy; never edit it here (add a case upstream, in the
+#: fixture). Provenance is also declared in ``VENDORED.md``.
+ORACLE_UPSTREAM = "conformance/fixtures/top_level_blocks_cases.json"
 ORACLE_PATH = os.path.join(HERE, "fixtures", "top_level_blocks_cases.json")
-ORACLE_SHA256 = "fa808d59c97c793d33ff3263360ac7adb329b8ea6e9af2c5f761151956b8af7c"
-ORACLE_COMMIT = "cdfa737"
+ORACLE_SHA256 = "45c37f47f142d88c63dfd3056a3dceba07afe6f2035d25243b7f87f2c37bccd0"
+#: The chiplet-spec commit this suite is pinned to: the reader's pin, which
+#: ``vendor/chiplet_format_io.SOURCE`` states. A tiered runner checks out that
+#: one commit, so the oracle can follow no other.
+ORACLE_COMMIT = chiplet_spec_pin()[0]
 
 with open(ORACLE_PATH, "r", encoding="utf-8") as _fh:
     ORACLE = json.load(_fh)
@@ -55,14 +64,17 @@ with open(ORACLE_PATH, "r", encoding="utf-8") as _fh:
 #: the per-case ``refused_by`` list and the U+000D rows; version 3 turned
 #: ``loadable`` into an obligation in both directions; version 4 restates
 #: the repeated-key justification and changed no verdict, so a consumer
-#: pinned at 3 reads the same rows.
-#:
-#: This is asserted rather than tolerated. A consumer that reads ``refused_by``
-#: off a version 1 copy gets ``None`` for every row and silently tests nothing,
-#: which is the exact shape of failure the field was added to prevent: the
-#: verdict inverts underneath and the suite stays green. Failing on the version
-#: makes a stale re-vendor loud.
-ORACLE_VERSION = 4
+#: pinned at 3 reads the same rows; version 5 generalises the quoted-key
+#: refusal into ``unattributable_line_at_column_zero`` and DOES move verdicts:
+#: the two ``not_delimitable`` documents are refused by a splitter now, so a
+#: consumer pinned at 4 that splits them disagrees with the fixture. That is
+#: why this constant is asserted and not tolerated -- the inversion is silent
+#: otherwise, and it was: the harness scored those two rows 2/2 against version
+#: 5 by agreeing with the rule version 4 had. A consumer that reads
+#: ``refused_by`` off a version 1 copy gets ``None`` for every row and silently
+#: tests nothing, which is the same shape one field along. Failing on the
+#: version number is what makes a stale re-vendor loud instead of green.
+ORACLE_VERSION = 5
 assert ORACLE.get("version") == ORACLE_VERSION, (
     "the vendored oracle is version %r, this consumer reads version %d. A copy "
     "without 'refused_by' would make every refusal test below vacuous."
@@ -87,7 +99,19 @@ def _refused_by(who, rows=None):
             if who in row["refused_by"]]
 
 
-SPLITTER_REFUSES = _refused_by("splitter")
+#: Every row that names the splitter, in WHATEVER group it lives. Version 5
+#: added two rows to this set without moving them between groups: a flow-style
+#: document and ``flow :`` stayed in ``not_delimitable`` and grew
+#: ``refused_by: ["splitter"]``, because both are lines at column zero that no
+#: top-level key owns. Built from the group list rather than from ``refuse``
+#: alone for exactly the reason ``_refused_by`` exists: the group a row sits in
+#: is not its verdict.
+_GROUPS_CARRYING_A_SPLITTER_VERDICT = ("refuse", "not_delimitable")
+SPLITTER_REFUSES = [row
+                    for group in _GROUPS_CARRYING_A_SPLITTER_VERDICT
+                    for row in _refused_by("splitter", ORACLE[group])]
+#: Only the refuse group: every ``not_delimitable`` document LOADS by
+#: construction, which is what makes it undelimitable rather than ill-formed.
 READER_REFUSES = _refused_by("reader")
 
 
@@ -102,17 +126,19 @@ def test_oracle_copy_is_unmodified():
     assert got == ORACLE_SHA256, (
         "tests/fixtures/top_level_blocks_cases.json was edited in place. It is "
         "a copy of chiplet-spec %s; change the fixture upstream and re-vendor, "
-        "updating ORACLE_SHA256/ORACLE_COMMIT in the same commit." % ORACLE_COMMIT)
+        "updating ORACLE_SHA256 and VENDORED.md in the same commit." % ORACLE_COMMIT)
 
 
-def _spec_root():
-    env = os.environ.get("CHIPLET_SPEC_ROOT")
-    if env and os.path.isdir(env):
-        return env
-    sibling = os.path.abspath(os.path.join(HERE, "..", "..", "..", "..", "chiplet-spec"))
-    return sibling if os.path.isdir(os.path.join(sibling, ".git")) else None
+def test_vendored_md_states_the_oracle_pin():
+    """VENDORED.md's oracle entry names the pin and these bytes."""
+    from .test_vendored_copies import vendored_md_entry
+    commit, sha256 = vendored_md_entry("tests/fixtures/top_level_blocks_cases.json",
+                                       ORACLE_UPSTREAM)
+    assert ORACLE_COMMIT.startswith(commit) and len(commit) >= 7, (commit, ORACLE_COMMIT)
+    assert sha256 == ORACLE_SHA256
 
 
+@pytest.mark.needs_sibling_sources
 def test_oracle_copy_matches_the_spec_checkout_when_present():
     """When chiplet-spec is checked out next door, the copy must equal it.
 
@@ -120,11 +146,10 @@ def test_oracle_copy_matches_the_spec_checkout_when_present():
     suite still runs standalone; where it IS present, a fixture that moved
     upstream fails HERE rather than silently keeping the old semantics.
     """
-    root = _spec_root()
+    root = spec_root()
     if root is None:
         pytest.skip("chiplet-spec checkout not found (set CHIPLET_SPEC_ROOT)")
-    upstream = os.path.join(root, "conformance", "fixtures",
-                            "top_level_blocks_cases.json")
+    upstream = os.path.join(root, *ORACLE_UPSTREAM.split("/"))
     if not os.path.exists(upstream):
         pytest.skip("chiplet-spec checkout has no top_level_blocks_cases.json")
     with open(upstream, "rb") as fh:
@@ -138,6 +163,25 @@ def test_oracle_copy_matches_the_spec_checkout_when_present():
         "vendors %s. Re-vendor the fixture and re-run; if a verdict changed, "
         "the grammar changes with it.\n  vendored: %s\n  upstream: %s"
         % (head or "?", ORACLE_COMMIT, ORACLE_SHA256, upstream_sha))
+
+
+@pytest.mark.needs_sibling_sources
+def test_the_oracle_pin_carries_those_bytes():
+    """ORACLE_COMMIT names a commit whose fixture IS this copy.
+
+    The check above follows the checkout's working tree, so the oracle moving
+    upstream is loud. This one binds the constant: under a tiered runner it
+    must be the pinned chiplet-spec, and on a host its blob is read from
+    history (``spec_blob_at_pin``).
+    """
+    root = spec_root()
+    if root is None:
+        pytest.skip("chiplet-spec checkout not found (set CHIPLET_SPEC_ROOT)")
+    blob = spec_blob_at_pin(root, ORACLE_COMMIT, ORACLE_UPSTREAM)
+    assert hashlib.sha256(blob).hexdigest() == ORACLE_SHA256, (
+        "chiplet-spec %s:%s does not hash to the pinned sha256. The pin names "
+        "the wrong commit, or the copy came from somewhere else."
+        % (ORACLE_COMMIT, ORACLE_UPSTREAM))
 
 
 # --------------------------------------------------------------------------
@@ -222,19 +266,136 @@ def test_a_reader_only_refusal_is_not_the_splitters_job(case):
 @pytest.mark.parametrize("case", ORACLE["not_delimitable"],
                          ids=_ids(ORACLE["not_delimitable"]))
 def test_splitter_does_not_refuse_a_merely_undelimitable_document(case):
-    """These LOAD and SPLIT; they just yield no slice for the flow node.
+    """Undelimitable is not the same verdict as unsplittable; read the row.
 
-    Refusing them in the grammar would break flow rule 1. Refusing them in the
-    EXPORTER is a different decision, made one layer up; see below.
+    A document whose flow node has no source slice still LOADS, and refusing it
+    in the grammar for that reason alone would break flow rule 1. But "has no
+    slice" and "can be split" are separate questions, and version 5 separated
+    them on these two rows: a flow-style document and ``flow :`` are lines at
+    column zero that no top-level key owns, so they are unsplittable too, and
+    both rows now say ``refused_by: ["splitter"]``.
+
+    This test asserted the SUCCESS half over the whole group, which was the
+    group's verdict when it was written and is no longer every row's. The check
+    that matters is the same one everywhere else in this file: read the field.
+    The refusing rows are covered by ``test_splitter_refuses``, which also
+    checks the message names the offending line.
+
+    Not covered by this test today, by construction: with version 5 every row
+    in the group names the splitter, so every row skips and the success half
+    below runs against nothing. It is kept rather than deleted because it is
+    the group's defining property and the next row added may well carry it.
     """
+    if "splitter" in case["refused_by"]:
+        pytest.skip("also a splitter refusal; covered by test_splitter_refuses")
     blocks = chiplet_merge.split_top_level_blocks(case["doc"])
     assert "flow" not in blocks
     assert "".join(blocks.values()) == case["doc"]
 
 
 # --------------------------------------------------------------------------
-# The other half of the oracle: what a READER owes.
+# Agreement with the reference splitter, on documents the oracle has no row
+# for. The oracle is the contract; this is the part of the contract nobody
+# wrote a row for yet, and it is where the last regression actually lived.
 # --------------------------------------------------------------------------
+
+#: Documents where the two splitters must agree, each named by the property it
+#: is a witness for. The first three were found by probing the reference, not
+#: by reading the fixture, and all three were REFUSED here while the reference
+#: attributed them: the splitter had begun consulting the rewrite policy, which
+#: is stricter on purpose, so restrictions belonging to a caller about to
+#: overwrite a file leaked into the grammar.
+#:
+#: The fourth is the negative control, and it has to be a TAB-led CONTENT line.
+#: A standalone TAB blank OUTSIDE a scalar is not the witness: PyYAML does not
+#: read that document at all, so it cannot separate "the grammar refuses" from
+#: "nothing reads this anyway".
+#: The first four texts are the review's own probe cases, kept byte for byte so
+#: this test and the recorded evidence are about the same documents. That probe
+#: PRINTED the difference and exited 0, which is an observation and not a gate;
+#: turning each row into an assertion is the whole point of this test existing.
+_BASE = 'format_version: "1.0"\nassembly:\n  name: demo\n'
+REFERENCE_AGREEMENT = [
+    ("tab_only_blank_line", _BASE + "\t\n"),
+    ("tab_and_space_blank_inside_a_quoted_scalar",
+     _BASE + 'flow:\n  description: "first\n\t \n    last"\n'),
+    ("yaml_directive_before_the_document_marker", "%YAML 1.1\n---\n" + _BASE),
+    ("terminal_document_end_marker", _BASE + "...\n"),
+    ("tab_led_content_line_is_still_refused",
+     'format_version: "1.0"\nassembly:\n  name: "demo\n\tcontinued"\n'),
+]
+
+
+def _reference_splits(reader, doc):
+    """(accepted, blocks-or-None) from the vendored reference splitter.
+
+    ``ChipletFormatError`` and nothing wider. This caught bare ``Exception``,
+    which is the same defect this suite's harness had: any crash on the way to
+    an answer scored as the refusal the row expected, so a reference that fell
+    over read as a reference that disagreed. ``top_level_blocks`` documents
+    ``ChipletFormatError`` as its refusal, and a TypeError out of the vendored
+    copy is news, not a verdict -- it must reach the failure report as itself.
+    """
+    try:
+        return True, reader.top_level_blocks(doc)
+    except reader.ChipletFormatError:
+        return False, None
+
+
+@pytest.mark.parametrize("name,doc", REFERENCE_AGREEMENT,
+                         ids=[row[0] for row in REFERENCE_AGREEMENT])
+def test_the_splitter_agrees_with_the_reference(name, doc):
+    """Same verdict as the vendored reference, and the same slices when it splits.
+
+    Not "our splitter accepts these": that would freeze today's answer and go
+    stale the moment the reference moves. The proposition is AGREEMENT, and the
+    reference is a pinned, gated copy, so when it changes its mind this fails
+    and somebody decides, which is the whole reason the copy is vendored.
+
+    Note what is deliberately NOT asserted: that PyYAML loads any of them. Two
+    of the four are documents PyYAML refuses outright, and the reference
+    attributes them anyway. Splitting is not reading; a document nobody will
+    load still has an answer to "which top-level key owns this line", and the
+    grammar owes that answer.
+    """
+    reader = _vendored_reader()
+    accepted, reference_blocks = _reference_splits(reader, doc)
+    try:
+        ours = chiplet_merge.split_top_level_blocks(doc)
+    except chiplet_merge.TopLevelGrammarRefusal as exc:
+        assert not accepted, (
+            "the reference splitter attributes every line of %s and this one "
+            "refuses it: %s. A refusal the reference does not share is this "
+            "grammar applying a restriction that belongs somewhere else."
+            % (name, exc))
+        return
+    assert accepted, (
+        "this splitter attributed %s and the reference refuses it" % name)
+    assert list(ours.items()) == list(reference_blocks.items()), (
+        "both accept %s and they cut it differently" % name)
+    assert "".join(ours.values()) == doc, "the split of %s is lossy" % name
+
+
+def test_the_rewrite_policy_stays_stricter_than_the_grammar():
+    """The separation is the point, so it is asserted rather than assumed.
+
+    Two of the witnesses above are documents the GRAMMAR must attribute and the
+    REWRITE policy must still refuse: rewriting a file around a second document
+    or a directive hands back something no reader of the whole stream saw. If a
+    later edit collapses the two functions again the suite has to notice, and
+    the only way it notices is by checking that they still disagree.
+    """
+    # By NAME and not by index. Selecting these two positionally broke the
+    # moment a case was inserted above them, and it broke silently in the sense
+    # that matters: the test still ran, against two documents nobody chose.
+    witnesses = dict(REFERENCE_AGREEMENT)
+    for name in ("yaml_directive_before_the_document_marker",
+                 "terminal_document_end_marker"):
+        doc = witnesses[name]
+        chiplet_merge.split_top_level_blocks(doc)          # grammar: fine
+        assert chiplet_merge.unmodelled_top_level_line(doc) is not None, (
+            "the rewrite policy stopped refusing a document it used to refuse; "
+            "the grammar was meant to get more permissive, not this")
 
 def _vendored_reader():
     """The vendored reference reader, worker tier only (it needs PyYAML)."""

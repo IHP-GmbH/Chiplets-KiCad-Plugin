@@ -2,8 +2,8 @@
 """Score ``chiplet_merge.split_top_level_blocks`` against the chiplet-spec oracle.
 
 Read-only conformance harness for the TOP-LEVEL BLOCK GRAMMAR fixture
-``conformance/fixtures/top_level_blocks_cases.json`` (chiplet-spec cdfa737,
-oracle version 4).
+``conformance/fixtures/top_level_blocks_cases.json`` (oracle version 5; the
+vendored copy and its commit are in ``plugins/chiplet_export/VENDORED.md``).
 It never edits the plugin; it only reports which oracle rows the current
 splitter agrees with.
 
@@ -26,9 +26,10 @@ Exit code 0 when every row agrees, 1 otherwise. Groups scored:
                            grammar has an answer for a forbidden line break (no
                            key line starts there), so refusing would be wrong;
                            scored as "split, and still lossless".
-* ``not_delimitable``   -- the splitter must succeed and produce NO ``flow`` key
-                           (the flow node exists to a YAML reader but the grammar
-                           cannot delimit its bytes).
+* ``not_delimitable``   -- the flow node exists to a YAML reader but the grammar
+                           cannot delimit its bytes. Whether the splitter must
+                           also REFUSE is a separate verdict, read per row from
+                           ``refused_by`` like every other group here.
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ DEFAULT_ORACLE = os.path.join(
 #: Oracle version this harness understands; see the note in
 #: ``test_top_level_block_grammar.py``. Reading ``refused_by`` off an older copy
 #: yields ``None`` for every row and scores a vacuous 100%.
-ORACLE_VERSION = 4
+ORACLE_VERSION = 5
 
 
 def _q(text: str) -> str:
@@ -146,6 +147,16 @@ def score_refuse(oracle, rep):
         try:
             got = list(chiplet_merge.split_top_level_blocks(case["doc"]).items())
         except Exception as exc:                      # noqa: BLE001
+            if not isinstance(exc, chiplet_merge.TopLevelGrammarRefusal):
+                # A CRASH is not a refusal. Scoring any exception as one made
+                # this group pass for a TypeError as readily as for a verdict,
+                # which is the difference between "the splitter says no" and
+                # "the splitter fell over on its way to an answer".
+                rep.add(group, name, False,
+                        "raised %s, which is not a refusal: a refusal is "
+                        "TopLevelGrammarRefusal and carries the line and the "
+                        "kind. %s" % (type(exc).__name__, exc))
+                continue
             rep.add(group, name, must_refuse,
                     "refused with %s: %s" % (type(exc).__name__, exc)
                     if must_refuse else
@@ -172,13 +183,55 @@ def score_refuse(oracle, rep):
 
 
 def score_not_delimitable(oracle, rep):
+    """Score by each row's ``refused_by``, never by the name of the group.
+
+    This scored "the splitter must SUCCEED and produce no ``flow`` key" for the
+    whole group, which was the verdict every row in it carried when the group
+    was written. Version 5 moved both rows: a flow-style document and ``flow :``
+    are lines at column zero that no top-level key owns, so they are refused by
+    a splitter now, and both rows say so in ``refused_by``. A rule keyed on the
+    group name cannot see that, and it does not go red when it happens -- it
+    keeps agreeing with the superseded verdict, which is how this passed 2/2
+    against a fixture that had inverted underneath it.
+
+    It is the same defect ``score_refuse`` was already fixed for, one group
+    along, and the fixture's own comment names it: read that field, do not read
+    the group name.
+
+    ``case["refused_by"]`` and not ``.get``: a copy predating the field must
+    fail loudly here rather than be scored under a default.
+
+    What no current row exercises: with version 5 both rows are splitter-refused,
+    so the "must succeed and produce no ``flow`` key" branch below is not reached
+    by anything in the fixture. It is kept because it is this group's defining
+    property and the next row added may well carry it, but nothing here checks
+    that the branch is right.
+    """
     for case in oracle["not_delimitable"]:
         name = case["name"]
+        must_refuse = "splitter" in case["refused_by"]
         try:
             got = chiplet_merge.split_top_level_blocks(case["doc"])
         except Exception as exc:                      # noqa: BLE001
+            if not isinstance(exc, chiplet_merge.TopLevelGrammarRefusal):
+                rep.add("not_delimitable", name, False,
+                        "raised %s, which is not a refusal: a refusal is "
+                        "TopLevelGrammarRefusal and carries the line and the "
+                        "kind. %s" % (type(exc).__name__, exc))
+                continue
+            rep.add("not_delimitable", name, must_refuse,
+                    "refused with %s: %s" % (type(exc).__name__, exc)
+                    if must_refuse else
+                    "kind=%s: refused with %s, but this row is refused_by=%r, "
+                    "so the splitter is expected to attribute it and merely "
+                    "yield no slice for the flow node.\n      %s: %s"
+                    % (case.get("kind"), case["refused_by"],
+                       type(exc).__name__, exc))
+            continue
+        if must_refuse:
             rep.add("not_delimitable", name, False,
-                    "raised %s: %s" % (type(exc).__name__, exc))
+                    "kind=%s: did NOT refuse; returned keys %r"
+                    % (case.get("kind"), list(got)))
             continue
         ok = "flow" not in got
         rep.add("not_delimitable", name, ok,

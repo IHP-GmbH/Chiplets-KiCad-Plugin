@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""H-A clobber guard for the ``.chiplet`` waist -- pure stdlib, GUI-tier safe.
+"""Clobber guard for the ``.chiplet`` waist -- pure stdlib, GUI-tier safe.
 
-Background (the real mechanism, see CHIPLET_FLOW_ROADMAP.md "Interop hardening"):
+Background:
 ``write_chiplet`` regenerates the ``.chiplet`` from board state only. It never
 emits the human/Studio-authored top-level blocks (``flow:``, ``netlist:``), and
-it cannot recover a hand-edited position. The orchestrator then stages that
-freshly regenerated file over the canonical ``.chiplet`` with a wholesale
-``shutil.copy2`` (orchestrator.py, the ``emit_chiplet`` branch). So a pasted
-``flow:`` block or a hand-edited position is destroyed on every KiCad re-export,
-silently. The finalizer (``hyp_to_gds --update-chiplet-file``) is load-modify-
-dump and round-trips foreign top-level keys, so it is NOT the destroying door;
-the ``copy2`` is.
+it cannot recover a hand-edited position. The orchestrator stages that freshly
+regenerated file next to the canonical ``.chiplet`` and, once the worker has
+finalized it, replaces the canonical file with it wholesale (orchestrator.py,
+the ``emit_chiplet`` branch). So a pasted ``flow:`` block or a hand-edited
+position would be destroyed on every KiCad re-export, silently. The finalizer
+(``hyp_to_gds --update-chiplet-file``) is load-modify-dump and round-trips
+foreign top-level keys, so it is NOT the destroying door; the replace is.
 
 Why this module is stdlib-only (no PyYAML, no ``chiplet_format_io``):
 ``orchestrator.run_export`` -- and therefore this guard -- runs in KiCad's
@@ -24,7 +24,7 @@ at import time. ``chiplet_format_io`` remains the reference parser only where
 parsing actually happens -- the worker interpreter and ``hyp_to_gds.py`` -- both
 of which have PyYAML. The GUI tier parses no YAML at all.
 
-This module guards the ``copy2`` door with two mechanisms, both operating on raw
+This module guards that door with two mechanisms, both operating on raw
 top-level block TEXT:
 
 1. ``carry_over_foreign_blocks`` -- a shallow top-level merge that copies the
@@ -273,13 +273,108 @@ def top_level_key_lines(text):
 # The competence boundary, stated positively and tested as a whole.
 # ---------------------------------------------------------------------------
 
+def _is_blank(content):
+    """Blank content is SPACE and TAB only, and nothing else.
+
+    The format's own definition, not Python's: ``str.isspace`` would also call
+    NBSP, the Unicode separators and the C0 controls blank, and those are
+    exactly the characters the line-break and column-zero rules are about. A
+    line of spaces and tabs owns nothing and needs to own nothing.
+    """
+    return content.strip(" \t") == ""
+
+
+#: The five shapes a column-0 line may have without being a top-level key line
+#: and still be attributable: a blank line, a ``#`` comment, a ``%`` directive,
+#: a document marker (``---`` or ``...``) and a block sequence entry (``-``
+#: followed by a space, a tab, or end of content).
+def _document_marker(content):
+    """True for ``---`` and ``...``, alone or with content after a space."""
+    for marker in ("---", "..."):
+        if content == marker or content.startswith(marker + " "):
+            return True
+    return False
+
+
+def _unattributable_reason(content):
+    """The GRAMMAR's own rule, and only it: can this line be attributed?
+
+    Separate from ``_unmodelled_reason`` below, which is the REWRITE policy and
+    is stricter on purpose. Collapsing the two was a real defect: the splitter
+    began refusing three documents the reference splitter accepts (a TAB blank
+    inside a quoted scalar, a ``%YAML`` directive before ``---``, a terminal
+    ``...``), because it had started applying restrictions that belong to the
+    caller that is about to overwrite the file, not to the grammar.
+
+    Nothing here asks whether the document LOADS, and that is not an oversight.
+    Measured against the vendored reference on this corpus: it attributes a
+    marker or a directive in three documents PyYAML refuses outright
+    (``---`` after a key, ``...`` before one, ``%TAG`` after one). Splitting is
+    not reading. A document that no reader accepts still has an answer to
+    "which top-level key owns this line", and refusing to give it here would
+    make the splitter disagree with the reference over bytes neither of them
+    is being asked to read.
+    """
+    if _is_blank(content):
+        return None
+    head = content[0]
+    if head == " ":
+        return None                                    # indented block content
+    if head == "#":
+        return None                                    # comment at column 0
+    if head == "%":
+        return None                                    # directive
+    if _document_marker(content):
+        return None
+    if head == "-" and (len(content) == 1 or content[1] in " \t"):
+        return None                                    # top-level sequence item
+    if head == "\t":
+        return ("a TAB-led CONTENT line is at column 0, not indented: no YAML "
+                "parser reads a tab as block indentation, so this grammar "
+                "cannot say which top-level key owns it")
+    if head in "\"'":
+        return ("a quoted key at column 0 is a key to YAML but not to this "
+                "grammar, so its block would be attributed to the block above "
+                "it, whose owner regenerates it away on the next export")
+    if head in "{[":
+        return ("flow style at column 0: YAML reads a mapping here and this "
+                "grammar reads one line that owns nothing, so the block's "
+                "bytes are never captured and the re-export drops them")
+    if _SPACED_KEY_LINE_RE.match(content):
+        return ("YAML reads a key here but this grammar does not, because the "
+                "colon does not follow the key directly, so the block's bytes "
+                "are never captured and the re-export drops them")
+    return ("this line is at column 0 but is not a top-level key line, so the "
+            "grammar cannot tell which top-level key owns it")
+
+
 def _unmodelled_reason(content, seen_key):
-    """None if this column-0 non-key line is modelled; else why it is not."""
-    if content == "":
+    """None if this column-0 non-key line is modelled; else why it is not.
+
+    The REWRITE policy. Stricter than ``_unattributable_reason`` above, and it
+    stays stricter: this is what a caller about to overwrite the file consults,
+    so a second YAML document, a directive or a terminal marker is refused here
+    even though the grammar can attribute all three. Splitting them is right;
+    rewriting a file around them is not, because what comes back is not what a
+    reader of the whole stream saw.
+    """
+    if _is_blank(content):
         return None                                    # blank line
     head = content[0]
-    if head in " \t":
+    if head == " ":
         return None                                    # indented block content
+    if head == "\t":
+        # A TAB is not indentation. Column zero means "does not start with a
+        # space", and YAML has no tab indentation in block context at all:
+        # PyYAML 6.0.3 and yaml-cpp 0.8.0 both refuse a tab-indented mapping
+        # outright. So the only documents where a tab-led line arises are
+        # quoted scalars continued onto one, which both parsers DO read, and
+        # this grammar cannot tell that continuation from a line owning
+        # nothing. Treating it as indentation was reading the character as a
+        # human would rather than as either parser does.
+        return ("a TAB-led line is at column 0, not indented: no YAML parser "
+                "reads a tab as block indentation, so this grammar cannot say "
+                "which top-level key owns it")
     if head == "#":
         return None                                    # comment at column 0
     if content == "---" or content.startswith("--- "):
@@ -347,8 +442,15 @@ def split_top_level_blocks(text):
     the preamble, keyed ``""``. Joining the slices in document order reproduces
     the input byte for byte. No YAML is parsed.
 
-    Two documents this used to answer, wrongly, are now refused with
-    ``TopLevelGrammarRefusal``:
+    Documents this used to answer, wrongly, are refused with
+    ``TopLevelGrammarRefusal``. The first kind is not a list of spellings but
+    one property, ``unattributable_line_at_column_zero``: a line at column 0
+    that is not a key line and not one of the five attributable non-key shapes
+    (blank, ``#`` comment, ``%`` directive, ``---``/``...`` marker, ``- ``
+    sequence entry). ``_unattributable_reason`` decides, and NOT the rewrite
+    policy in ``_unmodelled_reason``: the two answer different questions and
+    delegating to the stricter one made this refuse three documents the
+    reference splitter accepts.
 
     * a QUOTED key at column 0. It is a key to YAML and not to this grammar, so
       the split attached its block to the preceding key, whose owner
@@ -366,10 +468,13 @@ def split_top_level_blocks(text):
       duplicate is not merged away but carried, which is a second reason not to
       hand these bytes on.
 
-    It does NOT refuse a document it merely cannot DELIMIT (a flow-style
-    document, ``flow :``). Those split correctly; they just yield no slice for
-    the node. Whether that is safe depends on what the caller does next, so it
-    is the caller's verdict and not the grammar's: ``split_for_rewrite``.
+    Undelimitable is a SEPARATE verdict from unsplittable, and the two used to
+    be stated here as if the first implied the absence of the second. They are
+    independent: a flow-style document and ``flow :`` yield no slice for the
+    flow node AND are unsplittable, because each is a line at column 0 that no
+    top-level key owns, so both are refused here. A document can perfectly well
+    be undelimitable and still split; that is the caller's verdict to act on,
+    in ``split_for_rewrite``, and it is not this function's business.
     """
     blocks = collections.OrderedDict()
     current = _PREAMBLE_KEY
@@ -392,10 +497,10 @@ def split_top_level_blocks(text):
             current = key
             blocks[current] = raw
             continue
-        if content[:1] in ("\"", "'"):
+        why = _unattributable_reason(content)
+        if why is not None:
             raise TopLevelGrammarRefusal(
-                _unmodelled_reason(content, True), lineno, content,
-                "quoted_key_at_column_zero")
+                why, lineno, content, "unattributable_line_at_column_zero")
         blocks[current] = blocks.get(current, "") + raw
     if not blocks[_PREAMBLE_KEY]:
         del blocks[_PREAMBLE_KEY]
@@ -480,18 +585,46 @@ def unwritable_reason(path):
     models, so regenerating the owned blocks and carrying the foreign ones over
     cannot lose content the guard could not see.
 
-    Answers the LAYOUT question only. A file that cannot be read or decoded is
-    somebody else's verdict (the digest tripwire, which fails closed and which
-    ``force`` deliberately bypasses), and answering it here would silently take
-    that override away.
+    Answers TWO questions, and used to answer only the second.
+
+    This delegated readability to the digest tripwire, on the reasoning that a
+    file we cannot read is "somebody else's verdict ... which fails closed and
+    which force deliberately bypasses". That delegation was void exactly when it
+    mattered. The tripwire returns early whenever the baseline is missing, empty
+    or unreadable, so on those paths it never reaches the decode and never fails
+    closed; nothing else asked, and the orchestrator went on to copy2 over an
+    undecodable .chiplet with force NOT set. The bytes were the user's only copy
+    and no other component held them.
+
+    So readability is answered here, before any copy. Note this is not a new
+    principle: the refusal below already sits OUTSIDE the force arm on the same
+    reasoning, that force overrides the hand-edit tripwire, which is a judgement
+    about content this exporter CAN read, and not "this exporter cannot read
+    your file". A document that will not decode belongs on that same side.
+    Neither a missing baseline nor force is permission to discard bytes nobody
+    could read.
     """
     import os
     if not path or not os.path.exists(path):
         return None                                    # first export
     try:
         text = read_document(path)
-    except (OSError, UnicodeDecodeError):
-        return None                                    # not this check's question
+    except (OSError, UnicodeDecodeError) as exc:
+        return ("The existing .chiplet cannot be read, so re-exporting would "
+                "overwrite content this exporter never saw. Refusing; the file "
+                "on disk is unchanged.\n"
+                "  File: %s\n"
+                "  Why: %s\n"
+                "  Fix: move the file aside to keep its bytes, then re-export "
+                "to regenerate it from the board. If it should have been "
+                "readable, restore it from backup or version control and "
+                "re-export. A .chiplet is UTF-8 text; a decode error usually "
+                "means a different encoding or a truncated/binary file.\n"
+                "  force=True does not bypass this: force overrides the "
+                "hand-edit tripwire, which judges content this exporter can "
+                "read. It is not permission to discard a document nobody "
+                "could read."
+                % (path, exc))
     try:
         split_for_rewrite(text)
     except TopLevelGrammarRefusal as exc:
@@ -591,6 +724,12 @@ def _owned_canonical(blocks: "collections.OrderedDict[str, str]") -> str:
     return "\n".join(parts)
 
 
+def _digest_blocks(blocks) -> str:
+    """Hash already parsed blocks so the assessment need not reread the file."""
+    canonical = _owned_canonical(blocks)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def exporter_content_digest(path: str) -> str:
     """SHA-256 of the file's exporter-owned content (see ``_owned_canonical``).
 
@@ -598,8 +737,7 @@ def exporter_content_digest(path: str) -> str:
     only. It changes when exporter-owned content changes and does NOT change when
     a foreign block such as ``flow:`` is added or edited.
     """
-    canonical = _owned_canonical(split_for_rewrite(read_document(path)))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return _digest_blocks(split_for_rewrite(read_document(path)))
 
 
 def digest_sidecar_path(final_path: str) -> str:
@@ -619,28 +757,164 @@ def record_exporter_content_digest(final_path: str) -> str:
     return digest
 
 
-def foreign_hand_edit_detected(final_path: str) -> bool:
-    """True when the canonical file's exporter-owned content diverged.
+#: The four states of one previous-export content guard evaluation.
+#:
+#: The guard used to answer with a bare bool, and False carried two unrelated
+#: meanings: "compared against the recorded baseline and it matches" and "there
+#: was no baseline to compare against". A caller reading False could not tell a
+#: verified file from an unverified one, so the reassuring case and the blind
+#: case printed the same nothing. These name them apart. The bool survives as a
+#: wrapper over the same evaluation, so what changes is what can be SAID, not
+#: what the export does.
+GUARD_UNCHANGED = "unchanged"
+GUARD_CHANGED = "changed"
+GUARD_NO_BASELINE = "no_baseline"
+GUARD_BASELINE_UNREADABLE = "baseline_unreadable"
 
-    Compares the current exporter-content digest against the sidecar recorded
-    after the last successful export. False (no tripwire) when either the file or
-    the sidecar is absent (a first export, or a checkout predating the guard):
-    the guard adds friction only when there is a recorded baseline to violate. A
-    corrupt/undecodable canonical file makes ``exporter_content_digest`` raise;
-    that propagates so the caller can fail closed (orchestrator.py).
+
+class ContentGuardAssessment(object):
+    """The result of ONE evaluation of the previous-export content guard.
+
+    One evaluation, one object: every consumer (the refusal, the log line, the
+    MANIFEST entry, the compatibility bool) reads THIS, and none of them reruns
+    the comparison. Two evaluations of a file that a running export is about to
+    rewrite are two different questions, and answering the second one while
+    reporting on the first is how a guard comes to describe a state that no
+    longer exists.
+
+    ``state`` is one of the four ``GUARD_*`` constants. ``reason`` is prose for
+    the states that have something to explain: which half of "no baseline" this
+    is, why the baseline could not be read, or a possible cause of a mismatch.
+    It is never the state itself.
+    """
+
+    __slots__ = ("state", "path", "reason", "recorded", "current")
+
+    def __init__(self, state, path, reason=None, recorded=None, current=None):
+        self.state = state
+        self.path = path
+        self.reason = reason
+        self.recorded = recorded
+        self.current = current
+
+    @property
+    def tripped(self) -> bool:
+        """The compatibility bool: True only for a recorded digest mismatch.
+
+        Deliberately False for BOTH no-baseline states. An unreadable sidecar is
+        our own artifact failing, not the user's document changing, and refusing
+        the export would charge the user for our bookkeeping with a fix they
+        cannot find (delete a file they do not know exists).
+
+        What that costs, stated plainly because an earlier version of this
+        docstring did not: when there is no usable baseline the export CONTINUES
+        WITHOUT CONTENT-GUARD PROTECTION for this file. Hand edits to
+        exporter-owned content are regenerated away exactly as they would have
+        been before this guard existed. ``describe`` reporting the state does
+        not change that; a warning is observability, not protection, and it
+        neither guards owned edits nor establishes that the content is
+        unchanged. What the report buys is that the unprotected case is now
+        distinguishable from the verified one, which is the whole of the claim.
+
+        Whether an unreadable baseline should instead refuse, or require force,
+        is a real question and a separate decision; it is not settled here.
+
+        A corrupt CANONICAL file is a different failure and still raises out of
+        the assessment, so the caller still fails closed on it.
+        """
+        return self.state == GUARD_CHANGED
+
+    @property
+    def verified(self) -> bool:
+        """True only when a baseline existed and was actually compared."""
+        return self.state in (GUARD_UNCHANGED, GUARD_CHANGED)
+
+    def describe(self) -> str:
+        """One line for the log and the MANIFEST, naming what was checked.
+
+        "previous-export content guard", never "verification" unqualified: this
+        compares the file against the digest of OUR last export of it and
+        nothing else. It does not validate the document, check it against the
+        board, or say the content is correct.
+
+        The two unbaselined states say what the export then does, and they have
+        to: "nothing was checked" describes the guard, and a reader can take it
+        as a note about our bookkeeping rather than about their file. The export
+        proceeds and regenerates exporter-owned content either way, so the line
+        says so.
+        """
+        if self.state == GUARD_UNCHANGED:
+            return ("previous-export content guard: exporter-owned content "
+                    "matches the last export of this file")
+        if self.state == GUARD_CHANGED:
+            note = ("previous-export content guard: exporter-owned content "
+                    "DIGEST MISMATCH against the recorded baseline; this alone "
+                    "does not prove hand edits")
+            return "%s; %s" % (note, self.reason) if self.reason else note
+        if self.state == GUARD_NO_BASELINE:
+            return ("previous-export content guard: no baseline, nothing was "
+                    "checked (%s); this export continues WITHOUT content-guard "
+                    "protection for this file" % self.reason)
+        return ("previous-export content guard: baseline unreadable, nothing "
+                "was checked (%s); this export continues WITHOUT content-guard "
+                "protection for this file" % self.reason)
+
+
+def assess_previous_export_content(final_path: str) -> ContentGuardAssessment:
+    """Evaluate the previous-export content guard for ``final_path``, once.
+
+    Compares the file's current exporter-content digest against the sidecar
+    recorded after the last successful export. Returns one of the four states;
+    never raises for a missing, empty or corrupt SIDECAR, which is the
+    exporter's own artifact. It DOES propagate the exception from a corrupt or
+    undecodable CANONICAL file, so the caller fails closed on a document it
+    cannot read (orchestrator.py). Those are two different failures and the
+    guard keeps them apart.
     """
     import os
     sidecar = digest_sidecar_path(final_path)
-    if not os.path.exists(final_path) or not os.path.exists(sidecar):
-        return False
+    if not os.path.exists(final_path):
+        return ContentGuardAssessment(
+            GUARD_NO_BASELINE, final_path,
+            reason="first export: no canonical file on disk yet")
+    if not os.path.exists(sidecar):
+        return ContentGuardAssessment(
+            GUARD_NO_BASELINE, final_path,
+            reason="the file exists but has no recorded digest, so edits to "
+                   "exporter-owned content are not protected until this export "
+                   "records one")
     try:
         with open(sidecar, "r", encoding="utf-8") as fh:
             recorded = fh.read().strip()
-    except (OSError, UnicodeDecodeError):
-        # The sidecar is our own best-effort artifact; an unreadable or corrupt
-        # one means we lost the baseline, so behave like "no baseline" (no trip)
-        # rather than fail closed on a file the user did not author.
-        return False
+    except (OSError, UnicodeDecodeError) as exc:
+        return ContentGuardAssessment(
+            GUARD_BASELINE_UNREADABLE, final_path,
+            reason="the recorded digest could not be read: %s" % exc)
     if not recorded:
-        return False
-    return exporter_content_digest(final_path) != recorded
+        return ContentGuardAssessment(
+            GUARD_BASELINE_UNREADABLE, final_path,
+            reason="the recorded digest is empty")
+    blocks = split_for_rewrite(read_document(final_path))
+    current = _digest_blocks(blocks)
+    reason = None
+    if current != recorded and "interconnect" in blocks:
+        # Sidecars contain no exporter version. Presence of this block makes
+        # the historical ownership change a possible cause, not a diagnosis.
+        reason = ("exports made before 051dfd8 did not hash interconnect:, so "
+                  "an older baseline can mismatch even if this file was not "
+                  "edited")
+    return ContentGuardAssessment(
+        GUARD_CHANGED if current != recorded else GUARD_UNCHANGED,
+        final_path, reason=reason, recorded=recorded, current=current)
+
+
+def foreign_hand_edit_detected(final_path: str) -> bool:
+    """True when the canonical file's exporter-content digest differs.
+
+    Compatibility wrapper over ``assess_previous_export_content``: the SAME
+    evaluation, read through ``tripped``. It is not a second comparison, and it
+    must not become one. Behaviour is unchanged from before the four states
+    existed, including False for a missing, empty or corrupt sidecar; what the
+    states added is the ability to SAY which False this is.
+    """
+    return assess_previous_export_content(final_path).tripped

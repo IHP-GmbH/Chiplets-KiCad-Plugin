@@ -1,0 +1,172 @@
+usage: hyp_to_gds.py [-h] [-o OUTPUT] [-l LYP] [-c CELL]
+                     [--tech-json JSON_FILE] [--with-chiplets]
+                     [--complete-output PATH]
+                     [--update-chiplet-file CHIPLET_FILE]
+                     [--pad-locations REF=FILE[,REF=FILE,...]]
+                     [--cupillar-gds FILE] [--connection-type TYPE]
+                     [--die-connections REF=METHOD[,REF=METHOD,...]]
+                     [--die-thicknesses REF=UM[,REF=UM,...]]
+                     [--die-outline-layers REF=LAYER/DATATYPE[,...]]
+                     [--die-outline-exempt REF[,REF,...]]
+                     [--io-pads JSON_FILE] [--cmim-devices JSON_FILE]
+                     [--system-chiplet CHIPLET_FILE] [--die-layouts JSON_FILE]
+                     [--nofill-regions JSON_FILE] [--insert-metal-fill]
+                     [--fill-mode {single-pass,closure}] [--seal-ring]
+                     [--annotate-boundaries] [--grid-nm GRID_NM]
+                     [--boundary-viz-layer LAYER/DATATYPE]
+                     hyp_file
+
+Convert KiCad HYP files to GDS format
+
+positional arguments:
+  hyp_file              Input HYP file path
+
+options:
+  -h, --help            show this help message and exit
+  -o OUTPUT, --output OUTPUT
+                        Output GDS file path (default: <input>.gds)
+  -l LYP, --lyp LYP     KLayout LYP layer properties file (default: the
+                        interposer PDK's canonical intm4tm2.lyp via env/walk
+                        discovery; the .lyp belongs to the PDK, so set
+                        INTERPOSER_PDK_ROOT or pass this explicitly when no
+                        checkout resolves)
+  -c CELL, --cell CELL  Top-level cell name (default: INTERPOSER)
+  --tech-json JSON_FILE
+                        Path to interposer_tech_default.json for PDK via
+                        parameters (default: use built-in values from
+                        sg13g2_tech.json)
+  --with-chiplets       Generate complete GDS with chiplet instances from
+                        GDS_FILE entries
+  --complete-output PATH
+                        Output path for complete GDS with chiplets (default:
+                        <input>_complete.gds)
+  --update-chiplet-file CHIPLET_FILE
+                        Update .chiplet file with interposer GDS path
+  --pad-locations REF=FILE[,REF=FILE,...]
+                        Pin list JSON files per device; the cu-pillar
+                        generator places DRC-validated pillars at these pads
+                        (an alternative to a pre-generated --cupillar-gds).
+                        E.g. U1=pins_interposer.json,U2=pins_diffamp.json
+  --cupillar-gds FILE   Pre-generated cu-pillar GDS file (from bump_mirror.py)
+                        to merge into the interposer layout
+  --connection-type TYPE
+                        Connection stack type for chiplet file: a method id
+                        the interconnect PDK manifest lists (e.g.,
+                        cupillar_opt1, sbump_sac305). Injects
+                        connection_stacks section and sets connection on die
+                        components.
+  --die-connections REF=METHOD[,REF=METHOD,...]
+                        Per-die connection stack overrides (e.g.
+                        U1=cupillar_opt1,U2=vendorx_microbump). Dies not
+                        listed use --connection-type. Each die's 3D bodies are
+                        drawn with its own method's layers and diameter, and
+                        its connection field in the .chiplet is set
+                        accordingly.
+  --die-thicknesses REF=UM[,REF=UM,...]
+                        Per-die physical thickness in micrometers (e.g.
+                        U1=750,U2=750). Written to each die's
+                        dimensions.thickness in the .chiplet. Dies not listed
+                        keep the format default of 0.0. Interconnect stack
+                        heights are a separate axis (connection_stacks); do
+                        not fold them in here.
+  --die-outline-layers REF=LAYER/DATATYPE[,...]
+                        The layer each die's own GDS draws its die outline on
+                        (e.g. U1=39/4,U2=39/4). With --update-chiplet-file, a
+                        declared die's width/height in the .chiplet become
+                        that outline's size, and with --with-chiplets it is
+                        the die's boundary. The layer must merge to exactly
+                        one rectangle under the GDS's one top cell; anything
+                        else refuses. Every die of the .chiplet must be named
+                        here or in --die-outline-exempt, and only one of them.
+  --die-outline-exempt REF[,REF,...]
+                        Dies that keep the width/height already in the
+                        .chiplet and the placed cell bbox as boundary (e.g.
+                        U3). Each is logged by name. Their GDS must still
+                        exist and have one top cell.
+  --io-pads JSON_FILE   Sidecar JSON with external I/O pad locations in
+                        planner net names (never inverted here; produced by
+                        gds_to_kicad/io_pads/kicad_pcb_to_iopads.py). Each
+                        entry is rendered in the interposer GDS based on its
+                        io_class field (wire_bond now; flipped_bump and
+                        tsv_bump reserved). When combined with --update-
+                        chiplet-file, the placed pads are also injected under
+                        the interposer component.
+  --cmim-devices JSON_FILE
+                        Sidecar JSON with cap_cmim footprint parameters for
+                        IntM4TM2 PCell placement.
+  --system-chiplet CHIPLET_FILE
+                        The System .chiplet the assembly was built from. With
+                        --update-chiplet-file, the interposer's and each die's
+                        technology, and the technologies block, are taken from
+                        it by component id. Refused, with nothing written,
+                        when a component or a technology id has no match
+                        there.
+  --die-layouts JSON_FILE
+                        Sidecar JSON naming, per die reference, its full
+                        layout (an absolute path), the contract's top_cell and
+                        bbox_um. Needs --update-chiplet-file, where that die's
+                        layout and top_cell become the full layout's, and its
+                        metadata names the abstract its GDS_FILE gives, which
+                        the complete GDS keeps. Refused, with nothing written,
+                        when an entry names no die or either file's top cell
+                        box is not bbox_um exactly.
+  --nofill-regions JSON_FILE
+                        Sidecar JSON with no-fill (keep-out) polygons authored
+                        in KiCad (produced by
+                        writers/chiplet_writer.write_nofill_regions_json).
+                        Painted onto the GDS keep-out datatypes (160/0 global,
+                        <metal>/23 per metal) so the PDK metal-fill generators
+                        skip them.
+  --insert-metal-fill   Stamp metal density fill onto the interposer GDS using
+                        the interposer PDK's fill engine
+                        (fill_closure.fill_stack). Needs INTERPOSER_PDK_ROOT
+                        with the fill work and the 'klayout' binary on PATH
+                        (same as assembly DRC). Off by default; the complete
+                        GDS is left unfilled.
+  --fill-mode {single-pass,closure}
+                        single-pass: stamp all four metals once (fast,
+                        default). closure: density-feedback loop for M4/M5
+                        (slower, verifies the density band against the sign-
+                        off deck). Ignored without --insert-metal-fill.
+  --seal-ring           Draw the interposer PDK's seal ring (IntM4TM2 sealring
+                        PCell) on the board outline, which must be one axis-
+                        aligned rectangle. Refused, with nothing written, when
+                        the outline is missing, not a rectangle or under the
+                        PCell minimum, or when fabricated geometry sits in the
+                        ring band or closer to the ring than its space rule.
+                        Off by default; the complete GDS carries the ring.
+  --annotate-boundaries
+                        Also paint each chiplet boundary (and instance label)
+                        onto a viewer-only annotation layer for eyeball
+                        inspection of the GDS. No DRC rule reads this layer;
+                        the assembly contract stays in the
+                        <gds>.boundaries.json manifest. Off by default.
+  --grid-nm GRID_NM     Manufacturing grid in nanometers for the drawn
+                        geometry (default 5, the value the interposer PDK's
+                        own offgrid deck enforces). 0 disables snapping and
+                        keeps traces as paths; that output will not pass the
+                        carrier DRC and is for debugging the raw conversion
+                        only.
+  --boundary-viz-layer LAYER/DATATYPE
+                        GDS layer for --annotate-boundaries (default: 1000/0,
+                        outside IHP SG13G2's fab range). Ignored unless
+                        --annotate-boundaries.
+
+Examples:
+  hyp_to_gds.py interposer_template.hyp
+  hyp_to_gds.py interposer_template.hyp -o interposer.gds
+  hyp_to_gds.py interposer_template.hyp -l custom_layers.lyp -c MYCELL
+
+  # Generate both interposer and complete GDS with chiplets:
+  hyp_to_gds.py interposer_template.hyp -o interposer.gds --with-chiplets --complete-output complete.gds
+
+  # Also update a .chiplet file with the interposer GDS path, sizing U1 and U2
+  # from the 39/4 outline in their own GDS and leaving U3 as it is:
+  hyp_to_gds.py interposer_template.hyp -o interposer.gds --update-chiplet-file design.chiplet       --die-outline-layers U1=39/4,U2=39/4 --die-outline-exempt U3
+
+  # Generate cu-pillar pads at chiplet pad locations:
+  hyp_to_gds.py interposer_template.hyp --with-chiplets --pad-locations U1=pins_interposer.json,U2=pins_diffamp.json
+
+  # Merge pre-generated cu-pillar GDS (from bump_mirror.py):
+  hyp_to_gds.py interposer_template.hyp --cupillar-gds cupillars.gds -o interposer.gds
+        

@@ -7,6 +7,7 @@ Guards 0-regression: the manifest-sourced tables must reproduce the prior IHP
 literals exactly, while the vendor demo method becomes selectable.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -18,6 +19,9 @@ if str(PLUGIN_ROOT) not in sys.path:
 
 import hyp_to_gds as h  # noqa: E402
 
+from .conftest import (  # noqa: E402
+    FIXTURE_PDK_ROOT, sibling_workspace, use_sibling_checkouts)
+
 # This module asserts real sibling-PDK content: interconnect manifest methods,
 # interposer canonical lyp paths, gds_to_kicad walk targets. On a lone
 # checkout (e.g. a bare CI runner) none of those roots resolve -- skip the
@@ -27,10 +31,10 @@ _MISSING_ROOTS = [
                     "GDS_TO_KICAD_ROOT")
     if h._discover_path_var(var) is None
 ]
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.needs_sibling_sources, pytest.mark.skipif(
     bool(_MISSING_ROOTS),
     reason="needs sibling ecosystem checkouts; unresolved: %s"
-           % ", ".join(_MISSING_ROOTS))
+           % ", ".join(_MISSING_ROOTS))]
 
 
 def test_default_connection_stacks_byte_equal_to_literal():
@@ -151,43 +155,84 @@ def test_unknown_adapter_stays_adapter_only():
 # Interposer PDK discovery (ecosystem convention: env var -> upward walk)
 # ---------------------------------------------------------------------------
 
-def test_interposer_pdk_python_found_via_walk():
+def _walk_from(tmp_path, monkeypatch, *names):
+    """Walk from a workspace holding the siblings ``names`` (conftest).
+    Returns the workspace."""
+    start = sibling_workspace(tmp_path, h._PATH_VAR_MARKERS, *names)
+    monkeypatch.setattr(h, "__file__", str(start))
+    return start.parents[2]
+
+
+def test_interposer_pdk_python_found_via_walk(tmp_path, monkeypatch):
     """With no env override, the upward walk finds the sibling checkout."""
-    import os
-    old = os.environ.pop("INTERPOSER_PDK_ROOT", None)
-    try:
-        found = h._find_interposer_pdk_python()
-        assert found is not None
-        assert (found / "bump_mirror.py").is_file()
-        assert found.parts[-3:] == ("libs.tech", "klayout", "python")
-    finally:
-        if old is not None:
-            os.environ["INTERPOSER_PDK_ROOT"] = old
+    _walk_from(tmp_path, monkeypatch, "INTERPOSER_PDK_ROOT")
+    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
+    found = h._find_interposer_pdk_python()
+    assert found is not None
+    assert (found / "bump_mirror.py").is_file()
+    assert found.parts[-3:] == ("libs.tech", "klayout", "python")
+
+
+def _refusal(root):
+    """The root refusal's id, the path given and the marker looked for."""
+    return (r"^CARRIER_UNSUPPORTED_ROOT: \$INTERPOSER_PDK_ROOT is %s, which "
+            r"has no libs\.tech/intm4tm2_stack\.json," % re.escape(str(root)))
 
 
 def test_interposer_pdk_env_override_wins(tmp_path, monkeypatch):
     """INTERPOSER_PDK_ROOT pointing at a valid root takes precedence; a
-    bogus root falls through to the walk instead of failing."""
+    root without the marker is refused, naming it, and never replaced by
+    the walk (which would draw with the sibling checkout)."""
+    _walk_from(tmp_path, monkeypatch, "INTERPOSER_PDK_ROOT")
     fake = tmp_path / "pdk" / "libs.tech" / "klayout" / "python"
     fake.mkdir(parents=True)
     (fake / "bump_mirror.py").write_text("# stub\n")
+    (tmp_path / "pdk" / "libs.tech" / "intm4tm2_stack.json").write_text("{}\n")
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(tmp_path / "pdk"))
     assert h._find_interposer_pdk_python() == fake
 
-    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(tmp_path / "nonexistent"))
-    found = h._find_interposer_pdk_python()
-    assert found is not None and found != fake  # walk found the real one
+    bogus = tmp_path / "nonexistent"
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(bogus))
+    with pytest.raises(SystemExit) as exc:
+        h._find_interposer_pdk_python()
+    assert re.match(_refusal(bogus), str(exc.value))
 
 
-@pytest.mark.skipif(
-    not any((c / "interconnect_manifest.py").is_file()
-            for c in h._interconnect_python_candidates()),
-    reason="interconnect_pdk checkout not discoverable (lone checkout)")
-def test_interconnect_pdk_resolves_live_not_fallback(monkeypatch):
+def test_a_klayout_pdk_tree_that_is_not_intm4tm2_is_refused(tmp_path, monkeypatch):
+    """Every KLayout PDK tree has libs.tech/klayout/, the SG13G2 die PDK
+    included, and it shares IntM4TM2's metal names: every reader of the
+    variable refuses it, none draws with it."""
+    die_pdk = tmp_path / "ihp-sg13g2"
+    (die_pdk / "libs.tech" / "klayout" / "tech").mkdir(parents=True)
+    (die_pdk / "libs.tech" / "klayout" / "python" / "sg13g2_pycell_lib").mkdir(
+        parents=True)
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(die_pdk))
+    with pytest.raises(h._layer_map.CarrierRootRefused) as refused:
+        h._layer_map.discover_path_var("INTERPOSER_PDK_ROOT")
+    assert re.match(_refusal(die_pdk), str(refused.value))
+    for reader in (lambda: h._discover_path_var("INTERPOSER_PDK_ROOT"),
+                   h._find_interposer_pdk_python, h._find_interposer_template,
+                   lambda: h._expand_path_vars("${INTERPOSER_PDK_ROOT}/x")):
+        with pytest.raises(SystemExit) as exc:
+            reader()
+        assert re.match(_refusal(die_pdk), str(exc.value))
+
+
+def test_an_intm4tm2_root_without_bump_mirror_names_it(monkeypatch):
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(FIXTURE_PDK_ROOT))
+    with pytest.raises(SystemExit) as exc:
+        h._find_interposer_pdk_python()
+    assert re.match(r"^ERROR: the interposer PDK at %s is an IntM4TM2 tree "
+                    r"without libs\.tech/klayout/python/bump_mirror\.py,"
+                    % re.escape(str(FIXTURE_PDK_ROOT)), str(exc.value))
+
+
+def test_interconnect_pdk_resolves_live_not_fallback(tmp_path, monkeypatch):
     """The interconnect PDK probes resolve the real sibling checkout under
     its IHP layout (libs.tech/klayout/python). Guards against a silent
     fall-back to builtin tables if the layout moves again: the manifest
     reader must import via the walk alone."""
+    _walk_from(tmp_path, monkeypatch, "INTERCONNECT_PDK_ROOT")
     monkeypatch.delenv("INTERCONNECT_PDK_ROOT", raising=False)
     cands = h._interconnect_python_candidates()
     hit = [c for c in cands if (c / "interconnect_manifest.py").is_file()]
@@ -202,7 +247,7 @@ def test_method_bodies_resolved_from_manifest(monkeypatch):
     """The 3D body layers handed to bump_mirror are method-resolved from the
     manifest -- a vendor method selects its own layers, never an assumed IHP
     cu-pillar pair."""
-    monkeypatch.delenv("INTERCONNECT_PDK_ROOT", raising=False)
+    use_sibling_checkouts("INTERCONNECT_PDK_ROOT")
     im = h._import_interconnect_manifest()
     assert im.layers_3d("cupillar_opt1") == [
         ("CuPillar", 500, 35), ("SnAgCap", 501, 35)]
@@ -222,8 +267,9 @@ def test_expand_path_vars_passthrough():
     assert h._expand_path_vars(None) is None
 
 
-def test_expand_path_vars_walk(monkeypatch):
+def test_expand_path_vars_walk(tmp_path, monkeypatch):
     """${GDS_TO_KICAD_ROOT} resolves via the sibling walk when env is unset."""
+    _walk_from(tmp_path, monkeypatch, "GDS_TO_KICAD_ROOT")
     monkeypatch.delenv("GDS_TO_KICAD_ROOT", raising=False)
     got = h._expand_path_vars("${GDS_TO_KICAD_ROOT}/pdks/sg13g2.lyp")
     assert "${" not in got
@@ -232,18 +278,23 @@ def test_expand_path_vars_walk(monkeypatch):
 
 
 def test_expand_path_vars_env_wins(tmp_path, monkeypatch):
-    """A valid env root takes precedence; a bogus one falls through to walk."""
+    """A valid env root takes precedence; a bogus one is refused, naming the
+    marker it lacks, and never replaced by the walk."""
+    workspace = _walk_from(tmp_path, monkeypatch, "INTERPOSER_PDK_ROOT")
     fake = tmp_path / "pdk"
-    (fake / "libs.tech" / "klayout").mkdir(parents=True)
+    (fake / "libs.tech").mkdir(parents=True)
+    (fake / "libs.tech" / "intm4tm2_stack.json").write_text("{}\n")
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(fake))
     got = h._expand_path_vars(
         "${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp")
     assert got.startswith(str(fake))
 
-    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(tmp_path / "nonexistent"))
-    got = h._expand_path_vars("${INTERPOSER_PDK_ROOT}/x")
-    assert "${" not in got
-    assert not got.startswith(str(tmp_path))
+    bogus = tmp_path / "nonexistent"
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(bogus))
+    with pytest.raises(SystemExit) as exc:
+        h._expand_path_vars("${INTERPOSER_PDK_ROOT}/x")
+    assert re.match(_refusal(bogus), str(exc.value))
+    assert not (workspace / "interposer" / "x").exists()
 
 
 def test_expand_path_vars_unknown_var_is_loud(monkeypatch):
@@ -255,9 +306,10 @@ def test_expand_path_vars_unknown_var_is_loud(monkeypatch):
     assert "NO_SUCH_ECOSYSTEM_ROOT" in str(exc.value)
 
 
-def test_default_lyp_resolves_canonical(monkeypatch):
+def test_default_lyp_resolves_canonical(tmp_path, monkeypatch):
     """With the monorepo present, the default lyp is the interposer PDK's
     canonical copy (the .lyp belongs to the PDK; the plugin keeps no copy)."""
+    _walk_from(tmp_path, monkeypatch, "INTERPOSER_PDK_ROOT")
     monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
     got = h._find_default_lyp()
     assert got.endswith("libs.tech/klayout/tech/intm4tm2.lyp")
@@ -282,22 +334,48 @@ components:
   - id: U1
     type: die
     orientation: flip_chip
+    layout: u1.gds
     dimensions: {width: 100.0, height: 100.0, thickness: 0.0}
     position: {x: 10.0, y: 10.0, z: 0.0}
   - id: U2
     type: die
     orientation: flip_chip
+    layout: u2.gds
     dimensions: {width: 100.0, height: 100.0, thickness: 0.0}
     position: {x: 200.0, y: 10.0, z: 0.0}
 """
+
+# The finalizer sizes every die from the outline its own GDS declares. Each
+# fixture die draws one 100 x 100 um rectangle on this layer, the size
+# MIXED_CHIPLET already gives it.
+MIXED_OUTLINE = (39, 4)
+
+
+def _write_mixed_dies(tmp_path):
+    from klayout import db
+    for name in ("u1", "u2"):
+        ly = db.Layout()
+        ly.dbu = 0.001
+        top = ly.create_cell(name.upper())
+        top.shapes(ly.layer(*MIXED_OUTLINE)).insert(
+            db.Box(0, 0, 100000, 100000))
+        ly.write(str(tmp_path / (name + ".gds")))
 
 
 def _update_mixed(tmp_path, **kwargs):
     import yaml
     p = tmp_path / "mixed.chiplet"
     p.write_text(MIXED_CHIPLET)
-    ok = h.update_chiplet_file(
-        str(p), "/nonexistent.gds", bbox=(0.0, 0.0, 1000.0, 1000.0), **kwargs)
+    _write_mixed_dies(tmp_path)
+    kwargs.setdefault("die_outline_layers",
+                      dict.fromkeys(("U1", "U2"), MIXED_OUTLINE))
+    # The mount plane comes from the fixture descriptor (10.8103), not from
+    # whichever interposer PDK the host has.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("INTERPOSER_PDK_ROOT", str(FIXTURE_PDK_ROOT))
+        ok = h.update_chiplet_file(
+            str(p), "/nonexistent.gds", bbox=(0.0, 0.0, 1000.0, 1000.0),
+            **kwargs)
     assert ok is True
     return yaml.safe_load(p.read_text())
 
@@ -324,9 +402,9 @@ def test_update_chiplet_per_die_override_wins_over_global(tmp_path):
     assert _die(data, "U1")["connection"] == "cupillar_opt1"
     assert _die(data, "U2")["connection"] == "vendorx_microbump"
     assert "vendorx_microbump" in data["connection_stacks"]
-    # opt1 stack 28+16=44 on 13.83; vendorx 18+6=24 on 13.83
-    assert _die(data, "U1")["position"]["z"] == 13.83 + 44.0
-    assert _die(data, "U2")["position"]["z"] == 13.83 + 24.0
+    # opt1 stack 28+16=44 on 10.8103; vendorx 18+6=24 on 10.8103
+    assert _die(data, "U1")["position"]["z"] == 54.8103
+    assert _die(data, "U2")["position"]["z"] == 34.8103
 
 
 def test_update_chiplet_per_die_without_global(tmp_path):
@@ -336,7 +414,7 @@ def test_update_chiplet_per_die_without_global(tmp_path):
         die_connections={"U2": "cupillar_opt2"})
     assert "connection" not in _die(data, "U1")
     assert _die(data, "U2")["connection"] == "cupillar_opt2"
-    assert _die(data, "U2")["position"]["z"] == 13.83 + 48.0
+    assert _die(data, "U2")["position"]["z"] == 58.8103
 
 
 def test_update_chiplet_per_die_unknown_method_warned_and_skipped(
@@ -376,8 +454,8 @@ def test_update_chiplet_die_thickness_set_per_die(tmp_path):
         die_thicknesses={"U1": 750.0})
     assert _die(data, "U1")["dimensions"]["thickness"] == 750.0
     assert _die(data, "U2")["dimensions"]["thickness"] == 0.0
-    assert _die(data, "U1")["position"]["z"] == 13.83 + 44.0
-    assert _die(data, "U2")["position"]["z"] == 13.83 + 44.0
+    assert _die(data, "U1")["position"]["z"] == 54.8103
+    assert _die(data, "U2")["position"]["z"] == 54.8103
 
 
 def test_update_chiplet_die_thickness_without_connections(tmp_path):
@@ -401,7 +479,7 @@ def test_update_chiplet_die_thickness_never_touches_interposer(tmp_path):
     # no longer overwritten by the attachment surface.
     assert interposer["dimensions"]["thickness"] == 100.0
     # The BEOL-top die-attachment surface is a separate component-level field.
-    assert interposer["attachment_surface_z"] == 13.83
+    assert interposer["attachment_surface_z"] == 10.8103
     assert _die(data, "U1")["dimensions"]["thickness"] == 750.0
 
 
@@ -495,8 +573,8 @@ def test_mixed_methods_draw_each_dies_own_bodies(tmp_path, monkeypatch):
     """One export, two dies, two methods: U1 (default cupillar_opt1) gets
     IHP bodies 500/501, U2 (vendorx override) gets 510/511 -- in the SAME
     GDS, each under its own CUPILLARS_<ref> cell."""
-    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
-    monkeypatch.delenv("INTERCONNECT_PDK_ROOT", raising=False)
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT",
+                          "INTERCONNECT_PDK_ROOT")
     hyp = tmp_path / "mixed.hyp"
     hyp.write_text(MIXED_HYP)
     out = tmp_path / "mixed_interposer.gds"
@@ -520,8 +598,8 @@ def test_mixed_methods_draw_each_dies_own_bodies(tmp_path, monkeypatch):
 def test_single_method_export_unchanged_by_die_connections_param(
         tmp_path, monkeypatch):
     """Without die_connections the global method drives every die (legacy)."""
-    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
-    monkeypatch.delenv("INTERCONNECT_PDK_ROOT", raising=False)
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT",
+                          "INTERCONNECT_PDK_ROOT")
     hyp = tmp_path / "single.hyp"
     hyp.write_text(MIXED_HYP)
     out = tmp_path / "single_interposer.gds"
@@ -569,7 +647,7 @@ def test_parser_reads_board_perimeter(tmp_path):
 def test_convert_draws_outline_on_prboundary(tmp_path, monkeypatch):
     """The board outline (2000x1000 um in MIXED_HYP) is drawn as a closed
     polygon on prBoundary 235/0 of the generated interposer GDS."""
-    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT")
     hyp = tmp_path / "o.hyp"
     hyp.write_text(MIXED_HYP)
     out = tmp_path / "o_interposer.gds"
@@ -585,7 +663,7 @@ def test_convert_draws_outline_on_prboundary(tmp_path, monkeypatch):
 def test_open_outline_warns_and_draws_nothing(tmp_path, monkeypatch, capsys):
     """A perimeter that does not close draws no prBoundary (all-or-nothing:
     a partial outline would understate the extent) and warns loudly."""
-    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT")
     open_hyp = MIXED_HYP.replace(
         "  (PERIMETER_SEGMENT X1=0.000000 Y1=-0.001000 "
         "X2=0.000000 Y2=0.000000)\n", "")
@@ -604,7 +682,7 @@ def test_open_outline_warns_and_draws_nothing(tmp_path, monkeypatch, capsys):
 def test_offboard_geometry_warns(tmp_path, monkeypatch, capsys):
     """Copper sticking out of the board outline is reported loudly (the
     interposer keeps the outline size; the leak is a design error)."""
-    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT")
     leaky = MIXED_HYP.replace("X2=0.001900", "X2=0.002500")
     assert leaky != MIXED_HYP
     hyp = tmp_path / "leak.hyp"
@@ -617,6 +695,20 @@ def test_offboard_geometry_warns(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "outside the board outline" in err
     assert "right" in err
+
+
+# The interposer-outline tests below assert interposer fields only, so their
+# .chiplet has no dies (a die would need its own GDS and outline).
+INTERPOSER_ONLY_CHIPLET = """\
+format_version: "1.0"
+assembly:
+  name: mixed
+components:
+  - id: interposer
+    type: interposer
+    dimensions: {width: 1000.0, height: 1000.0, thickness: 100.0}
+    position: {x: 0.0, y: 0.0, z: 0.0}
+"""
 
 
 def test_update_chiplet_prefers_outline_dims_keeps_full_bbox_position(
@@ -635,7 +727,7 @@ def test_update_chiplet_prefers_outline_dims_keeps_full_bbox_position(
         db.DBox(0.0, 0.0, 2000.0, 1000.0))
     ly.write(str(gds))
     p = tmp_path / "d.chiplet"
-    p.write_text(MIXED_CHIPLET)
+    p.write_text(INTERPOSER_ONLY_CHIPLET)
     assert h.update_chiplet_file(str(p), str(gds)) is True  # bbox from file
     data = yaml.safe_load(p.read_text())
     ip = next(c for c in data["components"] if c["id"] == "interposer")
@@ -657,7 +749,7 @@ def test_update_chiplet_falls_back_to_full_bbox_without_outline(tmp_path):
     top.shapes(ly.layer(134, 0)).insert(db.DBox(0.0, 0.0, 3000.0, 1000.0))
     ly.write(str(gds))
     p = tmp_path / "d.chiplet"
-    p.write_text(MIXED_CHIPLET)
+    p.write_text(INTERPOSER_ONLY_CHIPLET)
     assert h.update_chiplet_file(str(p), str(gds)) is True
     data = yaml.safe_load(p.read_text())
     ip = next(c for c in data["components"] if c["id"] == "interposer")
@@ -680,7 +772,7 @@ def test_update_chiplet_missing_outline_warns_loudly(tmp_path, capsys):
     top.shapes(ly.layer(134, 0)).insert(db.DBox(0.0, 0.0, 3000.0, 1000.0))
     ly.write(str(gds))
     p = tmp_path / "d.chiplet"
-    p.write_text(MIXED_CHIPLET)
+    p.write_text(INTERPOSER_ONLY_CHIPLET)
     assert h.update_chiplet_file(str(p), str(gds)) is True
     err = capsys.readouterr().err
     assert "prBoundary 235/0 outline not found" in err
@@ -702,7 +794,7 @@ def test_update_chiplet_missing_outline_flags_legacy_189(tmp_path, capsys):
     top.shapes(ly.layer(189, 0)).insert(db.DBox(0.0, 0.0, 2000.0, 1000.0))
     ly.write(str(gds))
     p = tmp_path / "d.chiplet"
-    p.write_text(MIXED_CHIPLET)
+    p.write_text(INTERPOSER_ONLY_CHIPLET)
     assert h.update_chiplet_file(str(p), str(gds)) is True
     err = capsys.readouterr().err
     assert "prBoundary 235/0 outline not found" in err

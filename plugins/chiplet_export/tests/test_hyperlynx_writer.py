@@ -28,7 +28,8 @@ from pathlib import Path
 
 import pytest
 
-pcbnew = pytest.importorskip("pcbnew")
+pcbnew = pytest.importorskip(
+    "pcbnew", reason="needs pcbnew (KiCad Python)")
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT.parent) not in sys.path:
@@ -68,7 +69,8 @@ def _has_closed_outline(board_path):
     The hyperlynx writer (Python and C++) requires this; otherwise
     GetBoardPolygonOutlines returns False and the exporter aborts.
     """
-    pcbnew = pytest.importorskip("pcbnew")
+    pcbnew = pytest.importorskip(
+        "pcbnew", reason="needs pcbnew (KiCad Python)")
     try:
         board = pcbnew.LoadBoard(board_path)
     except Exception:
@@ -192,3 +194,39 @@ def test_net_blocks_well_formed(hyp_text):
         "Unbalanced NET block braces: %d open vs %d close" % (
             open_blocks, close_blocks,
         )
+
+
+@pytest.mark.parametrize("sweep", [90.0, -90.0, 270.0, -270.0])
+def test_an_arc_record_is_counter_clockwise_in_the_file(sweep):
+    """The writer swaps the ends of an arc KiCad calls counter-clockwise and
+    negates Y, so the record runs counter-clockwise from X1,Y1 to X2,Y2, the
+    convention hyp_to_gds reads a sweep over 180 degrees by. Checked against
+    KiCad's own PCB_ARC, so a change in what IsCCW means shows up here and
+    not as a curve drawn on the wrong side of its centre."""
+    import io
+    import math
+
+    from chiplet_export.writers.hyperlynx_writer import _HyperlynxExporter
+
+    board = pcbnew.BOARD()
+    arc = pcbnew.PCB_ARC(board)
+    arc.SetLayer(pcbnew.F_Cu)
+    arc.SetWidth(pcbnew.FromMM(0.004))
+    centre, r = (1_000_000, 2_000_000), 50_000  # nm, KiCad's Y-down frame
+
+    def at(deg):
+        a = math.radians(deg)
+        return pcbnew.VECTOR2I(int(round(centre[0] + r * math.cos(a))),
+                               int(round(centre[1] + r * math.sin(a))))
+
+    arc.SetStart(at(20.0))
+    arc.SetMid(at(20.0 + sweep / 2.0))
+    arc.SetEnd(at(20.0 + sweep))
+    exporter = _HyperlynxExporter(board, None)
+    exporter.f = io.StringIO()
+    exporter._write_arc(arc)
+    m = re.search(r"X1=(\S+) Y1=(\S+) X2=(\S+) Y2=(\S+) XC=(\S+) YC=(\S+)",
+                  exporter.f.getvalue())
+    x1, y1, x2, y2, xc, yc = (float(v) for v in m.groups())
+    ccw = (math.atan2(y2 - yc, x2 - xc) - math.atan2(y1 - yc, x1 - xc)) % (2 * math.pi)
+    assert math.degrees(ccw) == pytest.approx(abs(sweep), abs=0.01)

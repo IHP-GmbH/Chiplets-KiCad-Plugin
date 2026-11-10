@@ -29,6 +29,8 @@ import hyp_to_gds as h  # noqa: E402
 # module when no PDK resolves (bare CI runner) instead of exiting 1 inside
 # the worker; the adk-tools gate has the PDK baked and runs it for real.
 LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", h._find_default_lyp()))
+# Every case draws with the interposer PDK's .lyp, a sibling tree.
+pytestmark = pytest.mark.needs_sibling_sources
 
 
 @pytest.fixture(scope="session", autouse=True)

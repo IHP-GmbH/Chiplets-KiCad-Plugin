@@ -41,6 +41,8 @@ import hyp_to_gds as _h  # noqa: E402
 from hyp_to_gds import GDSGenerator, LayerMap, MANUFACTURING_GRID_NM  # noqa: E402
 
 LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", _h._find_default_lyp()))
+# Every case draws with the interposer PDK's .lyp, a sibling tree.
+pytestmark = pytest.mark.needs_sibling_sources
 
 WIDTH_UM = 4.0
 DIRECTIONS = [(1, 0), (1, 1), (0, 1), (-1, 1),
@@ -247,17 +249,25 @@ def test_reversal_keeps_the_square(gen):
     assert _is_square_at(patch, p, half)
 
 
-def test_segment_off_the_45_grid_keeps_the_square(gen):
+def test_segment_off_the_45_grid_lands_on_the_quads_own_corners(gen):
     """A run that is neither orthogonal nor exactly diagonal only gets an
-    approximated flank, so a cut along that flank would land on a line the
-    quad does not actually have."""
+    approximated flank, so a cut along an ideal flank would land on a line the
+    quad does not actually have. The patch is built from the quads' own
+    corners instead, and it no longer keeps the square, whose corner stood
+    past the flank (test_trace_joins.py measures that)."""
     a = db.Point(0, 0)
     p = db.Point(_um(gen, 100.0), 0)
     b = db.Point(_um(gen, 130.0), _um(gen, 50.0))        # 30 degrees, not 45
     half = _um(gen, WIDTH_UM / 2.0)
     diag = int(math.ceil(half / math.sqrt(2) / gen.grid_dbu)) * gen.grid_dbu
 
-    assert _is_square_at(gen._corner_patch(a, p, b, half, diag), p, half)
+    patch = gen._corner_patch(a, p, b, half, diag)
+    assert not _is_square_at(patch, p, half)
+    corners = set((q.x, q.y) for q in patch.each_point_hull())
+    for d in ((p.x - a.x, p.y - a.y), (b.x - p.x, b.y - p.y)):
+        ox, oy = gen._quad_offset(d[0], d[1], half, diag)
+        # The outer flank's corner of each quad is a corner of the patch.
+        assert {(p.x + ox, p.y + oy), (p.x - ox, p.y - oy)} & corners
 
 
 def test_collinear_vertex_keeps_the_square(gen):

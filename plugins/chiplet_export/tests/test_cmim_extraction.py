@@ -15,7 +15,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-pcbnew = pytest.importorskip("pcbnew")
+pcbnew = pytest.importorskip(
+    "pcbnew", reason="needs pcbnew (KiCad Python)")
 
 from hyp_to_gds import _cmim_length_um, load_cmim_devices  # noqa: E402
 

@@ -21,6 +21,8 @@ from hyp_to_gds import (GDSGenerator, LayerMap,  # noqa: E402
 import os  # noqa: E402
 import hyp_to_gds as _h  # noqa: E402
 LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", _h._find_default_lyp()))
+# Every case draws with the interposer PDK's .lyp, a sibling tree.
+pytestmark = pytest.mark.needs_sibling_sources
 TM2_LAYER = (134, 0)
 
 
@@ -171,7 +173,7 @@ def test_update_chiplet_file_injects_io_pads(tmp_path):
     j1 = next(p for p in pads if p["id"] == "J1")
     assert j1["io_class"] == "wire_bond"
     assert j1["net"] == "VDD_EXT"
-    # Re-anchored to the GDS-bbox-corner frame (coord_frame_contract 4.2):
+    # Re-anchored to the GDS-bbox-corner frame (coord_frame_contract section 1):
     # input (100, 200) minus bbox lower-left (-500, -500).
     assert j1["position"] == {"x": 600.0, "y": 700.0}
     assert j1["size"] == {"x": 100.0, "y": 100.0}
@@ -182,9 +184,9 @@ def test_update_chiplet_file_injects_io_pads(tmp_path):
     assert interposer["layout"] == "interposer.gds"
 
 
-def test_update_chiplet_layout_ref_relative_only_when_colocated(tmp_path):
-    """GDS outside the .chiplet's tree keeps an absolute layout path
-    (machine-local by default); inside it, the reference is relative."""
+def test_update_chiplet_layout_ref_is_relative_to_the_chiplet(tmp_path):
+    """GDS beside the .chiplet's tree, sharing its root, is named with '..';
+    inside it, by a plain relative path."""
     chiplet_dir = tmp_path / "proj"
     chiplet_dir.mkdir()
     chiplet_path = chiplet_dir / "demo.chiplet"
@@ -213,7 +215,7 @@ def test_update_chiplet_layout_ref_relative_only_when_colocated(tmp_path):
         data = yaml.safe_load(f)
     interposer = next(c for c in data["components"]
                       if c["id"] == "interposer")
-    assert interposer["layout"] == str(outside_gds.resolve())
+    assert interposer["layout"] == str(Path("..") / "elsewhere.gds")
 
     subdir_gds = chiplet_dir / "out" / "inside.gds"
     subdir_gds.parent.mkdir()

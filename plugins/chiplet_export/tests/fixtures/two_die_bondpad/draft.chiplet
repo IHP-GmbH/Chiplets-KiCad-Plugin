@@ -1,0 +1,103 @@
+format_version: '1.0'
+assembly:
+  name: cf_two_die_bondpad.draft
+  units: um
+interposer:
+  adapter: intm4tm2
+technologies: null
+connection_stacks:
+  cupillar_opt1:
+    description: PacTech Cu Pillar, Table 6.1 Option 1 (35um opening)
+    layers:
+    - name: CuPillar
+      material: Cu
+      height: 28.0
+      diameter: 44.0
+    - name: SnAgCap
+      material: SnAg
+      height: 16.0
+      diameter: 44.0
+  cupillar_opt2:
+    description: PacTech Cu Pillar, Table 6.1 Option 2 (40um opening)
+    layers:
+    - name: CuPillar
+      material: Cu
+      height: 32.0
+      diameter: 49.0
+    - name: SnAgCap
+      material: SnAg
+      height: 16.0
+      diameter: 49.0
+  cupillar_opt3:
+    description: PacTech Cu Pillar, Table 6.1 Option 3 (45um opening)
+    layers:
+    - name: CuPillar
+      material: Cu
+      height: 42.0
+      diameter: 54.0
+    - name: SnAgCap
+      material: SnAg
+      height: 19.0
+      diameter: 54.0
+  sbump_sac305:
+    description: PacTech SAC305 solder bump (80um ball)
+    layers:
+    - name: SolderBall
+      material: SAC305
+      height: 80.0
+      diameter: 80.0
+components:
+- id: interposer
+  type: interposer
+  anchor: bbox_center
+  layout: layout/cf_two_die_bondpad.draft_interposer.gds
+  top_cell: INTERPOSER
+  dimensions:
+    width: 2000.0
+    height: 3200.0
+    thickness: 1600.0
+  position:
+    x: 1000.0
+    y: 1600.0
+    z: 0.0
+  attachment_surface_z: 10.8103
+- id: U1
+  type: die
+  anchor: gds_origin
+  connection: cupillar_opt1
+  layout: ../../../../dies/CF_DRIVER_BONDPAD/layout.gds
+  orientation: flip_chip
+  dimensions:
+    width: 1000.0
+    height: 1000.0
+    thickness: 750.0
+  position:
+    x: 1500.0
+    y: 1700.0
+    z: 54.8103
+  rotation:
+    z: 0.0
+  top_cell: CF_DRIVER_BONDPAD
+- id: U2
+  type: die
+  anchor: gds_origin
+  connection: cupillar_opt1
+  layout: ../../../../dies/CF_ECHO_BONDPAD/layout.gds
+  orientation: flip_chip
+  dimensions:
+    width: 1000.0
+    height: 1000.0
+    thickness: 750.0
+  position:
+    x: 1500.0
+    y: 500.0
+    z: 54.8103
+  rotation:
+    z: 0.0
+  top_cell: CF_ECHO_BONDPAD
+interconnect:
+  adapter: ihp_cupillar
+  technology:
+    description: Chiplet attachment (PacTech (IHP))
+    layer_properties: ${INTERCONNECT_PDK_ROOT}/libs.tech/klayout/tech/interconnect.lyp
+    dbu: 0.001

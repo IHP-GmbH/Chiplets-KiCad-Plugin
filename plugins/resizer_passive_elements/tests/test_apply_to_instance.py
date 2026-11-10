@@ -15,7 +15,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-pcbnew = pytest.importorskip("pcbnew")
+pcbnew = pytest.importorskip(
+    "pcbnew", reason="needs pcbnew (KiCad Python)")
 
 from resizer_passive_elements import apply_resize, paths  # noqa: E402
 

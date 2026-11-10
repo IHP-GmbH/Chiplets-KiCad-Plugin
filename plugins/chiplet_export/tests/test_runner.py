@@ -65,6 +65,39 @@ def test_cancel_terminates():
     assert result.exit_code != 0
 
 
+def test_an_interrupt_stops_the_child_before_it_propagates(monkeypatch):
+    """A KeyboardInterrupt can land anywhere in the wait loop; this one lands
+    at the cancel check. It must reach the caller, but not with the child
+    still running, or the caller's clean-up races a process that is still
+    writing its outputs."""
+    started = []
+    real_popen = runner.subprocess.Popen
+
+    def popen(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        started.append(proc)
+        return proc
+
+    class InterruptedWait:
+        def is_set(self):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner.subprocess, "Popen", popen)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            runner.run_async(
+                [PY, "-c", "import time\nwhile True:\n    time.sleep(0.1)"],
+                cancel_event=InterruptedWait(),
+            )
+        assert started[0].poll() is not None, (
+            "the interrupt propagated with the child still running")
+    finally:
+        for proc in started:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+
 def test_callbacks_invoked_per_line():
     captured = []
     code = (

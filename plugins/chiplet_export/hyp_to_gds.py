@@ -8,19 +8,35 @@ Extracts trace segments from HYP and generates polygons on appropriate PDK layer
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import warnings
-import xml.etree.ElementTree as ET
+from collections import Counter
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
+from urllib.parse import quote
+
+try:
+    from .carrier_profile import resolve_carrier_profile
+except ImportError:  # Standalone worker script, outside the GUI package.
+    from carrier_profile import resolve_carrier_profile
+
+try:
+    from . import layer_map as _layer_map
+    from .output_files import create_output_temp
+except ImportError:  # Standalone worker script.
+    import layer_map as _layer_map
+    from output_files import create_output_temp
 
 try:
     import klayout.db as db
@@ -28,6 +44,24 @@ except ImportError:
     print("Error: KLayout Python module not found.", file=sys.stderr)
     print("Please install with: pip install klayout", file=sys.stderr)
     sys.exit(1)
+
+# After the klayout guard, since this module imports klayout.db itself.
+try:
+    from . import die_outline_gds as _die_outline
+except ImportError:  # Standalone worker script.
+    import die_outline_gds as _die_outline
+DieGdsError = _die_outline.DieGdsError
+DieOutlineRefused = _die_outline.DieOutlineRefused
+try:
+    from . import die_layouts as _die_layouts
+except ImportError:  # Standalone worker script.
+    import die_layouts as _die_layouts
+DieLayoutRefused = _die_layouts.DieLayoutRefused
+try:
+    from . import technology_overlay as _technology_overlay
+except ImportError:  # Standalone worker script.
+    import technology_overlay as _technology_overlay
+TechnologyRefused = _technology_overlay.TechnologyRefused
 
 
 def _vendored_cfio():
@@ -182,6 +216,140 @@ def chiplet_top_level_key_parity_error(chiplet_path: str) -> Optional[str]:
 MANUFACTURING_GRID_NM = 5
 
 
+class SealRingRefused(Exception):
+    """The seal ring was asked for and cannot be drawn, or cannot be kept.
+
+    Raised before the GDS is written, never after: an interposer that was
+    asked for a ring and ships without one, or with metal crowding it, is not
+    a result to hand on. The message is the reason, one line per cause.
+    """
+
+
+class TrackEndRefused(Exception):
+    """Two nets' traces touch in the GDS, in practice at a square track end.
+
+    Raised before the GDS is written. The message is the reason, then one line
+    per place, then the advice.
+    """
+
+
+class IntM4TM2Refused(RuntimeError):
+    """An IntM4TM2 PCell would run on a cni API that is not the interposer's.
+
+    A RuntimeError, so the pad and pillar paths stop the export the way any
+    other PCell failure does; the seal ring and CMIM paths turn it into
+    their own refusal.
+    """
+
+
+# Both PCell libraries run on the pycell4klayout-api, and each PDK ships its
+# own copy under the same top-level names. Python keeps one module per name,
+# so the PDK imported first would serve both, and PCellWrapper keeps its Tcl
+# interpreter, callback map and tech at class level. SG13G2 is imported here
+# only because IntM4TM2 ships no via_stack for the interposer vias; once the
+# interposer PDK has one, SG13G2 is no longer loaded and this scope goes away.
+_CNI_PACKAGES = ("cni", "pypreprocessor")
+_intm4tm2_modules: Dict[str, object] = {}
+_intm4tm2_scope_depth = 0
+
+
+def _cni_module(name: str, module: object) -> bool:
+    """True for a sys.modules entry both PDKs register under the same name:
+    the cni API, its preprocessor, and a preprocessed PCell module, which
+    either library registers top-level as '<pcell>_code'."""
+    if name.split(".", 1)[0] in _CNI_PACKAGES:
+        return True
+    return ("." not in name and name.endswith("_code")
+            and str(getattr(module, "__file__", "")).endswith("_pre.py"))
+
+
+def _cni_portion(entry: str) -> bool:
+    """True when this sys.path entry holds a namespace portion of a cni
+    package. Portions merge across sys.path, so a foreign one is not shadowed
+    by putting the interposer's first; it has to leave the path."""
+    for name in _CNI_PACKAGES:
+        package = os.path.join(entry or os.curdir, name)
+        if (os.path.isdir(package)
+                and not os.path.isfile(os.path.join(package, "__init__.py"))):
+            return True
+    return False
+
+
+@contextlib.contextmanager
+def _intm4tm2_scope():
+    """Run the enclosed IntM4TM2 PCell work on the interposer PDK's cni.
+
+    On entry the cni modules already loaded (SG13G2's) are set aside, the
+    interposer's python dirs go first on sys.path with every other cni
+    portion removed, and the interposer's own cni modules from an earlier
+    entry come back. On exit, refusals included, it is the reverse, and
+    sys.path is restored exactly. Re-entrant: a nested scope is a no-op.
+    """
+    global _intm4tm2_scope_depth
+    if _intm4tm2_scope_depth:
+        yield
+        return
+    _intm4tm2_scope_depth = 1
+    saved_path = list(sys.path)
+    foreign = {}
+    try:
+        for name, module in list(sys.modules.items()):
+            if _cni_module(name, module):
+                foreign[name] = sys.modules.pop(name)
+        root = _discover_path_var("INTERPOSER_PDK_ROOT")
+        if root:
+            python_dir = Path(root) / "libs.tech" / "klayout" / "python"
+            api_dir = python_dir / "pycell4klayout-api" / "source" / "python"
+            ours = [str(python_dir), str(api_dir)]
+            sys.path[:] = ours + [entry for entry in saved_path
+                                  if entry not in ours
+                                  and not _cni_portion(entry)]
+        sys.modules.update(_intm4tm2_modules)
+        yield
+    finally:
+        for name, module in list(sys.modules.items()):
+            if _cni_module(name, module):
+                _intm4tm2_modules[name] = sys.modules.pop(name)
+        sys.modules.update(foreign)
+        sys.path[:] = saved_path
+        _intm4tm2_scope_depth = 0
+
+
+def _check_intm4tm2_cni(pcell: str, library: str = "IntM4TM2") -> None:
+    """Refuse an IntM4TM2 PCell whose library runs on a foreign cni.
+
+    Called inside _intm4tm2_scope, once the library is registered and before
+    `pcell` is created. The declaration must be an instance of the
+    PCellWrapper of the cni installed in the scope, loaded from the
+    interposer PDK. Its file comes from the code object, since both copies
+    are named cni.dlo. The usual cause is a library registered earlier in
+    the process, outside the scope. Only cni declarations are checked.
+    """
+    lib = db.Library.library_by_name(library, "intm4tm2")
+    decl = lib.layout().pcell_declaration(pcell) if lib is not None else None
+    cls = type(decl)
+    if (cls.__module__, cls.__name__) != ("cni.dlo", "PCellWrapper"):
+        return
+    code = getattr(vars(cls).get("produce"), "__code__", None)
+    declared = code.co_filename if code is not None else None
+    installed = sys.modules.get("cni.dlo")
+    root = _discover_path_var("INTERPOSER_PDK_ROOT")
+    if root and declared and getattr(installed, "PCellWrapper", None) is cls:
+        root = os.path.realpath(root)
+        try:
+            common = os.path.commonpath([root, os.path.realpath(declared)])
+        except ValueError:  # different drives
+            common = None
+        if common == root:
+            return
+    raise IntM4TM2Refused(
+        "the IntM4TM2 %s PCell would run on a cni API from outside the "
+        "interposer PDK at %s: its library was registered with %s, and the "
+        "cni in use is %s. Something registered IntM4TM2 before this export "
+        "did; run the export in a fresh process."
+        % (pcell, root, declared, getattr(installed, "__file__", None)))
+
+
 @dataclass
 class TraceSegment:
     """Represents a single trace segment from the HYP file."""
@@ -207,6 +375,88 @@ class TraceArc:
     radius: float  # inches
     width: float  # inches
     layer: str
+
+
+@dataclass
+class ChainedTrace:
+    """One chained centreline of a net on a layer, as the exporter draws it.
+
+    ``free`` says which of its two ends get the w/2 square end; see
+    free_ends.
+    """
+    layer: str
+    net: str
+    width_um: float
+    points: List[Tuple[float, float]]  # micrometres
+    free: Tuple[bool, bool] = (True, True)
+
+
+def _on_segment(p: Tuple[int, int], a: Tuple[int, int],
+                b: Tuple[int, int]) -> bool:
+    """Whether p is within one unit of the segment a-b, its ends included.
+
+    Integer coordinates; |cross| / length is the distance off the line and
+    dot / length the position along it.
+    """
+    ux, uy = b[0] - a[0], b[1] - a[1]
+    vx, vy = p[0] - a[0], p[1] - a[1]
+    len2 = ux * ux + uy * uy
+    if len2 == 0:
+        return abs(vx) <= 1 and abs(vy) <= 1
+    cross, dot = ux * vy - uy * vx, ux * vx + uy * vy
+    reach = math.isqrt(len2)
+    return cross * cross <= len2 and -reach <= dot <= len2 + reach
+
+
+def free_ends(traces: List[ChainedTrace],
+              dbu: float) -> List[Tuple[bool, bool]]:
+    """Which ends of each trace of one net on one layer are free.
+
+    An end is not free when another of these traces runs through it: one
+    wider, or one as wide that passes the end point rather than ending on
+    it. That trace's centreline runs through the point at least as wide, so
+    the board's round cap there is already its copper, and the end is drawn
+    as it is, without the w/2 square end. Extending it would only push square
+    copper out of the corner it lands in, and since two traces snapped from
+    different starts can reach the same board point a grid step apart, the
+    edges of that copper would cross the other trace's flank off the grid.
+
+    Two ends of the same width meeting each other stay free, as do the two
+    ends of a closed loop: nothing passes through those points, so the
+    square ends are what covers them.
+
+    "Runs through" is judged on the board's coordinates, rounded to ``dbu``,
+    within one unit, so it does not depend on how either trace was snapped.
+    Cost: each end is tested against every trace of its net whose bounding
+    box holds it, so the work grows with the square of the traces per net
+    and layer when they overlap; a few thousand traces take under a second.
+    """
+    lines = [[(int(round(x / dbu)), int(round(y / dbu))) for x, y in t.points]
+             for t in traces]
+    boxes = [(min(x for x, _ in line) - 1, min(y for _, y in line) - 1,
+              max(x for x, _ in line) + 1, max(y for _, y in line) + 1)
+             for line in lines]
+
+    def near(p, q) -> bool:
+        return abs(p[0] - q[0]) <= 1 and abs(p[1] - q[1]) <= 1
+
+    def covered(i: int, end: int) -> bool:
+        p, width = lines[i][end], traces[i].width_um
+        for j, line in enumerate(lines):
+            if j == i or traces[j].width_um < width:
+                continue
+            x0, y0, x1, y1 = boxes[j]
+            if not (x0 <= p[0] <= x1 and y0 <= p[1] <= y1):
+                continue
+            if traces[j].width_um == width and (near(p, line[0])
+                                                or near(p, line[-1])):
+                continue
+            if any(_on_segment(p, a, b) for a, b in zip(line, line[1:])):
+                return True
+        return False
+
+    return [(not covered(i, 0), not covered(i, -1))
+            for i in range(len(traces))]
 
 
 @dataclass
@@ -257,85 +507,15 @@ class Device:
     rotation: float = 0.0
 
 
-class LayerMap:
-    """Manages PDK layer definitions from KLayout LYP file."""
+class LayerMap(_layer_map.LayerMap):
+    """Worker error reporting around the shared, stdlib-only LYP reader."""
 
     def __init__(self, lyp_path: str):
-        self.layers: Dict[str, Tuple[int, int]] = {}
-        self._load_lyp(lyp_path)
-
-    def _load_lyp(self, lyp_path: str) -> None:
-        """Load layer definitions from KLayout LYP (XML) file.
-
-        LYP format per layer:
-            <properties>
-                <name>Metal4.drawing</name>
-                <source>50/0</source>   (or "50/0@1" with cell view suffix)
-            </properties>
-        """
         try:
-            tree = ET.parse(lyp_path)
-            root = tree.getroot()
-
-            for props in root.findall('.//properties'):
-                name_elem = props.find('name')
-                source_elem = props.find('source')
-                if name_elem is None or source_elem is None:
-                    continue
-                if name_elem.text is None or source_elem.text is None:
-                    continue
-
-                full_name = name_elem.text.strip()
-                source = source_elem.text.strip()
-
-                # Strip @N cell view suffix (e.g. "50/0@1" -> "50/0")
-                if '@' in source:
-                    source = source.split('@')[0]
-
-                # Parse layer/datatype from source
-                try:
-                    parts = source.split('/')
-                    layer_num = int(parts[0])
-                    datatype = int(parts[1]) if len(parts) > 1 else 0
-                except (ValueError, IndexError):
-                    continue
-
-                # Split "Name.purpose" into name and purpose
-                if '.' in full_name:
-                    name, purpose = full_name.split('.', 1)
-                else:
-                    name = full_name
-                    purpose = "drawing"
-
-                # Store with "name:purpose" key
-                key = f"{name}:{purpose}"
-                self.layers[key] = (layer_num, datatype)
-
-                # Also store drawing layers with just name for convenience
-                if purpose == "drawing":
-                    self.layers[name] = (layer_num, datatype)
-
-        except FileNotFoundError:
-            print(f"Error: Could not find {lyp_path}", file=sys.stderr)
+            super().__init__(lyp_path)
+        except _layer_map.LayerMapError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
-        except ET.ParseError as e:
-            print(f"Error parsing LYP file: {e}", file=sys.stderr)
-            sys.exit(1)
-        except Exception as e:
-            print(f"Error reading layer table: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    def get_layer(self, name: str, purpose: str = "drawing") -> Tuple[int, int]:
-        """Get GDS layer and datatype for a given layer name."""
-        key = f"{name}:{purpose}"
-        if key in self.layers:
-            return self.layers[key]
-        if name in self.layers:
-            return self.layers[name]
-        raise KeyError(f"Layer '{name}' with purpose '{purpose}' not found in PDK")
-
-    def __repr__(self) -> str:
-        return f"LayerMap({len(self.layers)} layers from LYP)"
 
 
 class HYPParser:
@@ -661,21 +841,89 @@ def _si_num(value) -> float:
         return float(text[:-1]) * _SI_SUFFIX[suffix]
     return float(text)
 
-# Interposer die-attachment surface z (a.k.a. BEOL top), in micrometers: the
-# plane dies mount on, in the interposer's local frame. For SG13G2 it is the top
-# of TopMetal2 above the silicon surface -- 10.83 (TM2 bottom) + 3.00 (TM2
-# thickness) = 13.83, the sum of the SG13G2 BEOL band thicknesses (process spec
-# Rev 1.2, Fig 1.1.1 / Sec 2.16). It is a *process* constant, not a per-design
-# tunable, and is a distinct quantity from the interposer's physical body
-# thickness (dimensions.thickness, hundreds of um), which comes from the KiCad
-# board stackup. The same value is declared across the ecosystem and MUST stay
-# in sync with it:
-#   - chiplet-studio/configs/stackups/intm4tm2.yaml  (attachment_surface_z: 13.83)
-#   - the interconnect PDK stackup fragments, which rebase onto it
-#   - chiplet-spec coord_frame_contract.md sections 3.2 / 3.4
-# If the interposer PDK ever ships a machine-readable BEOL-top descriptor under
-# INTERPOSER_PDK_ROOT, that is the seam to source this from (falling back here).
-SG13G2_ATTACHMENT_SURFACE_Z_UM = 13.83
+# The interposer's die-attachment surface (BEOL top), in micrometers: the
+# plane dies mount on, in the interposer's local frame. It is the interposer
+# PDK's own value, read from its stack descriptor on every finalize and never
+# written from memory: a run that cannot read it is refused
+# (AttachFrameRefused). It is a distinct quantity from the interposer's
+# physical body thickness (dimensions.thickness), which comes from the KiCad
+# board stackup.
+ATTACH_FRAME_DESCRIPTOR = ("libs.tech", "intm4tm2_stack.json")
+ATTACH_FRAME_KEY = "beol.attachment_surface_z_um"
+
+
+class AttachFrameRefused(Exception):
+    """The interposer PDK's mount plane cannot be read; nothing is written.
+
+    Not a ``ValueError``, for the reason ``DieOutlineRefused`` gives. The
+    message names INTERPOSER_PDK_ROOT and the key.
+    """
+
+
+def _as_written(value) -> Decimal:
+    """A number as its text writes it: an int, or a float's shortest repr."""
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return Decimal(value)
+    return Decimal(repr(float(value)))
+
+
+@dataclass(frozen=True)
+class AttachFrame:
+    """The mount plane, exactly as the descriptor writes it."""
+    z_um: Decimal
+    source: str     # the descriptor read, or "caller"
+
+    def at(self, *heights) -> float:
+        """A z on this plane: the exact decimal sum of the plane and each
+        height as written, emitted as the shortest text that reads back.
+
+        10.8103 + 7.77777 is 18.58807, never the 18.588070000000002 float
+        addition gives, and a height of 18.00005 gives 28.81035: nothing is
+        rounded away.
+        """
+        return float(self.z_um + sum((_as_written(h) for h in heights),
+                                     Decimal(0)))
+
+    @classmethod
+    def given(cls, z_um) -> 'AttachFrame':
+        """A plane a direct caller passes as a number."""
+        return cls(_as_written(z_um), "caller")
+
+
+def read_attach_frame() -> AttachFrame:
+    """The mount plane from the interposer PDK; AttachFrameRefused otherwise.
+
+    The root comes from INTERPOSER_PDK_ROOT through the usual discovery
+    (environment, then a sibling checkout). There is no fallback value.
+    """
+    where = "%s in %s" % (ATTACH_FRAME_KEY, "/".join(ATTACH_FRAME_DESCRIPTOR))
+    root = _discover_path_var("INTERPOSER_PDK_ROOT")
+    if not root:
+        raise AttachFrameRefused(
+            "the interposer PDK was not found (set INTERPOSER_PDK_ROOT to an "
+            "OpenIntM4TM2 checkout); the mount plane is its %s and is not "
+            "written from memory" % where)
+    path = os.path.join(root, *ATTACH_FRAME_DESCRIPTOR)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle, parse_float=Decimal)
+    except (OSError, ValueError) as exc:
+        raise AttachFrameRefused(
+            "cannot read %s under INTERPOSER_PDK_ROOT=%s: %s"
+            % (where, root, exc)) from None
+    beol = data.get("beol") if isinstance(data, dict) else None
+    value = beol.get("attachment_surface_z_um") if isinstance(beol, dict) \
+        else None
+    # NaN and Infinity load as floats, not Decimal, so they fail here too.
+    number = ((isinstance(value, int) and not isinstance(value, bool))
+              or (isinstance(value, Decimal) and value.is_finite()))
+    if not number:
+        raise AttachFrameRefused(
+            "%s has no %s that is a number of um (found %r), under "
+            "INTERPOSER_PDK_ROOT=%s" % (path, ATTACH_FRAME_KEY, value, root))
+    return AttachFrame(_as_written(value), path)
 
 
 class GDSGenerator:
@@ -796,6 +1044,8 @@ class GDSGenerator:
         # everything they instantiate. A third-party die is delivered as-is,
         # so the grid pass leaves both its shapes and its placement alone.
         self._foreign_cells: set = set()
+        # Trace copper per (layer, net), filled by add_segments_as_paths.
+        self.trace_copper: Dict[Tuple[str, str], List[db.Polygon]] = {}
         # Trace segments that are neither orthogonal nor 45 degrees; they
         # cannot be drawn legally on this process and the count drives a
         # warning at write() rather than a silent reshaping.
@@ -841,6 +1091,10 @@ class GDSGenerator:
         # plus the count that did land on mapped layers.
         self._unmapped_layers: Dict[str, int] = {}
         self._mapped_trace_elements = 0
+        # (ring cell index, instance Trans) once add_seal_ring drew it, and
+        # whether write() has already cleared the layout against it.
+        self._seal_ring: Optional[Tuple[int, 'db.Trans']] = None
+        self._seal_ring_cleared = False
         self._pcells_available = self._check_pcells_available()
 
     # Subpath from $PDK_ROOT to the KLayout tech of the SG13G2 base PDK
@@ -964,11 +1218,18 @@ class GDSGenerator:
         Discretize an arc into a list of points in micrometers.
         Returns points from (x1,y1) to (x2,y2) along the arc.
 
-        LIMITATION: the .hyp ARC record carries no sweep direction, so this
-        always draws the minor (<=180 degree) arc between the endpoints. A
-        KiCad arc with a sweep greater than 180 degrees is rendered as its
-        complement. Interposer routing is overwhelmingly orthogonal, so this
-        is rare; a warning is emitted at the ambiguous semicircle.
+        The record has no direction flag, but it has a direction: an ARC runs
+        counter-clockwise from (X1,Y1) to (X2,Y2) in file coordinates, the
+        HyperLynx convention. Both writers keep it (export_hyperlynx.cpp and
+        writers/hyperlynx_writer.py swap the ends of an arc KiCad calls
+        counter-clockwise on its Y-down coordinates, then negate Y). So the
+        sweep is the counter-clockwise angle in the file, and it may be more
+        than 180 degrees. Where this reader negates Y on the way in (ENGLISH
+        units) the mirror makes it clockwise in the GDS.
+
+        num_points chords per half turn: an arc up to 180 degrees gets exactly
+        num_points, as it always did, and a longer one proportionally more.
+        The first and last points are the record's own ends.
         """
         x1 = self._to_um(arc.x1)
         y1 = self._to_um_y(arc.y1)
@@ -982,18 +1243,15 @@ class GDSGenerator:
         angle1 = math.atan2(y1 - yc, x1 - xc)
         angle2 = math.atan2(y2 - yc, x2 - xc)
 
-        # Determine arc direction (shortest path -> minor arc).
+        # Counter-clockwise in the file, so clockwise here when Y was negated.
         diff = angle2 - angle1
-        if diff > math.pi:
+        if self._to_um_y(1.0) > 0:
+            if diff < 0:
+                diff += 2 * math.pi
+        elif diff > 0:
             diff -= 2 * math.pi
-        elif diff < -math.pi:
-            diff += 2 * math.pi
-        # At ~180 degrees the minor/major choice is ambiguous from endpoints
-        # alone; flag it so a mis-rendered curved trace is not silent.
-        if abs(abs(diff) - math.pi) < math.radians(2.0):
-            print(f"Warning: arc on {arc.layer} spans ~180 degrees; the .hyp "
-                  f"carries no sweep direction, so the minor arc is drawn and "
-                  f"may not match the source.", file=sys.stderr)
+        if abs(diff) > math.pi:
+            num_points = int(math.ceil(num_points * abs(diff) / math.pi))
 
         # Generate points along the arc
         points = []
@@ -1003,6 +1261,12 @@ class GDSGenerator:
             px = xc + radius * math.cos(angle)
             py = yc + radius * math.sin(angle)
             points.append((px, py))
+        # The ends are the record's, not recomputed from the centre and the
+        # radius: KiCad rounds those to the nanometre, so the computed ends can
+        # miss by a rounding step, and _connect_traces_to_paths, which matches
+        # ends to the nanometre, then splits the trace at the joint.
+        points[0] = (x1, y1)
+        points[-1] = (x2, y2)
 
         return points
 
@@ -1178,10 +1442,101 @@ class GDSGenerator:
             return (self._sgn(dy) * diag, -self._sgn(dx) * diag)
         return None
 
+    def _quad_offset(self, dx: int, dy: int, half: int,
+                     diag: int) -> Tuple[int, int]:
+        """Offset from the centreline to one flank of a run, as its quad uses.
+
+        The sign is whichever the quad happens to take; callers that need a
+        side pick it. A run that is neither orthogonal nor exactly diagonal
+        gets its perpendicular rounded onto the grid.
+        """
+        if dx == 0:
+            return half, 0
+        if dy == 0:
+            return 0, half
+        if abs(dx) == abs(dy):
+            return (-diag if dy > 0 else diag), (diag if dx > 0 else -diag)
+        length = math.hypot(dx, dy)
+        return (self._snap(int(round(-dy * half / length))),
+                self._snap(int(round(dx * half / length))))
+
+    @staticmethod
+    def _convex_hull(points: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        """Convex hull of integer points (monotone chain), counter-clockwise."""
+        pts = sorted(set(points))
+        if len(pts) < 3:
+            return pts
+
+        def cross(o, a, b):
+            return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+        lower: List[Tuple[int, int]] = []
+        for q in pts:
+            while len(lower) >= 2 and cross(lower[-2], lower[-1], q) <= 0:
+                lower.pop()
+            lower.append(q)
+        upper: List[Tuple[int, int]] = []
+        for q in reversed(pts):
+            while len(upper) >= 2 and cross(upper[-2], upper[-1], q) <= 0:
+                upper.pop()
+            upper.append(q)
+        return lower[:-1] + upper[:-1]
+
+    def _any_angle_corner_patch(self, p: db.Point, d1: Tuple[int, int],
+                                d2: Tuple[int, int], cross: int, half: int,
+                                diag: int) -> Optional[db.Polygon]:
+        """The corner patch at a bend with a run off the 45 degree grid.
+
+        The hull of the four quad corners at p and the point where the two
+        outer flanks meet. It closes the wedge the quads leave open, reaches no
+        further than those flanks do (the mitre), and has no acute corner: the
+        corners on the flanks are right angles and the one at the tip is 180
+        degrees less the turn. None when the hull degenerates.
+        """
+        o1 = self._quad_offset(d1[0], d1[1], half, diag)
+        o2 = self._quad_offset(d2[0], d2[1], half, diag)
+
+        def outward(d, o):
+            # Outside of the turn: right of a left turn, left of a right one.
+            side = d[0] * o[1] - d[1] * o[0]
+            return o if (side < 0) == (cross > 0) else (-o[0], -o[1])
+
+        n1, n2 = outward(d1, o1), outward(d2, o2)
+        fa = (p.x + n1[0], p.y + n1[1])
+        fb = (p.x + n2[0], p.y + n2[1])
+        # fa + t*d1 = fb + s*d2
+        t = (((fb[0] - fa[0]) * d2[1] - (fb[1] - fa[1]) * d2[0])
+             / float(d1[0] * d2[1] - d1[1] * d2[0]))
+        tip = (self._snap(int(round(fa[0] + t * d1[0]))),
+               self._snap(int(round(fa[1] + t * d1[1]))))
+        hull = self._convex_hull([
+            (p.x + o1[0], p.y + o1[1]), (p.x - o1[0], p.y - o1[1]),
+            (p.x + o2[0], p.y + o2[1]), (p.x - o2[0], p.y - o2[1]), tip])
+        if len(hull) < 3:
+            return None
+        return db.Polygon([db.Point(x, y) for x, y in hull])
+
     @staticmethod
     def _unit(dx: int, dy: int) -> Tuple[int, int]:
         """Direction of a 0/45/90 run, as components in {-1, 0, 1}."""
         return ((dx > 0) - (dx < 0), (dy > 0) - (dy < 0))
+
+    def _extended(self, end: db.Point, toward: db.Point, half: int,
+                  diag: int) -> db.Point:
+        """``end`` moved half a width away from ``toward``, along their run.
+
+        The move is the run's right-hand flank offset turned a quarter turn
+        forward: half for an orthogonal run, diag on each axis for an exactly
+        diagonal one, so the end stays on the grid and at 45 degrees. Any
+        other run takes the direction scaled to half, then snapped per axis.
+        """
+        dx, dy = end.x - toward.x, end.y - toward.y
+        n = self._right_normal(dx, dy, half, diag)
+        if n is None:
+            length = math.hypot(dx, dy)
+            n = (self._snap(int(round(dy * half / length))),
+                 self._snap(int(round(-dx * half / length))))
+        return db.Point(end.x - n[1], end.y + n[0])
 
     def _inner_of(self, point: Tuple[int, int], direction: Tuple[int, int],
                   inside: db.Point, reach: int) -> db.Polygon:
@@ -1233,11 +1588,17 @@ class GDSGenerator:
           from the 45 degree chamfer tried earlier, which cut across the
           flanks and put merged-level vertices off the 5 nm grid.
 
+        A run that is neither orthogonal nor exactly diagonal (any-angle
+        routing, every vertex of a discretized arc) gets the hull patch of
+        _any_angle_corner_patch instead. The square used to close those too,
+        and turned with the trace a corner of it stands up to
+        (sqrt(2) - 1) * half past the flank: 0.83 um on a 4 um trace, every
+        few degrees along a curve.
+
         Falls back to the plain square, which is always safe, when the shape
         cannot be built exactly: a turn sharper than 90 degrees (where the
-        flanks meet in a spike far outside the trace), a run that is neither
-        orthogonal nor exactly diagonal so its flank is only approximated, or
-        any result that is off-grid, not 0/45/90, or not a single piece.
+        flanks meet in a spike far outside the trace), or any result that is
+        off-grid, not 0/45/90, or not a single piece.
         """
         square = db.Polygon(db.Box(p.x - half, p.y - half,
                                    p.x + half, p.y + half))
@@ -1249,7 +1610,8 @@ class GDSGenerator:
         n1 = self._right_normal(d1[0], d1[1], half, diag)
         n2 = self._right_normal(d2[0], d2[1], half, diag)
         if n1 is None or n2 is None:
-            return square
+            patch = self._any_angle_corner_patch(p, d1, d2, cross, half, diag)
+            return square if patch is None else patch
         if cross < 0:
             # The open wedge is on the outside of the turn: right of a left
             # turn, left of a right one.
@@ -1290,11 +1652,15 @@ class GDSGenerator:
         return patch
 
     def _trace_polygons(self, points: List[Tuple[float, float]],
-                        width_um: float) -> List[db.Polygon]:
+                        width_um: float, *,
+                        free: Tuple[bool, bool] = (True, True)
+                        ) -> List[db.Polygon]:
         """Fracture a trace centreline into on-grid polygons.
 
-        One quad per segment plus one patch per interior corner. The union is
-        the copper a mitered path would have drawn; the difference is that
+        One quad per segment plus one patch per interior corner, with each
+        free end extended by w/2 (square ends; see free_ends for the ends
+        that are not free). The union is the copper a mitered
+        path with square ends would have drawn; the difference is that
         every drawn vertex is on the manufacturing grid and every drawn edge is
         0, 45 or 90 degrees. Snapping the vertices of a single path outline
         cannot give both: the perpendicular offset of a diagonal wire is
@@ -1343,24 +1709,28 @@ class GDSGenerator:
         g = max(1, self.grid_dbu)
         diag = int(math.ceil(half / math.sqrt(2.0) / g)) * g
 
+        # Square ends: each free terminal vertex moves out by half along its
+        # run, so each end carries w/2 of copper past its endpoint, as the
+        # board (KiCad's round cap) and a reserved rectangle put it. Only the
+        # first and last quad grow; the corner patches are drawn from the
+        # interior vertices as before. Both moves read the original points,
+        # so a two-point trace grows from its own ends.
+        first, last = pts[0], pts[-1]
+        if free[0]:
+            first = self._extended(pts[0], pts[1], half, diag)
+        if free[1]:
+            last = self._extended(pts[-1], pts[-2], half, diag)
+        pts[0], pts[-1] = first, last
+
         polys: List[db.Polygon] = []
         for a, b in zip(pts, pts[1:]):
             dx, dy = b.x - a.x, b.y - a.y
-            if dx == 0:
-                ox, oy = half, 0
-            elif dy == 0:
-                ox, oy = 0, half
-            elif abs(dx) == abs(dy):
-                ox = -diag if dy > 0 else diag
-                oy = diag if dx > 0 else -diag
-            else:
+            ox, oy = self._quad_offset(dx, dy, half, diag)
+            if dx and dy and abs(dx) != abs(dy):
                 # Neither orthogonal nor 45: a discretized arc, or a board
                 # drawn off the 45 grid. The angle rule will report it; draw
                 # the nearest on-grid quad rather than silently reshaping the
                 # copper to make a violation disappear.
-                length = math.hypot(dx, dy)
-                ox = self._snap(int(round(-dy * half / length)))
-                oy = self._snap(int(round(dx * half / length)))
                 self._odd_angle_segments += 1
             polys.append(db.Polygon([
                 db.Point(a.x + ox, a.y + oy),
@@ -1375,40 +1745,47 @@ class GDSGenerator:
             polys.append(self._corner_patch(a, p, b, half, diag))
         return polys
 
-    def add_path(self, points: List[Tuple[float, float]], width_um: float, layer: str) -> bool:
+    def add_path(self, points: List[Tuple[float, float]], width_um: float,
+                 layer: str, *, free: Tuple[bool, bool] = (True, True)
+                 ) -> List[db.Polygon]:
         """
         Add a trace. Points are in micrometers, width is in micrometers.
+        Returns the copper drawn, as polygons in database units; empty when
+        nothing was drawn.
 
         With the manufacturing grid active (the default) the trace is drawn as
         on-grid polygons; see _trace_polygons for why it cannot stay a single
-        path. With snapping disabled it keeps the historical DPath, which is
+        path. With snapping disabled it keeps a DPath with square ends, which is
         smaller and prettier in a viewer but fails the carrier's offgrid deck.
+        ``free`` says which of the two ends get the w/2 square end.
         """
         if len(points) < 2:
-            return False
+            return []
 
         try:
             layer_idx = self._get_gds_layer(layer)
         except KeyError as e:
             print(f"Warning: {e} - skipping path on layer {layer}")
-            return False
+            return []
 
         if self.grid_dbu <= 1:
             dpoints = [db.DPoint(x, y) for x, y in points]
-            self.routing_cell.shapes(layer_idx).insert(db.DPath(dpoints, width_um))
-            return True
+            half = width_um / 2.0
+            path = db.DPath(dpoints, width_um, half if free[0] else 0.0,
+                            half if free[1] else 0.0)
+            self.routing_cell.shapes(layer_idx).insert(path)
+            return [path.polygon().to_itype(self.layout.dbu)]
 
-        polys = self._trace_polygons(points, width_um)
-        if not polys:
-            return False
+        polys = self._trace_polygons(points, width_um, free=free)
         for poly in polys:
             self.routing_cell.shapes(layer_idx).insert(poly)
-        return True
+        return polys
 
     def add_segments_as_paths(self, segments: List[TraceSegment], arcs: List[TraceArc] = None) -> int:
         """
         Convert segments and arcs to continuous paths and add to layout.
-        Returns number of paths created.
+        Returns number of paths created. The copper drawn is kept per
+        (layer, net) in ``trace_copper``, for refuse_touching_nets.
         """
         if arcs is None:
             arcs = []
@@ -1416,8 +1793,12 @@ class GDSGenerator:
         # Group by layer and width
         groups = self._build_trace_elements(segments, arcs)
 
-        total_paths = 0
-        for (_net, layer, width), elements in groups.items():
+        # Chain every group first: whether an end is free depends on the other
+        # traces of its net on its layer, of every width. Drawn afterwards in
+        # chaining order.
+        traces: List[ChainedTrace] = []
+        by_net: Dict[Tuple[str, str], List[ChainedTrace]] = {}
+        for (net, layer, width), elements in groups.items():
             # Probe the layer once per group. Elements on layers the LYP
             # does not map are counted and skipped so the caller can fail
             # loudly when the board copper names do not match the PDK
@@ -1432,11 +1813,24 @@ class GDSGenerator:
                 continue
             self._mapped_trace_elements += len(elements)
             width_um = self._to_um(width)
-            paths = self._connect_traces_to_paths(elements)
+            for points in self._connect_traces_to_paths(elements):
+                trace = ChainedTrace(layer, net, width_um, points)
+                traces.append(trace)
+                by_net.setdefault((layer, net), []).append(trace)
 
-            for path_points in paths:
-                if self.add_path(path_points, width_um, layer):
-                    total_paths += 1
+        for members in by_net.values():
+            for trace, free in zip(members,
+                                   free_ends(members, self.layout.dbu)):
+                trace.free = free
+
+        total_paths = 0
+        self.trace_copper = {}
+        for t in traces:
+            copper = self.trace_copper.setdefault((t.layer, t.net), [])
+            polys = self.add_path(t.points, t.width_um, t.layer, free=t.free)
+            if polys:
+                copper.extend(polys)
+                total_paths += 1
 
         return total_paths
 
@@ -1446,6 +1840,10 @@ class GDSGenerator:
 
         Uses the formula: total_size = 2 * enc + n * size + (n-1) * sep
         Solving for n: n = ceil((target - 2*enc + sep) / (size + sep))
+
+        Each length is rounded to the nearest dbu once (never truncated) and
+        the quotient is ceil-divided in integers, so a target equal to the
+        landing an n x n array draws gives exactly n.
 
         Args:
             target_size_um: Target pad size in micrometers
@@ -1458,12 +1856,12 @@ class GDSGenerator:
         if not params:
             return 1
 
-        size = params['size']
-        sep = params['sep']
-        enc = params['enc']
+        dbu = self.layout.dbu
+        size, sep, enc, target = (int(round(v / dbu)) for v in (
+            params['size'], params['sep'], params['enc'], target_size_um))
 
-        # n = ceil((target - 2*enc + sep) / (size + sep))
-        n = math.ceil((target_size_um - 2 * enc + sep) / (size + sep))
+        # exact integer ceil
+        n = -(-(target - 2 * enc + sep) // (size + sep))
         return max(1, n)  # Minimum 1 via
 
     def _get_via_layers_between(self, top_layer: str, bottom_layer: str) -> List[str]:
@@ -1557,6 +1955,7 @@ class GDSGenerator:
             print(f"Warning: Could not create via PCell: {e}")
             return None
 
+    @_intm4tm2_scope()
     def _bootstrap_intm4tm2_pcells(self) -> bool:
         """Register the IntM4TM2 PCell library for headless PCell creation.
 
@@ -1666,6 +2065,7 @@ class GDSGenerator:
                     "%.4g fF" % (w_um, l_um, m, cap_fF, tech["max_c_fF"]))
         return ""
 
+    @_intm4tm2_scope()
     def add_cmim_devices(self, devices: List[Dict]) -> Tuple[int, List[str]]:
         """Place cap_cmim devices from a sidecar entry list via the IntM4TM2 PCell.
 
@@ -1680,6 +2080,11 @@ class GDSGenerator:
                 for d in devices]
 
         if not self._bootstrap_intm4tm2_pcells():
+            return 0, refs
+        try:
+            _check_intm4tm2_cni("cmim")
+        except IntM4TM2Refused as exc:
+            print(f"Error: {exc}", file=sys.stderr)
             return 0, refs
 
         tech = self._intm4tm2_tech()
@@ -1947,12 +2352,18 @@ class GDSGenerator:
         wrapper.flatten(-1, False)
         return wrapper
 
-    def add_device(self, device: Device, flip_chip: bool = False) -> bool:
+    def add_device(self, device: Device, flip_chip: bool = False,
+                   outline: Optional["_die_outline.DieOutline"] = None) -> bool:
         """
         Add a device/chiplet by loading its GDS file and instantiating it.
 
         Args:
             device: Device with GDS file path and position
+            outline: The die's declared outline, read from this same GDS
+                     (die_outline_gds). When given, it is the die's boundary
+                     in the boundary manifest; when None (an exempt die, or a
+                     device that is not a die of the .chiplet) the boundary is
+                     the placed cell's bbox over all layers.
 
         Returns:
             True if successful, False otherwise.
@@ -1980,6 +2391,10 @@ class GDSGenerator:
 
             # Get expected cell name from GDS filename (without extension)
             expected_cell_name = gds_path.stem
+            # Ready dies can each name their independent source layout.gds.
+            # Keep the stem for cell/boundary labels, but identify a template
+            # by its resolved file path so one die cannot reuse another's art.
+            template_key = str(gds_path.resolve())
 
             # Import the GDS if we haven't seen this file before.
             # The first import creates a "template" cell; subsequent devices
@@ -1988,12 +2403,49 @@ class GDSGenerator:
             if not hasattr(self, '_imported_templates'):
                 self._imported_templates: Dict[str, db.Cell] = {}
 
-            if expected_cell_name not in self._imported_templates:
+            if template_key not in self._imported_templates:
                 # Track existing cells before import
                 existing_cells = set(cell.name for cell in self.layout.each_cell())
 
-                # Read the external GDS directly into the current layout
-                self.layout.read(str(gds_path))
+                # Read the external GDS directly into the current layout.
+                #
+                # The conflict policy has to be stated. KLayout's default is
+                # AddToCell: when an incoming cell has the name of one already
+                # here, its shapes are added INTO the existing cell. Two dies
+                # from different vendors that happen to share a cell name (a
+                # standard-cell library, a "SEAL", a "TOP") therefore end up
+                # sharing ONE merged cell, so each die acquires the other's
+                # geometry. Both are wrong, not just one: measured on a
+                # two-cell case, each die's shared cell carries 3 shapes where
+                # its own file has 2.
+                #
+                # It can still present as "one die is wrong", which is how it
+                # was first reported, and that is a property of the comparison
+                # rather than of the merge. Compare by area and a die whose
+                # shared box contains the other's looks innocent, because the
+                # union is unchanged. Compare by shape count and both fail.
+                #
+                # Nothing downstream notices, because the assembly DRC checks
+                # the assembly and not whether each die still equals its file.
+                #
+                # RenameCell keeps every die's hierarchy to itself. The cost is
+                # duplicated cells in the complete GDS, which is the honest cost
+                # of two independent dies that happen to agree on a name.
+                read_options = db.LoadLayoutOptions()
+                read_options.cell_conflict_resolution = (
+                    db.LoadLayoutOptions.CellConflictResolution.RenameCell)
+                # Reading a file with another dbu into this layout switches
+                # the layout's dbu and rescales nothing, so every shape
+                # already here (the whole interposer) changes size. Nothing
+                # written from this layout can be right after that; the die
+                # outline read refuses such a die before anything is written,
+                # and a device it does not read fails the run here.
+                dbu_before = self.layout.dbu
+                self.layout.read(str(gds_path), read_options)
+                if self.layout.dbu != dbu_before:
+                    raise DieGdsError(_die_outline.dbu_mismatch(
+                        str(gds_path), Decimal(repr(self.layout.dbu)),
+                        Decimal(repr(dbu_before))))
 
                 # Find newly imported cells (cells that didn't exist before)
                 new_cells = [cell for cell in self.layout.each_cell() if cell.name not in existing_cells]
@@ -2002,28 +2454,16 @@ class GDSGenerator:
                     print(f"Warning: No new cells imported from {device.gds_file}")
                     return False
 
-                # Find the top cell among new cells (one that has no parent among new cells)
-                template_cell = None
-                for cell in new_cells:
-                    has_parent_in_new = False
-                    for other in new_cells:
-                        if other != cell:
-                            for inst in other.each_inst():
-                                if inst.cell.name == cell.name:
-                                    has_parent_in_new = True
-                                    break
-                        if has_parent_in_new:
-                            break
-                    if not has_parent_in_new:
-                        template_cell = cell
-                        break
+                # The top cell among the new cells: the first one no other new
+                # cell instantiates. The die outline read resolves a die's top
+                # cell with the same function (and requires exactly one), so
+                # the two cannot name different cells.
+                parentless = _die_outline.parentless_cells(new_cells)
+                template_cell = parentless[0] if parentless else new_cells[0]
 
-                if not template_cell:
-                    template_cell = new_cells[0]  # Fallback to first new cell
+                self._imported_templates[template_key] = template_cell
 
-                self._imported_templates[expected_cell_name] = template_cell
-
-            template_cell = self._imported_templates[expected_cell_name]
+            template_cell = self._imported_templates[template_key]
             # A third-party die is delivered as drawn. Its geometry and its
             # placement stay out of the manufacturing-grid pass: reshaping
             # someone else's layout is not the exporter's business, and the
@@ -2060,8 +2500,27 @@ class GDSGenerator:
             # written to the <gds>.boundaries.json manifest (see write()) and
             # lives in NO PDK layer namespace, so it cannot alias a process
             # layer or the chiplet's own internal geometry.
+            #
+            # A declared die outline is the boundary. It is a box in the die
+            # top cell's own frame; its four corners go through the flip-chip
+            # wrapper's mirror and rotation (the transform _place_die_flipped
+            # used) when there is one, then through the placement, so at any
+            # rotation the boundary is the outline where it lands, not a
+            # bbox of it. Without an outline the boundary is the cell bbox,
+            # over every layer and the whole hierarchy.
             cell_bbox = imported_cell.dbbox()
-            if not flip_chip and device.rotation != 0.0:
+            if outline is not None:
+                box = outline.box_um()
+                place = db.DCplxTrans(trans)
+                if flip_chip:
+                    place = place * db.DCplxTrans(
+                        1.0, device.rotation + 180.0, True, db.DVector(0, 0))
+                boundary_poly = db.DPolygon([place.trans(pt) for pt in (
+                    db.DPoint(box.left, box.bottom),
+                    db.DPoint(box.right, box.bottom),
+                    db.DPoint(box.right, box.top),
+                    db.DPoint(box.left, box.top))])
+            elif not flip_chip and device.rotation != 0.0:
                 # Non-flip with rotation: transform bbox corners through DCplxTrans
                 corners = [
                     db.DPoint(cell_bbox.left, cell_bbox.bottom),
@@ -2080,6 +2539,10 @@ class GDSGenerator:
             print(f"  Added device {device.ref}: {gds_path.name} ({imported_cell.name}) at anchor ({x_um:.2f}, {y_um:.2f}) um{mirror_str}")
             return True
 
+        except DieGdsError:
+            # The layout's dbu changed under the read: the caller has to stop
+            # rather than write it, which a False here would not make it do.
+            raise
         except Exception as e:
             print(f"Error loading device GDS {device.gds_file}: {e}")
             import traceback
@@ -2236,6 +2699,271 @@ class GDSGenerator:
             n += 1
         return n
 
+    # Seal ring (opt-in, --seal-ring). The PDK's sealring PCell takes the
+    # whole outline as l x w, draws it on EdgeSeal.boundary and puts the ring
+    # inside it, origin at the lower-left corner. The deck flags every layer
+    # outside 39/4, prBoundary included, so 39/4 has to be the board outline
+    # itself, and what the ring must enclose is read from the ring's EdgeSeal.
+    SEAL_RING_LIBRARY = "IntM4TM2"
+    SEAL_RING_PCELL = "sealring"
+    SEAL_BOUNDARY_LAYER = (39, 4)        # EdgeSeal.boundary
+    SEAL_EDGESEAL_LAYER = (39, 0)        # EdgeSeal.drawing; its hole is the interior
+
+    # The fabricated layers the sealring deck requires inside the ring
+    # (SEAL.REQ.4), plus Passiv, which it allows outside only as a closed loop
+    # around EdgeSeal: the ring's own loop is that loop, anything the export
+    # draws is not. Each maps to the notch-heal space key its metal is held to
+    # from the ring's metal. None means one grid step: the shape may not reach
+    # the band, and the spacing proper is the full deck's to judge.
+    SEAL_RING_CLEARANCE = {
+        (9, 0): None,       # Passiv
+        (9, 35): None,      # Passiv pillar
+        (9, 36): None,      # Passiv sbump
+        (9, 40): None,      # Passiv pdl
+        (36, 0): None,      # MIM
+        (50, 0): 'Mn_b',    # Metal4
+        (50, 20): None,
+        (50, 22): None,
+        (50, 26): None,
+        (66, 0): None,      # Via4
+        (67, 0): 'Mn_b',    # Metal5
+        (67, 20): None,
+        (67, 22): None,
+        (67, 26): None,
+        (125, 0): None,     # TopVia1
+        (126, 0): 'TM1_b',  # TopMetal1
+        (126, 20): None,
+        (126, 22): None,
+        (129, 0): None,     # Vmim
+        (133, 0): None,     # TopVia2
+        (134, 0): 'TM2_b',  # TopMetal2
+        (134, 20): None,
+        (134, 22): None,
+        (146, 0): None,     # ThinFilmRes
+        (157, 0): None,     # LBE
+    }
+
+    def _seal_ring_outline(self) -> 'db.Box':
+        """The board outline as the one on-grid rectangle the ring can take.
+
+        Read from what add_board_outline drew, with its vertices put on the
+        grid the way write() will put them, so the ring and the written
+        prBoundary are the same rectangle. Refuses anything else: the PCell
+        draws a rectangular ring only, and a ring that does not follow the
+        outline leaves the outline outside 39/4.
+        """
+        li = self.layout.find_layer(*self.PRBOUNDARY_LAYER)
+        polys = [] if li is None else list(
+            db.Region(self.top_cell.shapes(li)).each())
+        pl, pd = self.PRBOUNDARY_LAYER
+        if not polys:
+            raise SealRingRefused(
+                "the board has no outline on prBoundary %d/%d (Edge.Cuts did "
+                "not give one closed loop)" % (pl, pd))
+        if len(polys) > 1:
+            raise SealRingRefused(
+                "the board outline is %d loops on prBoundary %d/%d; the ring "
+                "needs exactly one" % (len(polys), pl, pd))
+        poly = db.Polygon([self._snap_point(p)
+                           for p in polys[0].each_point_hull()])
+        if polys[0].holes() or not poly.is_box():
+            raise SealRingRefused(
+                "the board outline is not an axis-aligned rectangle (%d "
+                "vertices); the sealring PCell draws a rectangular ring only"
+                % poly.num_points_hull())
+        return poly.bbox()
+
+    @_intm4tm2_scope()
+    def _seal_ring_minimum_um(self) -> float:
+        """Smallest outline side the PDK sealring PCell accepts, in um.
+
+        The PCell refuses a smaller outline by returning an empty cell, which
+        says nothing about why, so the same bound is computed here from the
+        PDK's own constants and rule values and refused with a reason.
+        Needs the IntM4TM2 library bootstrapped (its python dir on sys.path).
+        """
+        from intm4tm2_pycell_lib.ihp import sealring_code as sc
+        rules = sc.loadSealRules()
+        span = rules['Seal_k']
+        nm = (2 * (sc.BOUNDARY_TO_EDGESEAL_NM + span + rules['Seal_a'])
+              + span // sc.CORNER_STEPS)
+        return nm / 1000.0
+
+    @_intm4tm2_scope()
+    def add_seal_ring(self) -> 'db.DBox':
+        """Draw the PDK seal ring on the board outline. Returns the outline.
+
+        Places the IntM4TM2 sealring PCell with l x w equal to the outline at
+        its lower-left corner, then clips the no-fill keep-outs to the ring's
+        39/4 (the deck flags them outside it). Raises SealRingRefused, with
+        nothing added, when the outline is missing, not one rectangle, or
+        under the PCell's minimum, or when the PCell cannot be had.
+
+        Binds the layout to the intm4tm2 technology like add_cmim_devices,
+        so it must run after every SG13G2 PCell has been created.
+        """
+        box = self._seal_ring_outline()
+        if not self._bootstrap_intm4tm2_pcells():
+            raise SealRingRefused(
+                "the %s PCell library could not be loaded (set "
+                "INTERPOSER_PDK_ROOT to an interposer PDK checkout)"
+                % self.SEAL_RING_LIBRARY)
+        lib = db.Library.library_by_name(self.SEAL_RING_LIBRARY,
+                                         self.layout.technology_name)
+        if lib is None or lib.layout().pcell_declaration(
+                self.SEAL_RING_PCELL) is None:
+            raise SealRingRefused(
+                "the %s library has no %s PCell (use an interposer PDK "
+                "checkout that ships it)"
+                % (self.SEAL_RING_LIBRARY, self.SEAL_RING_PCELL))
+        try:
+            _check_intm4tm2_cni(self.SEAL_RING_PCELL, self.SEAL_RING_LIBRARY)
+        except IntM4TM2Refused as exc:
+            raise SealRingRefused(str(exc))
+        try:
+            minimum = self._seal_ring_minimum_um()
+        except Exception as exc:
+            raise SealRingRefused(
+                "could not read the seal ring rules from the PDK: %s" % exc)
+        dbu = self.layout.dbu
+        l_um, w_um = box.width() * dbu, box.height() * dbu
+        if min(l_um, w_um) < minimum:
+            raise SealRingRefused(
+                "the board outline %.3f x %.3f um is below the sealring "
+                "minimum of %.3f um per side" % (l_um, w_um, minimum))
+
+        def outline_param(dbu_len):
+            nm = int(round(dbu_len * dbu * 1000))
+            return "%d.%03du" % (nm // 1000, nm % 1000)
+
+        params = {"l": outline_param(box.width()),
+                  "w": outline_param(box.height())}
+        cell = self.layout.create_cell(self.SEAL_RING_PCELL,
+                                       self.SEAL_RING_LIBRARY, params)
+        # A refused PCell hands back a nameless empty cell, not None
+        # (see add_cmim_devices); either way nothing of it may stay.
+        if cell is None or not cell.name or cell.bbox().empty():
+            if cell is not None:
+                self.layout.delete_cell(cell.cell_index())
+            raise SealRingRefused(
+                "the %s PCell returned an empty cell for l=%s w=%s"
+                % (self.SEAL_RING_PCELL, params["l"], params["w"]))
+        trans = db.Trans(db.Vector(box.left, box.bottom))
+        bl = self.layout.find_layer(*self.SEAL_BOUNDARY_LAYER)
+        drawn = (db.Region() if bl is None else
+                 db.Region(cell.begin_shapes_rec(bl)).transformed(trans))
+        if drawn.bbox() != box:
+            self.layout.delete_cell(cell.cell_index())
+            raise SealRingRefused(
+                "the %s PCell drew EdgeSeal.boundary %d/%d at %s, not on the "
+                "board outline %s" % ((self.SEAL_RING_PCELL,)
+                                      + self.SEAL_BOUNDARY_LAYER
+                                      + (drawn.bbox(), box)))
+        self.top_cell.insert(db.CellInstArray(cell.cell_index(), trans))
+        self._seal_ring = (cell.cell_index(), trans)
+        self._clip_keepouts(drawn)
+        return box.to_dtype(dbu)
+
+    def has_seal_ring(self) -> bool:
+        """True while the ring drawn by add_seal_ring is placed in the top cell."""
+        if self._seal_ring is None:
+            return False
+        ci = self._seal_ring[0]
+        return (self.layout.is_valid_cell_index(ci)
+                and any(inst.cell_index == ci
+                        for inst in self.top_cell.each_inst()))
+
+    def _clip_keepouts(self, boundary: 'db.Region') -> int:
+        """Cut the no-fill keep-outs back to the ring's 39/4.
+
+        A keep-out may be drawn to the board edge or past it, and the deck
+        reports every layer outside 39/4, markers included. Only the part
+        outside is removed; inside, the keep-out still stops the fill.
+        Returns the number of keep-out shapes that changed.
+        """
+        targets = {self.NOFILL_GLOBAL_LAYER}
+        for role in self.NOFILL_ROLE_TO_METAL:
+            target = self._nofill_target(role)
+            if target is not None:
+                targets.add(target)
+        clipped = 0
+        for target in sorted(targets):
+            li = self.layout.find_layer(*target)
+            if li is None:
+                continue
+            shapes = self.top_cell.shapes(li)
+            pending = []
+            for sh in shapes.each():
+                if (db.Region(sh.polygon) - boundary).is_empty():
+                    continue
+                pending.append((sh, db.Region(sh.polygon) & boundary))
+            for sh, kept in pending:
+                shapes.erase(sh)
+                shapes.insert(kept)
+            clipped += len(pending)
+        if clipped:
+            print(f"Seal ring: clipped {clipped} no-fill keep-out shape(s) to "
+                  f"EdgeSeal.boundary {self.SEAL_BOUNDARY_LAYER[0]}/"
+                  f"{self.SEAL_BOUNDARY_LAYER[1]}")
+        return clipped
+
+    def _check_seal_ring_clearance(self) -> None:
+        """Stop when the export's own fabricated geometry crowds the ring.
+
+        Everything on a SEAL_RING_CLEARANCE layer, outside the ring cell and
+        the imported dies, must sit inside the EdgeSeal interior shrunk by
+        that layer's space: the metal's own space rule from the ring's metal,
+        which follows EdgeSeal's inner edge, or one grid step off the band.
+        Raises SealRingRefused naming the layer, the rule, the count and the
+        first place. Basic space only; the wide-metal space is the deck's.
+        """
+        ring_ci, trans = self._seal_ring
+        ring = self.layout.cell(ring_ci)
+        es = self.layout.find_layer(*self.SEAL_EDGESEAL_LAYER)
+        interior = db.Region() if es is None else db.Region(
+            ring.begin_shapes_rec(es)).transformed(trans).merged().holes()
+        if interior.is_empty():
+            raise SealRingRefused(
+                "the %s cell has no EdgeSeal %d/%d interior; there is nothing "
+                "for the ring to enclose" % ((self.SEAL_RING_PCELL,)
+                                             + self.SEAL_EDGESEAL_LAYER))
+        excluded = ({ring_ci} | set(ring.called_cells())
+                    | self._foreign_cell_set())
+        dbu = self.layout.dbu
+        grid = max(self.grid_dbu, 1)
+        offenders = []
+        for (lnum, dt), rule_key in sorted(self.SEAL_RING_CLEARANCE.items()):
+            li = self.layout.find_layer(lnum, dt)
+            if li is None:
+                continue
+            shape_iter = self.top_cell.begin_shapes_rec(li)
+            shape_iter.unselect_cells(sorted(excluded))
+            own = db.Region(shape_iter)
+            if own.is_empty():
+                continue
+            if rule_key is None:
+                space = grid
+                rule = "one grid step (%.3f um)" % (grid * dbu)
+            else:
+                space_um = self.PDK_NOTCH_SPACE[rule_key]
+                space = max(int(round(space_um / dbu)), grid)
+                rule = "%s = %g um" % (rule_key, space_um)
+            outside = own - interior.sized(-space)
+            if outside.is_empty():
+                continue
+            first = min((p.bbox() for p in outside.each()),
+                        key=lambda b: (b.left, b.bottom))
+            offenders.append(
+                "%d/%d: %d shape(s) in the ring band or closer than %s to the "
+                "ring, first at (%.3f, %.3f)-(%.3f, %.3f) um"
+                % (lnum, dt, outside.count(), rule, first.left * dbu,
+                   first.bottom * dbu, first.right * dbu, first.top * dbu))
+        if offenders:
+            raise SealRingRefused("\n".join(
+                ["fabricated geometry crowds the seal ring"] + offenders
+                + ["only the basic space is checked here; the wide-metal "
+                   "space (TM2_bR) is left to the level-2 deck"]))
+
     def get_outline_bbox(self) -> Optional[Tuple[float, float, float, float]]:
         """Bbox of the drawn board outline (prBoundary 235/0), or None.
 
@@ -2318,7 +3046,7 @@ class GDSGenerator:
     # outline then picks up a vertex at 2.5 nm, which rounds to the database
     # unit and reports as both Offgrid and Angle45. Seven of each on this
     # board. Offgrid and angle are hard rules, so the octagon stays out until
-    # the crossing is made exact (see SESSION_LOG: it needs the pad centre and
+    # the crossing is made exact (it needs the pad centre and
     # the trace flank constants to have the same parity in grid steps).
     #
     # Do NOT ask for 'circle': that branch leaks an intermediate polygon at
@@ -2337,6 +3065,7 @@ class GDSGenerator:
     SUPPORTED_IO_CLASSES = {'wire_bond'}
     RESERVED_IO_CLASSES = {'flipped_bump', 'tsv_bump'}
 
+    @_intm4tm2_scope()
     def _create_wire_bond_pad_cell(self, size_x_um: float,
                                     size_y_um: float) -> db.Cell:
         """Create a wire-bond I/O pad cell from the interposer PDK's PyCell.
@@ -2363,7 +3092,8 @@ class GDSGenerator:
         resolves, and its via variants are still unflattened at this point.
 
         Raises:
-            RuntimeError: the PDK or its PyCell library is not reachable, or
+            RuntimeError: the PDK or its PyCell library is not reachable,
+                the library runs on a foreign cni (IntM4TM2Refused), or
                 the PyCell did not draw the fabrication layers. There is no
                 hand-drawn fallback on purpose: an approximation of a
                 fabricable pad is the thing this replaced.
@@ -2386,6 +3116,7 @@ class GDSGenerator:
                 "whose libs.tech/klayout/python holds bump_mirror.py and "
                 "intm4tm2_pycell_lib) and retry.")
         ensure_lib()
+        _check_intm4tm2_cni('bondpad')
 
         scratch = db.Layout()
         scratch.dbu = self.layout.dbu
@@ -2878,7 +3609,7 @@ class GDSGenerator:
     NOTCH_HEAL_MARGIN = 1.10
     NOTCH_HEAL_MIN_SPAN = 2.0     # multiples of the layer's space rule
     NOTCH_HEAL_MAX_ITERS = 12
-    # Patches are axis-aligned rectangles, and that is a constraint, not a
+    # Patch edges are axis-parallel, and that is a constraint, not a
     # default. A 45 degree chamfer on them is legal in isolation (on grid,
     # 0/45/90, no acute corner) and was measured to close the same notches
     # with less copper, but it makes the MERGED copper acquire vertices off
@@ -2891,15 +3622,22 @@ class GDSGenerator:
     def _heal_notches(self) -> int:
         """Fill sub-minimum-space notches in the drawn metals.
 
-        A notch is a gap inside a single piece of copper, so filling one can
-        never connect two nets; the gap between two separate pieces is a
-        space violation and is deliberately left alone. That distinction is
-        the whole reason this uses notch_check rather than the more obvious
-        oversize/undersize closing: the closing would bridge any two nets
-        sitting at exactly the minimum space, which is legal copper, and
-        turn it into a short.
+        A notch is a gap inside a single piece of copper; the gap between two
+        separate pieces is a space violation and is deliberately left alone.
+        That distinction is why this uses notch_check rather than the more
+        obvious oversize/undersize closing, which would bridge any two nets
+        sitting at exactly the minimum space, legal copper, into a short.
 
-        The patches are axis-aligned boxes on the manufacturing grid. They
+        Finding the gap inside one polygon does not make the fill safe,
+        though. A patch over-fills its wedge (below), so it can reach copper
+        the notch does not belong to: on a mixed-die board one box ran 4.19 um
+        past a landing and stopped 0.8 um from another net's via cover, and a
+        cover 2.04 um away would have been welded into a short no deck sees.
+        So every patch is cut back to keep the layer's space from copper it
+        does not own (_clear_other_copper), and a notch the cut leaves open
+        stays open and is reported.
+
+        The patches are rectilinear and on the manufacturing grid. They
         over-fill the wedge rather than tracing it, on purpose: the deck
         checks raw polygons, so a patch has to be 0/45/90 and on grid on its
         own, while the notch is usually bounded on one side by the arc of a
@@ -2913,7 +3651,8 @@ class GDSGenerator:
         Foreign cells are excluded on the same grounds as the grid snap: an
         imported die's geometry is not ours to reshape.
 
-        Returns the number of notches still reported after the last pass.
+        Returns the number of notch regions still open after the last pass,
+        counted afresh at each layer's space rule.
         """
         foreign = list(self._foreign_cell_set())
         keepout = db.Region(
@@ -2924,26 +3663,23 @@ class GDSGenerator:
         for (layer_num, datatype), rule_key in sorted(self.NOTCH_HEAL_LAYERS.items()):
             space_um = self.PDK_NOTCH_SPACE[rule_key]
             li = self.layout.layer(layer_num, datatype)
+            space = int(round(space_um / self.layout.dbu))
             limit = space_um * self.NOTCH_HEAL_MARGIN / self.layout.dbu
             min_span = int(round(space_um * self.NOTCH_HEAL_MIN_SPAN
                                  / self.layout.dbu))
-            def in_scope_patches():
-                """Patches this pass would place, keepout already removed."""
-                merged = self._own_metal(li, foreign)
-                boxes = self._notch_patches(
-                    merged.notch_check(limit, False, db.Metrics.Euclidian),
-                    min_span)
-                if not keepout.is_empty():
-                    boxes = boxes.not_interacting(keepout)
-                return merged, boxes
 
             patched = 0
             for _ in range(self.NOTCH_HEAL_MAX_ITERS):
-                merged, boxes = in_scope_patches()
+                merged = self._own_metal(li, foreign)
+                notches = merged.notch_check(limit, False, db.Metrics.Euclidian)
+                boxes = self._notch_patches(notches, min_span)
+                if not keepout.is_empty():
+                    boxes = boxes.not_interacting(keepout)
+                boxes = self._clear_other_copper(boxes, merged, notches, space)
                 if (boxes - merged).is_empty():
                     # Either nothing is left to close, or what is left is
-                    # inside the keepout, or the patch shape cannot close it.
-                    # All three mean: stop, do not spin.
+                    # inside the keepout, or no patch can close it without
+                    # crowding other copper. All three mean: stop, do not spin.
                     break
                 if heal_cell is None:
                     heal_cell = self.layout.create_cell(
@@ -2954,24 +3690,87 @@ class GDSGenerator:
                     heal_cell.shapes(li).insert(box)
                 patched += boxes.count()
 
-            # Residual counts only what the heal owns. Notches under the
-            # keepout are out of scope by design, not failures, and the
-            # carrier DRC reports them against the pad rules where they
-            # belong.
-            merged, boxes = in_scope_patches()
-            still = (boxes - merged).count()
-            residual += still
-            if patched or still:
+            # A fresh check at the rule itself, not "patches left to place": a
+            # notch the clearance cut cannot close yields no patch, and counting
+            # patches would call it closed. Notches under the keepout are out
+            # of scope by design, not failures, and the carrier DRC reports
+            # them against the pad rules where they belong.
+            merged = self._own_metal(li, foreign)
+            still = self._notch_patches(
+                merged.notch_check(space, False, db.Metrics.Euclidian), min_span)
+            if not keepout.is_empty():
+                still = still.not_interacting(keepout)
+            residual += still.count()
+            if patched or not still.is_empty():
                 print(f"  Notch heal ({layer_num}/{datatype}, {rule_key} = "
                       f"{space_um} um): {patched} patch(es)"
-                      + (f", {still} region(s) unclosed" if still else ""))
+                      + (f", {still.count()} region(s) unclosed"
+                         if not still.is_empty() else ""))
+                for region in still.each():
+                    c = region.bbox().center()
+                    print(f"    unclosed notch near ({c.x * self.layout.dbu:.3f}, "
+                          f"{c.y * self.layout.dbu:.3f}) um")
         if residual:
             print(f"Warning: {residual} notch region(s) below the minimum "
-                  f"space are still open after {self.NOTCH_HEAL_MAX_ITERS} "
-                  f"heal passes. "
+                  f"space are still open after the heal (each is listed under "
+                  f"its heal line). "
                   f"The carrier DRC will report them; they need a layout fix, "
                   f"not a wider heal.", file=sys.stderr)
         return residual
+
+    def _clear_other_copper(self, patches, copper, notches,
+                            space: int) -> 'db.Region':
+        """Cut each patch back so it keeps `space` from copper it does not own.
+
+        A patch owns the merged polygons carrying the notch edges it was made
+        from, which are the pairs whose bbox touches the patch itself; its
+        bbox is not enough, since a patch merged from several boxes can span
+        another net's notch without reaching it. Every other polygon is
+        someone else's, even one the uncut box already touches. Each piece of
+        that copper within `space` of the patch cuts it by the piece's bbox
+        grown by `space`, snapped outward, so the patch stays rectilinear and
+        on grid and only ever shrinks. Whole-polygon bboxes would cut far more
+        than needed and leave notches open that a piece-wise cut closes.
+
+        Owned copper is never cut against, so a patch with two owners is
+        rejected before the cut: a cut against a third polygon could leave it
+        touching one owner while nothing checks its space to the other. A
+        patch still touching two polygons after the cut is dropped as well.
+        Either way the notch stays open and the recount reports it.
+
+        Patches are taken one at a time, and each one kept joins the copper
+        the next is cut against, so patches placed in the same pass keep the
+        space between each other as well.
+        """
+        g = max(1, self.grid_dbu)
+        def snap_out(b):
+            return db.Box((b.left // g) * g, (b.bottom // g) * g,
+                          -((-b.right) // g) * g, -((-b.top) // g) * g)
+
+        placed = db.Region()
+        for patch in patches.each():
+            reach = db.Region(patch).sized(space)
+            edges = db.Edges()
+            for pair in notches.each():
+                if patch.touches(pair.bbox()):
+                    edges.insert(pair.first)
+                    edges.insert(pair.second)
+            near = (copper + placed).interacting(reach).merged()
+            if near.interacting(edges).count() > 1:
+                continue
+            others = near.not_interacting(edges) & reach
+            cut = db.Region()
+            for piece in others.each():
+                cut.insert(snap_out(piece.bbox().enlarged(space, space)))
+            # A cut can leave a sliver of the overhang standing on the pad,
+            # narrower than the width rule; opening the patch by half the
+            # space removes it, since every healed layer's width rule is at
+            # or under its space rule. That reduces width violations, it
+            # does not rule them out: the merged copper is not checked.
+            kept = (db.Region(patch) - cut).sized(-(space // 2)).sized(space // 2)
+            if near.interacting(kept).count() <= 1:
+                placed += kept
+        return placed.merged()
 
     def _own_metal(self, layer_index: int, foreign: List[int]) -> 'db.Region':
         """Merged drawn metal on one layer, excluding imported dies."""
@@ -3016,7 +3815,7 @@ class GDSGenerator:
         patches.merge()
         return patches
 
-    def write(self, output_path: str) -> None:
+    def write(self, output_path: str, sidecars: bool = True) -> None:
         """Write layout preserving via cell hierarchy.
 
         PCell variants are resolved to static geometry within their own cells.
@@ -3025,7 +3824,11 @@ class GDSGenerator:
         A <stem>.boundaries.json manifest with the chiplet boundaries is written
         alongside the GDS for the ADK assembly DRC, and — when the Cu-pillar
         generation path ran — a <stem>.pillars.json manifest with the as-drawn
-        bump centers.
+        bump centers. sidecars=False leaves both to a later write_sidecars(),
+        for a caller that still changes the GDS bytes after this write.
+
+        With a seal ring drawn, the first write stops with SealRingRefused,
+        before any byte is written, when the layout crowds the ring.
         """
         for via_index in self._via_cells.values():
             self.layout.cell(via_index).flatten(-1, True)
@@ -3051,10 +3854,27 @@ class GDSGenerator:
                   f"so these will be reported. Redraw them on the board.",
                   file=sys.stderr)
 
+        # After the grid pass and the heal, so the check reads the geometry
+        # that is about to be written. Once: the later complete-GDS write
+        # adds only imported dies, which the check leaves out anyway.
+        if self._seal_ring is not None and not self._seal_ring_cleared:
+            self._check_seal_ring_clearance()
+            self._seal_ring_cleared = True
+
         save_opts = db.SaveLayoutOptions()
         save_opts.write_context_info = False
         self._paint_boundary_annotations()
         self.layout.write(output_path, save_opts)
+        if sidecars:
+            self.write_sidecars(output_path)
+
+    def write_sidecars(self, output_path: str) -> None:
+        """Write the boundary and pillar manifests of the GDS at output_path.
+
+        The boundary manifest binds the digest of the bytes on disk, so this
+        runs once those bytes are final: straight after write(), or after the
+        metal fill has rewritten the file in place.
+        """
         self._write_boundary_manifest(output_path)
         self._write_pillar_manifest(output_path)
 
@@ -3199,19 +4019,53 @@ def _probe_outline_layers(gds_path: str,
     return None
 
 
+def _layout_ref(target: str, chiplet_dir: str) -> str:
+    """How a .chiplet names the layout `target`.
+
+    Relative to `chiplet_dir`, where readers anchor a relative layout, '..'
+    allowed, whenever the two share a root below the filesystem root; else
+    absolute. The same workspace may be mounted at different roots (a host
+    tree and its container mount), and only a relative reference opens from
+    both. A target sharing nothing but the root (another mount, /opt) keeps
+    its absolute path. Lexical on purpose (abspath, not resolve): a
+    symlinked GDS inside the workspace must not become its target outside
+    the mount.
+    """
+    target = os.path.abspath(target)
+    chiplet_dir = os.path.abspath(chiplet_dir)
+    try:
+        common = os.path.commonpath([target, chiplet_dir])
+    except ValueError:  # different drives
+        return target
+    if os.path.dirname(common) == common:
+        return target
+    return os.path.relpath(target, chiplet_dir)
+
+
 def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                         bbox: Tuple[float, float, float, float] = None,
                         connection_type: str = "",
-                        attachment_surface_z: float = SG13G2_ATTACHMENT_SURFACE_Z_UM,
+                        attachment_surface_z: Optional[
+                            'float | AttachFrame'] = None,
                         io_pads: Optional[List[Dict]] = None,
                         devices: Optional[List['Device']] = None,
                         die_connections: Optional[Dict[str, str]] = None,
                         die_thicknesses: Optional[Dict[str, float]] = None,
                         outline_bbox: Optional[Tuple[float, float, float,
                                                      float]] = None,
-                        to_um=None, to_um_y=None) -> bool:
+                        to_um=None, to_um_y=None,
+                        die_outline_layers: Optional[Dict[str, Tuple[int,
+                                                                     int]]]
+                        = None,
+                        die_outline_exempt: Optional[List[str]] = None,
+                        outline_reader: Optional[
+                            '_die_outline.DieGdsReader'] = None,
+                        io_pad_refs: Optional[Iterable[str]] = None,
+                        system_chiplet: Optional[Dict] = None,
+                        die_layouts: Optional[Dict[
+                            str, '_die_layouts.DieLayout']] = None) -> bool:
     """
-    Update .chiplet file with interposer GDS absolute path, dimensions, position,
+    Update .chiplet file with interposer GDS path, dimensions, position,
     correct z-values for dies, and top_cell names from GDS files.
 
     Args:
@@ -3224,8 +4078,12 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                          field on each die component.
         attachment_surface_z: interposer die-attachment surface z (BEOL top) in
                               micrometers -- the plane dies mount on, so each
-                              die's position.z = this + connection-stack height.
-                              Defaults to the SG13G2 process constant 13.83.
+                              die's position.z = this + connection-stack height,
+                              the exact decimal sum of the values as written
+                              (AttachFrame.at). None reads it from the
+                              interposer PDK (read_attach_frame), the worker
+                              passes the AttachFrame its head read, and a
+                              direct caller may pass a number.
                               Distinct from the interposer's physical body
                               thickness (dimensions.thickness), which is left as
                               the KiCad board-stackup value.
@@ -3257,9 +4115,52 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                  anchor: bbox_center mesh contract). When None and bbox is
                  computed from the GDS here, it is derived from layer
                  235/0 if present in the file.
+        die_outline_layers: {die id: (layer, datatype)} of the die outline in
+                 each die's own GDS (--die-outline-layers). A declared die's
+                 dimensions.width/height become that outline's size, in the
+                 die GDS top cell's frame (rotation.z and orientation carry
+                 the placement).
+        die_outline_exempt: Die ids that keep the width/height already in
+                 the .chiplet (--die-outline-exempt), each logged by name.
+                 Every die must be in exactly one of the two;
+                 resolve_die_outlines raises DieOutlineRefused, before
+                 anything is written, when one is not or its GDS cannot give
+                 what it needs.
+        outline_reader: The run's DieGdsReader, so the die GDS reads done at
+                 the worker head are reused rather than repeated. None reads
+                 afresh.
+        io_pad_refs: The references of every --io-pads entry, placed or not,
+                 as the worker head used them; a .chiplet die with one of
+                 these ids is a wire-bond pad, not sized
+                 (resolve_die_outlines). None takes the refs of io_pads.
+        system_chiplet: The loaded System .chiplet (--system-chiplet). When
+                 given, the interposer's and each die's technology, and the
+                 technologies block, come from it by component id
+                 (technology_overlay). None leaves both as the writer made
+                 them.
+        die_layouts: {die id: DieLayout} from the --die-layouts sidecar
+                 (die_layouts.load). Each such die's layout and top_cell
+                 become its full layout's, and its metadata names the
+                 abstract the assembly places (assembly_view,
+                 assembly_view_layout). Both files are checked against the
+                 contract first (resolve_die_layouts). None leaves every
+                 die's layout as the board gives it.
 
     Returns:
         True if successful, False otherwise.
+
+    Raises:
+        DieOutlineRefused: a die cannot be sized or exempted (see
+                 resolve_die_outlines). The .chiplet is left untouched.
+        TechnologyRefused: the System .chiplet cannot supply a component's
+                 technology (see technology_overlay.plan). The .chiplet is
+                 left untouched.
+        DieLayoutRefused: a --die-layouts entry names no die, or its files
+                 do not agree with its contract (see resolve_die_layouts).
+                 The .chiplet is left untouched.
+        AttachFrameRefused: attachment_surface_z is None and the interposer
+                 PDK's mount plane cannot be read. The .chiplet is left
+                 untouched.
     """
     try:
         import yaml
@@ -3306,28 +4207,56 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
         # refusal never reports success.
         data = _vendored_cfio().load(str(chiplet_file), allow_intermediate=True)
 
+        # Every die sized or exempt before a byte is written (DieOutlineRefused
+        # otherwise). In a worker run this repeats the head's decision on the
+        # same file through the same reader, so it opens nothing again; a
+        # direct caller gets the same refusals the worker does.
+        if io_pad_refs is None:
+            io_pad_refs = [str(p['ref']) for p in io_pads or []
+                           if isinstance(p, dict) and p.get('ref')]
+        die_plan = resolve_die_outlines(
+            data, str(chiplet_file.resolve().parent), devices,
+            die_outline_layers, die_outline_exempt, outline_reader,
+            io_pad_refs)
+        # Decided here for the same reason, and repeating the head's decision
+        # in a worker run.
+        technology_plan = (_technology_overlay.plan(data, system_chiplet,
+                                                    io_pad_refs)
+                           if system_chiplet is not None else None)
+        # The same again, and the defence for a direct caller: the flow
+        # checks the frame at admission, before the board exists.
+        layout_plan = resolve_die_layouts(data, die_plan, die_layouts,
+                                          outline_reader)
+        # The mount plane, from the PDK unless given; before any write too.
+        if isinstance(attachment_surface_z, AttachFrame):
+            frame = attachment_surface_z
+        elif attachment_surface_z is None:
+            frame = read_attach_frame()
+        else:
+            frame = AttachFrame.given(attachment_surface_z)
+        attachment_surface_z = frame.at()
+
         # Find and update the interposer component
         updated = False
         for component in data.get('components', []):
             if component.get('id') == 'interposer':
                 abs_path = str(Path(interposer_gds_path).resolve())
-                # Colocated artifacts get a relative reference (readers
-                # anchor relative paths on the .chiplet's directory), so
-                # the exported set stays portable: move/copy/commit the
-                # output directory and it still opens. Anything outside
-                # the .chiplet's tree keeps the absolute path (.chiplet
-                # is machine-local by default).
-                try:
-                    layout_ref = str(Path(abs_path).relative_to(
-                        chiplet_file.resolve().parent))
-                except ValueError:
-                    layout_ref = abs_path
+                # Colocated artifacts get a plain relative reference, so the
+                # exported set stays portable: move/copy/commit the output
+                # directory and it still opens.
+                layout_ref = _layout_ref(interposer_gds_path,
+                                         str(chiplet_file.parent))
                 component['layout'] = layout_ref
 
-                # Read top_cell from interposer GDS
-                interposer_top_cell = _read_gds_top_cell(abs_path)
-                if interposer_top_cell:
-                    component['top_cell'] = interposer_top_cell
+                # Read top_cell from interposer GDS. Not a refusal: the
+                # interposer GDS is already on disk by now, and its top cell
+                # is this run's own -c name. A failure is reported, and
+                # top_cell stays what the .chiplet had.
+                try:
+                    component['top_cell'] = _read_gds_top_cell(abs_path)
+                except DieGdsError as exc:
+                    print(f"Warning: interposer top_cell not written: {exc}",
+                          file=sys.stderr)
 
                 if 'dimensions' not in component:
                     component['dimensions'] = {}
@@ -3336,9 +4265,7 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                 # field, decoupled from the physical body. dimensions.thickness
                 # is intentionally NOT overwritten here: it keeps the KiCad
                 # board-stackup value the writer emitted (the physical interposer
-                # body). Consumers read attachment_surface_z as the mount
-                # reference and fall back to dimensions.thickness only for legacy
-                # files that predate this split.
+                # body). attachment_surface_z is the mount plane.
                 component['attachment_surface_z'] = attachment_surface_z
 
                 # Update width/height from bbox
@@ -3391,7 +4318,7 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     component['dimensions']['width'] = dim_w
                     component['dimensions']['height'] = dim_h
 
-                    # Per chiplet-spec/docs/coord_frame_contract.md
+                    # Per chiplet-system-spec/docs/coord_frame_contract.md
                     # section 1: position is the geometric center of
                     # the component in the canonical GDS-bbox-corner
                     # frame. The interposer's bbox center, expressed
@@ -3429,8 +4356,8 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     print(f"  attachment_surface_z={attachment_surface_z} um")
 
                 if io_pads is not None:
-                    # Per chiplet-spec/docs/coord_frame_contract.md
-                    # sections 4.2 and 6.1: io_pads positions live in
+                    # Per chiplet-system-spec/docs/coord_frame_contract.md
+                    # sections 1 and 6.1: io_pads positions live in
                     # the same canonical GDS-bbox-corner frame as the
                     # interposer they nest under. The JSON producer
                     # (kicad_pcb_to_iopads.py) emits in HYP-absolute
@@ -3571,8 +4498,38 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                 print(f"  {component.get('id')}: dimensions.thickness = "
                       f"{float(thickness)} um")
 
-            # Per chiplet-spec/docs/coord_frame_contract.md sections 2
-            # and 4.4: dies produced by the gds_to_kicad pipeline have
+            # Width and height. A declared die gets its outline's size, from
+            # the integer box and the die layout's dbu as exact Decimals
+            # (exact_float refused at the read anything the field cannot
+            # carry). The float written is the one whose repr is that exact
+            # value, so the file holds 123.457, never the 123.45700000000001
+            # float multiplication gives for 123457 DBU at dbu 0.001. An
+            # exempt die keeps the width/height already in the file.
+            die_ref = _component_ref(component)
+            outline = die_plan.outlines.get(die_ref)
+            if outline is not None:
+                dims = component.setdefault('dimensions', {})
+                dims['width'] = _die_outline.exact_float(outline.width_um)
+                dims['height'] = _die_outline.exact_float(outline.height_um)
+                print(f"  {die_ref}: dimensions {outline.width_um} x "
+                      f"{outline.height_um} um (die outline "
+                      f"{_die_outline.format_layer(outline.layer)} of "
+                      f"{outline.gds.top_cell} in {outline.gds.path})")
+            elif die_ref in die_plan.exempt:
+                dims = component.get('dimensions') or {}
+                print(f"  {die_ref}: exempt from the die outline read; keeps "
+                      f"dimensions {dims.get('width')} x {dims.get('height')} "
+                      f"um")
+            else:
+                # Not in the plan: resolve_die_outlines refuses every other
+                # die, so this is a wire-bond pad written as a die whose
+                # --io-pads entry add_io_pads skipped, and the dedup above
+                # therefore kept it. It is left as it is.
+                print(f"  {die_ref}: not sized: an --io-pads entry carries "
+                      f"this id, so it is a wire-bond pad, not a die")
+
+            # Per chiplet-system-spec/docs/coord_frame_contract.md section 2:
+            # dies produced by the gds_to_kicad pipeline have
             # GDS (0,0) as the footprint anchor. The mesh is built
             # around that origin; position places it in the canonical
             # frame.
@@ -3581,10 +4538,11 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
             conn_id = component.get('connection', '')
             if conn_id and conn_id in connection_stacks:
                 stack = connection_stacks[conn_id]
-                stack_height = sum(
-                    layer.get('height', 0.0) for layer in stack.get('layers', [])
-                )
-                die_z = attachment_surface_z + stack_height
+                heights = [layer.get('height', 0.0)
+                           for layer in stack.get('layers', [])]
+                stack_height = float(sum((_as_written(h) for h in heights),
+                                         Decimal(0)))
+                die_z = frame.at(*heights)
                 if 'position' not in component:
                     component['position'] = {}
                 component['position']['z'] = die_z
@@ -3625,13 +4583,21 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     component['position']['x'] = new_x
                     component['position']['y'] = new_y
 
-            # Read top_cell from the die GDS. Prefer the device's GDS path,
-            # which the HYP parser already resolved against the board directory:
-            # a board-relative die layout (e.g. ../chiplets/die.gds) resolves
-            # correctly here regardless of the output directory, matching the
-            # geometry the assembly was built from. Fall back to the .chiplet
-            # layout field, resolved against the .chiplet's own directory (where
-            # readers anchor a relative layout) rather than the process CWD.
+            # top_cell of the die GDS, as resolve_die_outlines read it: the
+            # device's GDS path, which the HYP parser already resolved against
+            # the board directory (a board-relative die layout such as
+            # ../chiplets/die.gds resolves here regardless of the output
+            # directory, matching the geometry the assembly was built from),
+            # else the .chiplet layout field, resolved against the .chiplet's
+            # own directory (where readers anchor a relative layout) rather
+            # than the process CWD. The plan holds it for declared and exempt
+            # dies alike; a die whose GDS could not be read never gets here,
+            # and a wire-bond pad written as a die keeps what it had. The same
+            # choice of path, with ${VAR} left unexpanded, decides the
+            # bundling below.
+            die_read = die_plan.gds(die_ref)
+            if die_read is not None:
+                component['top_cell'] = die_read.top_cell
             die_gds = ''
             ref = component.get('id', '')
             dev = None
@@ -3646,10 +4612,28 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                 if die_gds and "${" not in die_gds and not os.path.isabs(die_gds):
                     die_gds = os.path.normpath(os.path.join(
                         str(chiplet_file.resolve().parent), die_gds))
-            if die_gds:
-                die_top_cell = _read_gds_top_cell(die_gds)
-                if die_top_cell:
-                    component['top_cell'] = die_top_cell
+
+            # A die given a full layout (--die-layouts): the component names
+            # that file, with the contract's top cell, never the file's one
+            # parentless cell. The abstract stays what the assembly places,
+            # and the metadata names it as it was composed, by the same choice
+            # of path the plan read. Bundling below decides on the full file.
+            die_layout = layout_plan.get(die_ref)
+            if die_layout is not None:
+                abstract = _die_gds_path(
+                    die_ref, component,
+                    {d.ref: d for d in devices or [] if d.gds_file},
+                    str(chiplet_file.resolve().parent))
+                metadata = component.get('metadata')
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                metadata['assembly_view'] = _die_layouts.ASSEMBLY_VIEW
+                metadata['assembly_view_layout'] = _layout_ref(
+                    abstract, str(chiplet_file.parent))
+                component['metadata'] = metadata
+                component['top_cell'] = die_layout.top_cell
+                component['layout'] = die_layout.layout
+                die_gds = die_layout.layout
 
             # Self-contained die GDS. The die layout is a board-relative path
             # (e.g. ../chiplets/die.gds) copied verbatim from the board; it
@@ -3661,9 +4645,14 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
             # point at it, so a moved/regenerated bundle still renders. When it
             # already resolves (the shipped demo, whose ../chiplets/ sibling
             # exists), leave it untouched: no 34 MB copy, no machine path, and
-            # byte-stable for the reproducibility gate. Only real die devices
-            # (dev is not None) are bundled; the interposer GDS is colocated.
-            if dev is not None and die_gds and os.path.isfile(die_gds):
+            # byte-stable for the reproducibility gate. An absolute layout that
+            # resolves is rewritten relative to the .chiplet when the two share
+            # a root (see _layout_ref), so it opens from every mount of that
+            # root. Only real die devices (dev is not None) and dies given a
+            # full layout are bundled or rewritten; the interposer GDS is
+            # colocated.
+            if ((dev is not None or die_layout is not None) and die_gds
+                    and os.path.isfile(die_gds)):
                 out_dir = chiplet_file.resolve().parent
                 recorded = component.get('layout', '')
                 resolves = False
@@ -3673,20 +4662,36 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                                 os.path.join(str(out_dir), recorded)))
                     resolves = os.path.isfile(cand)
                 if not resolves:
-                    bundle_dir = out_dir / "chiplets"
+                    if not ref:
+                        raise ValueError("Cannot bundle a die layout without "
+                                         "a nonempty component id")
+                    # Each instance owns a directory: independent ready dies
+                    # often both use layout.gds. A flat basename (or an
+                    # ambiguous ref_basename concatenation) loses one source.
+                    # Encode refs as one component, including '.'/'..' refs.
+                    bundle_ref = quote(ref, safe="").replace(".", "%2E")
+                    bundle_dir = out_dir / "chiplets" / bundle_ref
                     bundle_dir.mkdir(parents=True, exist_ok=True)
                     dest = bundle_dir / os.path.basename(die_gds)
                     if os.path.realpath(die_gds) != os.path.realpath(str(dest)):
                         shutil.copy2(die_gds, dest)
                     component['layout'] = os.path.join(
-                        "chiplets", os.path.basename(die_gds))
+                        "chiplets", bundle_ref, os.path.basename(die_gds))
                     print(f"  {ref}: bundled die GDS -> {component['layout']} "
                           f"(self-contained; ../chiplets not reachable from "
                           f"the output dir)")
+                elif os.path.isabs(recorded):
+                    component['layout'] = _layout_ref(
+                        recorded, str(chiplet_file.parent))
+            if die_layout is not None:
+                print(f"  {ref}: layout {component['layout']} (full layout, "
+                      f"top cell {die_layout.top_cell}); the assembly view "
+                      f"shows the abstract "
+                      f"{component['metadata']['assembly_view_layout']}")
 
         # Strip the intermediate-frame marker emitted by KiCad's
         # exporter (see kicad/pcbnew/exporters/export_chiplet.cpp).
-        # Per chiplet-spec/docs/coord_frame_contract.md section 4.1,
+        # Per chiplet-system-spec/docs/coord_frame_contract.md section 4, item 1,
         # this finalize step converts to the canonical frame; the
         # canonical .chiplet has no _metadata block. Pop is no-op when
         # the input was already finalized (idempotent re-run).
@@ -3703,6 +4708,14 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
         # DOWN to the baseline (which would forge a "1.0" label over 1.1 bytes).
         data['format_version'] = _vendored_cfio().check_format_version(
             data.get('format_version'))
+
+        # An empty intermediate technologies block parses as None. Canonical
+        # output uses an empty mapping, without inventing any technology IDs
+        # or adding the optional block when the input omitted it.
+        if 'technologies' in data and data['technologies'] is None:
+            data['technologies'] = {}
+        if technology_plan is not None:
+            _technology_overlay.apply(data, *technology_plan)
 
         # Write back the updated file, atomically. A plain open(..., 'w')
         # truncates the existing document before a single byte of the new one
@@ -3726,6 +4739,11 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
         # turn ordinary failures into a False that the caller maps to exit 1,
         # which means bad CALLER input -- the wrong thing to tell someone whose
         # PDK is misaligned, because no argument they can change fixes it.
+        raise
+    except (DieOutlineRefused, TechnologyRefused, DieLayoutRefused,
+            AttachFrameRefused):
+        # Same reason: it names every refused die, and flattening it into
+        # "Error updating chiplet file" would lose which ones and why.
         raise
     except Exception as e:
         if _is_manifest_version_error(e):
@@ -3761,6 +4779,7 @@ def _atomic_write_text(path, text):
     Writes a sibling temp file, flushes it to the platter, then ``os.replace``,
     which is atomic within one filesystem. A reader either sees the whole old
     document or the whole new one, never a half-written one.
+    Existing destination permissions are preserved; new files honor umask.
 
     The sibling directory matters: ``os.replace`` across filesystems is not
     atomic (and on some platforms not even permitted), so a temp file in /tmp
@@ -3772,9 +4791,18 @@ def _atomic_write_text(path, text):
     valid document used to be.
     """
     directory = os.path.dirname(os.path.abspath(path)) or "."
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".chiplet-", suffix=".tmp")
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        mode = None
+    fd, tmp = create_output_temp(directory=directory, prefix=".chiplet-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as handle:
+            if mode is not None:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(handle.fileno(), mode)
+                else:  # Windows exposes chmod, but not fchmod.
+                    os.chmod(tmp, mode)
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
@@ -3800,105 +4828,35 @@ def _is_manifest_version_error(exc):
     return bool(version_cls) and isinstance(exc, version_cls)
 
 
-# Ecosystem-root variables accepted inside path inputs (board text vars,
-# footprint fields, CLI arguments, .chiplet entries). Each maps to the
-# candidate directory names walked for next to this checkout (canonical
-# ecosystem name first, then the upstream repository name so default
-# GitHub clones resolve too) plus the marker subpath that must exist
-# under the root. Same discovery convention as
-# _find_interposer_pdk_python (see adk/docs/integration.md).
-_PATH_VAR_MARKERS = {
-    "INTERPOSER_PDK_ROOT": (("interposer", "OpenIntM4TM2"),
-                            ("libs.tech", "klayout")),
-    "GDS_TO_KICAD_ROOT": (("gds_to_kicad", "gds-to-kicad"), ("pdks",)),
-    "ADK_ROOT": (("adk", "ADK"), ("klayout", "drc")),
-    "INTERCONNECT_PDK_ROOT": (("interconnect_pdk",
-                               "IHP-Interconnect-IntM4TM2"), ("manifest",)),
-    # Base SG13G2 PDK (via_stack PCell library). Standard IHP convention:
-    # $PDK_ROOT/ihp-sg13g2/...
-    "PDK_ROOT": (("IHP-Open-PDK",), ("ihp-sg13g2", "libs.tech", "klayout")),
-}
+# Compatibility entry points for worker consumers; the implementation is
+# shared with carrier preflight without importing KLayout or the GUI.
+_PATH_VAR_MARKERS = _layer_map.PATH_VAR_MARKERS
 
-_PATH_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+def _or_exit(read, *args, **kwargs):
+    """``read(*args, **kwargs)``, ending the run on a LayerMapError.
+
+    A refused carrier root is a ValueError, and callers sit inside except
+    ValueError and except Exception blocks that would turn it into a skipped
+    pad or a warning and draw on. An exit passes them.
+    """
+    try:
+        return read(*args, **kwargs)
+    except _layer_map.LayerMapError as exc:
+        sys.exit(str(exc))
 
 
 def _discover_path_var(name: str) -> Optional[str]:
-    """Resolve an ecosystem-root variable: env first, then sibling walk.
-
-    A set-but-invalid environment value (marker subpath missing) falls
-    through to the walk, mirroring _find_interposer_pdk_python.
-    Returns the root as a string, or None when unresolvable.
-    """
-    marker = _PATH_VAR_MARKERS.get(name)
-    if marker is None:
-        # Only the known ecosystem-root variables are expandable. An unknown
-        # ${NAME} is a typo/misuse, not a licence to expand an arbitrary
-        # environment variable; return None so _expand_path_vars fails loudly.
-        return None
-    env = os.environ.get(name)
-    if env and Path(env).joinpath(*marker[1]).is_dir():
-        return env
-    dirnames, sub = marker
-    here = Path(__file__).resolve()
-    for base in here.parents:
-        for dirname in dirnames:
-            cand = base / dirname
-            if cand.joinpath(*sub).is_dir():
-                return str(cand)
-    return None
+    return _or_exit(_layer_map.discover_path_var, name, start=__file__)
 
 
 def _expand_path_vars(path: Optional[str]) -> Optional[str]:
-    """Expand ${VAR} ecosystem-root references in a path input.
-
-    Resolution per variable: environment -> sibling-checkout walk ->
-    LOUD failure (a path that silently keeps a literal ``${VAR}``
-    component would just "not exist" downstream and mask the real
-    problem). Paths without ``${`` pass through untouched, so absolute
-    and relative inputs keep their normal semantics.
-    """
-    if not path or "${" not in path:
-        return path
-
-    def _repl(match):
-        name = match.group(1)
-        value = _discover_path_var(name)
-        if value is None:
-            sys.exit(
-                "ERROR: cannot resolve ${%s} in path '%s'. Set the %s "
-                "environment variable or keep the checkout next to this "
-                "tool (ecosystem discovery convention, see "
-                "adk/docs/integration.md)." % (name, path, name))
-        return value
-
-    result = _PATH_VAR_RE.sub(_repl, path)
-    if "${" in result:
-        # A malformed reference (e.g. unterminated ${, or an invalid name) the
-        # regex could not match survived: fail loud rather than letting a
-        # literal ${...} component silently "not exist" downstream.
-        sys.exit(
-            "ERROR: malformed variable reference in path '%s'. Use ${NAME} "
-            "with an ecosystem-root name (see adk/docs/integration.md)." % path)
-    return result
+    return _or_exit(_layer_map.expand_path_vars, path,
+                    discover=_discover_path_var)
 
 
 def _find_default_lyp() -> str:
-    """Default layer-properties file for the interposer GDS.
-
-    Resolves the interposer PDK's canonical
-    ``libs.tech/klayout/tech/intm4tm2.lyp`` via env/walk discovery. The
-    file belongs to the interposer PDK, not the plugin, so there is no
-    vendored copy: when no checkout resolves, return the unexpanded
-    ``${INTERPOSER_PDK_ROOT}`` form (mirrors _find_interposer_template) so
-    the error text points somewhere actionable instead of silently using a
-    stale bundled .lyp.
-    """
-    python_dir = _find_interposer_pdk_python()
-    if python_dir is not None:
-        cand = python_dir.parent / "tech" / "intm4tm2.lyp"
-        if cand.is_file():
-            return str(cand)
-    return "${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp"
+    return _or_exit(_layer_map.find_default_lyp, start=__file__)
 
 
 def _find_interposer_template() -> str:
@@ -3919,23 +4877,285 @@ def _find_interposer_template() -> str:
     return "${INTERPOSER_PDK_ROOT}/" + "/".join(sub)
 
 
-def _read_gds_top_cell(gds_path: str) -> Optional[str]:
-    """Read the top cell name from a GDS file.
-
-    Returns the name of the top cell, or None if the file cannot be read.
-    """
+def _expand_gds_path(gds_path: str) -> str:
+    """``gds_path`` with ${VAR} references expanded; DieGdsError if one is not."""
     try:
-        gds_file = Path(_expand_path_vars(gds_path))
-        if not gds_file.exists():
-            return None
-        layout = db.Layout()
-        layout.read(str(gds_file))
-        top = layout.top_cell()
-        if top:
-            return top.name
-    except Exception:
-        pass
-    return None
+        return _layer_map.expand_path_vars(gds_path,
+                                           discover=_discover_path_var)
+    except _layer_map.LayerMapError as exc:
+        raise DieGdsError("cannot resolve GDS path %s: %s"
+                          % (gds_path, exc)) from None
+
+
+def _read_gds_top_cell(gds_path: str) -> str:
+    """The one top cell of a GDS file, resolved the way a die's top cell is.
+
+    Raises DieGdsError when the file is missing or unreadable, or holds no
+    cell or more than one top cell. There is no None: a caller that writes
+    top_cell from this either has the one cell or knows why not.
+    """
+    return _die_outline.read_top_cell(_expand_gds_path(gds_path))
+
+
+def _component_ref(component: Dict) -> str:
+    """A .chiplet component's id, as the reference HYP devices and flags use."""
+    ident = component.get('id')
+    return '' if ident is None else str(ident)
+
+
+def _io_pad_refs(io_pads_json: Optional[str]) -> List[str]:
+    """The references of every entry of an --io-pads file, placed or not.
+
+    Read before anything is placed, for resolve_die_outlines at the worker
+    head; the .chiplet update is handed the same list, so both decide on the
+    same set whichever entries add_io_pads then skips. A file add_io_pads
+    could not read gives none (add_io_pads reports it).
+    """
+    if not io_pads_json:
+        return []
+    try:
+        with open(io_pads_json, 'r') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    pads = data.get('io_pads') if isinstance(data, dict) else None
+    if not isinstance(pads, list):
+        return []
+    return [str(p['ref']) for p in pads if isinstance(p, dict) and p.get('ref')]
+
+
+def _die_gds_path(ref: str, component: Optional[Dict],
+                  device_by_ref: Dict[str, 'Device'],
+                  chiplet_dir: str) -> Optional[str]:
+    """The GDS a die's outline and top cell are read from, or None.
+
+    The HYP device's GDS_FILE first: the parser already resolved it against
+    the board directory, and it is the file add_device places. Otherwise the
+    component's layout, resolved against the .chiplet's own directory, where
+    readers anchor a relative layout. ${VAR} references are expanded
+    (DieGdsError when one cannot be).
+    """
+    dev = device_by_ref.get(ref)
+    path = dev.gds_file if dev is not None else ''
+    if not path and component is not None:
+        path = str(component.get('layout') or '')
+        if path and "${" not in path and not os.path.isabs(path):
+            path = os.path.normpath(os.path.join(chiplet_dir, path))
+    if not path:
+        return None
+    return _expand_gds_path(path) if "${" in path else path
+
+
+def resolve_die_outlines(chiplet_data: Optional[Dict], chiplet_dir: str,
+                         devices: Optional[List['Device']],
+                         outline_layers: Optional[Dict[str, Tuple[int, int]]]
+                         = None,
+                         outline_exempt: Optional[List[str]] = None,
+                         reader: Optional['_die_outline.DieGdsReader'] = None,
+                         io_pad_refs: Optional[Iterable[str]] = None
+                         ) -> '_die_outline.DieOutlinePlan':
+    """Decide, for every die, its outline or its exemption; refuse otherwise.
+
+    With a .chiplet (``chiplet_data``), its components of type die are the
+    dies, and each must be named by exactly one of ``outline_layers``
+    ({ref: (layer, datatype)}, --die-outline-layers) and ``outline_exempt``
+    (--die-outline-exempt). Without one, a named reference must be a HYP
+    device, and a device nobody names keeps its cell bbox as the boundary.
+
+    ``io_pad_refs`` are the references of the --io-pads entries. A .chiplet
+    die component with one of these ids is a wire-bond pad written as a die
+    (by a tool other than this plugin's writer); update_chiplet_file replaces
+    it with the interposer's io_pads, so it is not a die here, needs no flag,
+    and a flag naming it refuses.
+
+    A declared die gets its outline read from its own GDS; an exempt die's GDS
+    is still opened and its top cell resolved, so a missing or unreadable
+    file refuses for either. A reference that two .chiplet dies share, or
+    that two HYP devices share while it is a die or named by a flag, refuses,
+    since a per-reference declaration cannot tell them apart. A shared HYP
+    reference nothing else uses (two ``REF**`` footprints) is not a die and
+    is left alone.
+
+    Every offender is collected before raising DieOutlineRefused, so one run
+    names all of them. Nothing is written here.
+    """
+    layers = dict(outline_layers or {})
+    exempt = list(outline_exempt or [])
+    declared_any = bool(layers or exempt)
+    pads = set(io_pad_refs or ())
+    reader = reader if reader is not None else _die_outline.DieGdsReader()
+    devices = list(devices or [])
+    device_by_ref = {dev.ref: dev for dev in devices if dev.gds_file}
+    duplicated = set()
+    chiplet_offenders: List[Tuple[str, str]] = []
+    flag_offenders: List[Tuple[str, str]] = []
+
+    if chiplet_data is not None:
+        components = [c for c in chiplet_data.get('components') or []
+                      if isinstance(c, dict)]
+        all_dies = [(_component_ref(c), c) for c in components
+                    if c.get('type') == 'die']
+        dies = [(ref, c) for ref, c in all_dies if ref not in pads]
+        for ref, count in Counter(ref for ref, _c in dies).items():
+            if count > 1:
+                duplicated.add(ref)
+                chiplet_offenders.append((
+                    ref, "%d .chiplet die components carry this id; a per-die "
+                         "outline cannot tell them apart" % count))
+        die_refs = {ref for ref, _c in dies}
+        pad_dies = {ref for ref, _c in all_dies if ref in pads}
+        other_types = {_component_ref(c): c.get('type') for c in components
+                       if c.get('type') != 'die'}
+        for flag, named in (("--die-outline-layers", layers),
+                            ("--die-outline-exempt", exempt)):
+            for ref in named:
+                if ref in die_refs:
+                    continue
+                if ref in pad_dies:
+                    why = ("an --io-pads entry carries this id, so the .chiplet "
+                           "die component with it is a wire-bond pad that the "
+                           "interposer's io_pads replace, not a die")
+                elif ref in other_types:
+                    why = ("the .chiplet component with this id is of type "
+                           "%r, not a die" % other_types[ref])
+                else:
+                    why = "the .chiplet has no die component with this id"
+                flag_offenders.append((ref, "%s names it, but %s"
+                                       % (flag, why)))
+        used = die_refs | set(layers) | set(exempt)
+    else:
+        for flag, named in (("--die-outline-layers", layers),
+                            ("--die-outline-exempt", exempt)):
+            for ref in named:
+                if ref not in device_by_ref:
+                    flag_offenders.append((ref, "%s names it, but no HYP "
+                                                "device carries this "
+                                                "reference" % flag))
+        dies = [(dev.ref, None) for dev in devices
+                if dev.ref in layers or dev.ref in exempt]
+        used = set(layers) | set(exempt)
+
+    offenders: List[Tuple[str, str]] = []
+    for ref, count in Counter(dev.ref for dev in devices).items():
+        if count > 1 and ref in used:
+            duplicated.add(ref)
+            offenders.append((ref, "%d HYP devices carry this reference; a "
+                                   "per-die outline cannot tell them apart"
+                              % count))
+    offenders += chiplet_offenders + flag_offenders
+
+    # (ref, path, layer or None for exempt), in die order, one per reference.
+    reads: List[Tuple[str, str, Optional[Tuple[int, int]]]] = []
+    seen = set()
+    for ref, component in dies:
+        if ref in seen or ref in duplicated:
+            continue
+        seen.add(ref)
+        if ref in layers and ref in exempt:
+            offenders.append((ref, "both --die-outline-layers and "
+                                   "--die-outline-exempt name this die; it is "
+                                   "either sized from its outline or exempt"))
+            continue
+        if ref not in layers and ref not in exempt:
+            if declared_any:
+                cause = ("neither --die-outline-layers nor "
+                         "--die-outline-exempt names this die")
+            else:
+                cause = ("no die outline layer was given for any die (neither "
+                         "--die-outline-layers nor --die-outline-exempt), so "
+                         "this die cannot be sized from its GDS")
+            offenders.append((ref, cause + ". Set the footprint field "
+                              "DIE_OUTLINE_LAYER to the LAYER/DATATYPE its GDS "
+                              "draws the die outline on (for example 39/4 for "
+                              "SG13G2 dies) and export again"))
+            continue
+        try:
+            path = _die_gds_path(ref, component, device_by_ref, chiplet_dir)
+        except DieGdsError as exc:
+            offenders.append((ref, str(exc)))
+            continue
+        if path is None:
+            offenders.append((ref, "no die GDS to read: no HYP device with a "
+                                   "GDS_FILE carries this reference and the "
+                                   ".chiplet component has no layout"))
+            continue
+        reads.append((ref, path, layers.get(ref)))
+
+    # Each file is opened once, with every layer any die declares on it,
+    # however many spellings (a symlink, a ${VAR}) name it.
+    wanted: Dict[str, set] = {}
+    for _ref, path, layer in reads:
+        layers_here = wanted.setdefault(os.path.realpath(path), set())
+        if layer is not None:
+            layers_here.add(layer)
+    for real, path_layers in wanted.items():
+        reader.load(real, sorted(path_layers))
+
+    plan = _die_outline.DieOutlinePlan()
+    for ref, path, layer in reads:
+        try:
+            if layer is None:
+                plan.exempt[ref] = reader.gds(path)
+            else:
+                plan.outlines[ref] = reader.outline(path, layer)
+        except DieGdsError as exc:
+            offenders.append((ref, str(exc)))
+
+    if offenders:
+        raise DieOutlineRefused(offenders)
+    return plan
+
+
+def resolve_die_layouts(chiplet_data: Optional[Dict],
+                        die_plan: '_die_outline.DieOutlinePlan',
+                        die_layouts: Optional[Dict[str,
+                                                   '_die_layouts.DieLayout']],
+                        reader: Optional['_die_outline.DieGdsReader'] = None
+                        ) -> Dict[str, '_die_layouts.DieLayout']:
+    """Check each --die-layouts entry against its die; refuse otherwise.
+
+    A named reference must be a die of the .chiplet that ``die_plan`` sized
+    or exempted, since the GDS read for it there is the abstract the
+    assembly places. Its full layout and that abstract must then agree with
+    the contract (die_layouts.frame_cause). The full layout is read through
+    ``reader``, so a worker run opens it once.
+
+    Every offender is collected before raising DieLayoutRefused, and
+    nothing is written here. Returns the entries by reference, for the
+    .chiplet update.
+    """
+    if not die_layouts:
+        return {}
+    reader = reader if reader is not None else _die_outline.DieGdsReader()
+    types: Dict[str, object] = {}
+    for component in (chiplet_data or {}).get('components') or []:
+        if isinstance(component, dict):
+            types.setdefault(_component_ref(component), component.get('type'))
+    offenders: List[Tuple[str, str]] = []
+    for ref, entry in die_layouts.items():
+        abstract = die_plan.gds(ref)
+        if abstract is None:
+            if types.get(ref) == 'die':
+                why = ("an --io-pads entry carries this id, so the .chiplet "
+                       "die component with it is a wire-bond pad, not a die")
+            elif ref in types:
+                why = ("the .chiplet component with this id is of type %r, "
+                       "not a die" % types[ref])
+            else:
+                why = "the .chiplet has no die component with this id"
+            offenders.append((ref, "--die-layouts names it, but " + why))
+            continue
+        try:
+            full = reader.tops(entry.layout)
+        except DieGdsError as exc:
+            offenders.append((ref, "full layout: %s" % exc))
+            continue
+        cause = _die_layouts.frame_cause(entry, full, abstract)
+        if cause:
+            offenders.append((ref, cause))
+    if offenders:
+        raise DieLayoutRefused(offenders)
+    return dict(die_layouts)
 
 
 # Python module dir inside the interconnect PDK (IHP libs.tech layout).
@@ -4265,33 +5485,18 @@ def _maybe_set_interconnect_adapter(data):
 
 
 def _find_interposer_pdk_python():
-    """Locate the interposer PDK's python tooling dir (bump_mirror.py).
-
-    Ecosystem discovery convention (same shape as ADK_ROOT /
-    INTERCONNECT_PDK_ROOT): explicit root via $INTERPOSER_PDK_ROOT first,
-    then an upward walk from this file for a sibling interposer/ checkout.
-    Returns the directory as a Path, or None.
-    """
-    env = os.environ.get("INTERPOSER_PDK_ROOT")
-    if env:
-        cand = Path(env) / "libs.tech" / "klayout" / "python"
-        if (cand / "bump_mirror.py").is_file():
-            return cand
-    here = Path(__file__).resolve()
-    for base in here.parents:
-        for dirname in _PATH_VAR_MARKERS["INTERPOSER_PDK_ROOT"][0]:
-            cand = base / dirname / "libs.tech" / "klayout" / "python"
-            if (cand / "bump_mirror.py").is_file():
-                return cand
-    return None
+    return _or_exit(_layer_map.find_interposer_pdk_python, start=__file__)
 
 
+@_intm4tm2_scope()
 def _import_bump_mirror():
     """Import bump_mirror (Cu-pillar geometry + DRC + auto-resolve).
 
     Resolved via _find_interposer_pdk_python(). Returns the module, or
     None when the interposer PDK is not reachable; callers that REQUIRE
     pillars must treat None as a hard error, never as a soft skip.
+    Imported inside _intm4tm2_scope, so its directory, which holds the
+    interposer's own pypreprocessor, does not stay on sys.path after it.
     """
     try:
         python_dir = _find_interposer_pdk_python()
@@ -4310,44 +5515,80 @@ def _import_bump_mirror():
         return None
 
 
+@_intm4tm2_scope()
+def _add_device_pillars(bm, pillar_gen, ref: str, bumps,
+                        body_diameter_um: float) -> int:
+    """Draw one device's Cu pillars with bump_mirror, whose pad geometry is
+    the IntM4TM2 CuPillarPad PCell. Returns the number of pillars placed."""
+    ensure_lib = getattr(bm, '_ensure_pcell_lib', None)
+    if ensure_lib is not None:
+        ensure_lib()
+    _check_intm4tm2_cni('CuPillarPad')
+    return pillar_gen.add_device_bumps(ref, bumps, body_diameter_um)
+
+
+FILL_ENGINE_SUBPATH = ("libs.tech", "klayout", "python", "fill_closure.py")
+
+
+def _fill_engine_path() -> Optional[Path]:
+    """The fill_closure.py this export must use, resolved, or None.
+
+    $INTERPOSER_PDK_ROOT, when set, is the only place looked at: a root that
+    lacks the engine is an error, not a cue to walk on to a sibling checkout
+    that may be a different PDK. Unset, the sibling walk of the other
+    interposer lookups applies.
+    """
+    selected = os.environ.get("INTERPOSER_PDK_ROOT")
+    if selected:
+        path = Path(selected).joinpath(*FILL_ENGINE_SUBPATH)
+        if not path.is_file():
+            print("Warning: INTERPOSER_PDK_ROOT=%s has no fill engine (%s); "
+                  "point it at a checkout that includes the metal-fill work."
+                  % (selected, path), file=sys.stderr)
+            return None
+        return path.resolve()
+    root = _discover_path_var("INTERPOSER_PDK_ROOT")
+    if root is None:
+        print("Warning: interposer PDK not found (set INTERPOSER_PDK_ROOT "
+              "or keep the sibling checkout).", file=sys.stderr)
+        return None
+    path = Path(root).joinpath(*FILL_ENGINE_SUBPATH)
+    if not path.is_file():
+        print("Warning: the interposer PDK checkout at %s has no fill engine "
+              "(%s); use a checkout that includes the metal-fill work."
+              % (root, path), file=sys.stderr)
+        return None
+    return path.resolve()
+
+
 def _import_fill_closure():
     """Import the interposer PDK's metal-fill engine (fill_closure).
 
-    Resolved via _find_interposer_pdk_python() (same INTERPOSER_PDK_ROOT
-    discovery as bump_mirror). Returns the module, or None when the PDK is not
-    reachable OR the checkout predates the fill engine. A caller that was asked
-    to fill MUST treat None as a hard error, never a soft skip.
+    Resolved by _fill_engine_path(). Returns the module, or None when the
+    engine is not there, does not import, or imports from anywhere but the
+    resolved path (an earlier sys.path entry or an already imported module of
+    the same name). A caller that was asked to fill MUST treat None as a hard
+    error, never a soft skip.
     """
-    try:
-        python_dir = _find_interposer_pdk_python()
-        if python_dir is None:
-            print("Warning: interposer PDK not found (set INTERPOSER_PDK_ROOT "
-                  "or keep the sibling checkout).", file=sys.stderr)
-            return None
-        has_fc = (python_dir / "fill_closure.py").is_file()
-        has_fs = (python_dir / "fill_stack.py").is_file()
-        if not (has_fc or has_fs):
-            print("Warning: interposer PDK checkout has no fill engine "
-                  "(libs.tech/klayout/python/fill_closure.py); use a checkout "
-                  "that includes the metal-fill work.", file=sys.stderr)
-            return None
-        if str(python_dir) not in sys.path:
-            sys.path.insert(0, str(python_dir))
-        # fill_stack may ship as its own module or as an entry point added to
-        # fill_closure; accept either and return whichever exposes fill_stack.
-        mod = None
-        if has_fs:
-            try:
-                import fill_stack as mod
-            except Exception:
-                mod = None
-        if mod is None or not hasattr(mod, "fill_stack"):
-            import fill_closure as mod
-        return mod
-    except Exception as exc:
-        print("Warning: could not import the fill engine: %s" % exc,
-              file=sys.stderr)
+    path = _fill_engine_path()
+    if path is None:
         return None
+    python_dir = str(path.parent)
+    try:
+        if python_dir not in sys.path:
+            sys.path.insert(0, python_dir)
+        import fill_closure as mod
+    except Exception as exc:
+        print("Warning: could not import the fill engine %s: %s"
+              % (path, exc), file=sys.stderr)
+        return None
+    imported = getattr(mod, "__file__", None)
+    if not imported or Path(imported).resolve() != path:
+        print("Warning: fill_closure imported from %s, not from the resolved "
+              "%s; refusing an engine from another checkout."
+              % (imported, path), file=sys.stderr)
+        return None
+    return mod
 
 
 def _filler_layers(layer_map) -> List[Tuple[int, int]]:
@@ -4392,15 +5633,23 @@ def _compute_fill_coverage(gds_path, filler_layers, cell_um=200.0):
             return db.Region()
         return db.Region(top.begin_shapes_rec(li))
 
-    fill = db.Region()
-    for (lnum, dt) in filler_layers:
-        fill += reg(lnum, dt)
-    fill.merge()
+    # Each cell reads only the fill shapes that touch it: one merge over the
+    # whole closure fill costs more than the per-cell ones together, and the
+    # AND below merges its input anyway, so the areas are the same.
+    fill_lis = [li for li in (ly.find_layer(lnum, dt)
+                              for (lnum, dt) in filler_layers)
+                if li is not None]
+
+    def fill_area(cell):
+        fill = db.Region()
+        for li in fill_lis:
+            fill.insert(top.begin_shapes_rec_touching(li, cell))
+        return (fill & db.Region(cell)).area()
 
     prb = reg(*GDSGenerator.PRBOUNDARY_LAYER)
     bb = prb.bbox() if not prb.is_empty() else top.bbox()
     grid = []
-    if bb.empty() or fill.is_empty():
+    if bb.empty() or not fill_lis:
         return {"cell_um": cell_um, "grid": grid}
 
     step = max(1, int(round(cell_um / dbu)))
@@ -4413,7 +5662,7 @@ def _compute_fill_coverage(gds_path, filler_layers, cell_um=200.0):
             cell = db.Box(xi, yi, cx1, cy1)
             area = cell.area()
             if area > 0:
-                cov = (fill & db.Region(cell)).area()
+                cov = fill_area(cell)
                 if cov > 0:
                     grid.append({
                         "x_um": round(xi * dbu, 4),
@@ -4452,10 +5701,25 @@ def _insert_metal_fill(gds_path, topcell, mode, filler_layers, log=print):
               "fill engine (fill_closure.fill_stack) is unavailable; see the "
               "warning above.", file=sys.stderr)
         return {"status": "error", "report": None, "coverage": None}
+    engine_file = getattr(fc, "__file__", None)
+    if engine_file:
+        log("Fill engine: %s" % Path(engine_file).resolve())
 
     with tempfile.TemporaryDirectory() as td:
-        report = fc.fill_stack(gds_path, gds_path, topcell=topcell, mode=mode,
-                               workdir=td, log=log)
+        try:
+            report = fc.fill_stack(gds_path, gds_path, topcell=topcell,
+                                   mode=mode, workdir=td, log=log)
+        except RuntimeError as exc:
+            # The engine stops instead of filling when a fill macro does: with
+            # a seal ring drawn, a ring with no interior, drawn metal outside
+            # it, or a prBoundary that misses its interior. The first line is
+            # the reason; the rest is KLayout's output. The GDS is written
+            # only after a complete fill, so it is still the unfilled one.
+            reason, _sep, detail = str(exc).partition("\n")
+            print("ERROR: metal fill stopped: %s" % reason, file=sys.stderr)
+            for line in detail.splitlines():
+                print("  " + line, file=sys.stderr)
+            return {"status": "error", "report": None, "coverage": None}
 
     stem = str(Path(gds_path).with_suffix(""))
     try:
@@ -4595,6 +5859,56 @@ def load_nofill_regions(nofill_regions_json: str) -> Optional[List[Dict]]:
     return regions
 
 
+def _report_refusal(what: str, exc: Exception) -> None:
+    """First line of the refusal as the ERROR, any further lines under it."""
+    reason, _sep, detail = str(exc).partition("\n")
+    print("\nERROR: %s refused: %s" % (what, reason), file=sys.stderr)
+    for line in detail.splitlines():
+        print("  " + line, file=sys.stderr)
+
+
+def refuse_touching_nets(copper: Dict[Tuple[str, str], List[db.Polygon]],
+                         dbu: float) -> None:
+    """Refuse two nets' traces that touch on one layer.
+
+    ``copper`` is the trace copper per (layer, net), in database units of
+    ``dbu`` um. Touching copper merges into one polygon, a short no space rule
+    reports. On a board that passes its own clearance check the touch comes
+    from a square end: KiCad checks clearance to its round cap, and the square
+    reaches up to (sqrt(2) - 1) * w/2 further at its corners. Pads, vias and
+    die copper are not part of this check; an LVS on the GDS sees those.
+
+    Cost: one region test per pair of nets on a layer, so the work grows as
+    nets squared per layer; nothing at tens of nets.
+    """
+    by_layer: Dict[str, Dict[str, db.Region]] = {}
+    for (layer, net), polys in copper.items():
+        if polys:
+            by_layer.setdefault(layer, {})[net] = db.Region(polys).merged()
+    found = []
+    for layer, nets in sorted(by_layer.items()):
+        names = sorted(nets)
+        for k, a in enumerate(names):
+            grown = nets[a].sized(1)
+            for b in names[k + 1:]:
+                touch = grown & nets[b]
+                if touch.is_empty():
+                    continue
+                # Where they overlap, the overlap; where they only share an
+                # edge or a corner, the 1 dbu sliver across it.
+                overlap = nets[a] & nets[b]
+                box = (touch if overlap.is_empty() else overlap).bbox()
+                found.append("%s: %s meets %s at (%.3f, %.3f)-(%.3f, %.3f) um"
+                             % (layer, a, b, box.left * dbu, box.bottom * dbu,
+                                box.right * dbu, box.top * dbu))
+    if found:
+        raise TrackEndRefused(
+            "%d place(s) where two nets' traces touch\n%s\n"
+            "widen the clearance there; a square track end reaches up to "
+            "(sqrt(2) - 1) * w/2 past the board's round cap"
+            % (len(found), "\n".join(found)))
+
+
 def convert_hyp_to_gds(
     hyp_path: str,
     output_path: str,
@@ -4617,6 +5931,11 @@ def convert_hyp_to_gds(
     nofill_regions_json: Optional[str] = None,
     insert_metal_fill: bool = False,
     fill_mode: str = "single-pass",
+    die_outline_layers: Optional[Dict[str, Tuple[int, int]]] = None,
+    die_outline_exempt: Optional[List[str]] = None,
+    seal_ring: bool = False,
+    system_chiplet_path: Optional[str] = None,
+    die_layouts_json: Optional[str] = None,
 ) -> bool:
     """
     Main conversion function.
@@ -4646,6 +5965,33 @@ def convert_hyp_to_gds(
         die_thicknesses: Per-die physical thickness {ref: um}. Written to
                          each die's dimensions.thickness in the .chiplet;
                          dies not listed keep the format default of 0.0.
+        die_outline_layers: {ref: (layer, datatype)} of each die's outline in
+                         its own GDS. Sizes the die in the .chiplet and is
+                         its boundary in the complete GDS's boundary manifest.
+        die_outline_exempt: Refs that keep their .chiplet width/height and
+                         the placed cell bbox as boundary. With
+                         chiplet_file_path, every die of the .chiplet must be
+                         in exactly one of the two (resolve_die_outlines);
+                         a refusal is decided before anything is written.
+        seal_ring: Draw the PDK seal ring on the board outline (one axis-
+                         aligned rectangle on prBoundary). Refused, with
+                         nothing written, when the outline or the PCell
+                         cannot give a ring, or when the drawn geometry
+                         crowds it (SealRingRefused).
+        system_chiplet_path: The System .chiplet the assembly was built from
+                         (--system-chiplet). With chiplet_file_path, the
+                         finalizer takes the interposer's and each die's
+                         technology, and the technologies block, from it by
+                         component id. Refused, with nothing written, when it
+                         cannot supply them (TechnologyRefused).
+        die_layouts_json: The --die-layouts sidecar (die_layouts.py). It
+                         needs chiplet_file_path, and is refused without
+                         one. Each die it names gets its full layout as
+                         its .chiplet layout and top_cell, while
+                         the complete GDS keeps the abstract its GDS_FILE
+                         names. Refused, with nothing written, when the
+                         sidecar is malformed, names no die, or a file does
+                         not agree with its contract (DieLayoutRefused).
 
     Returns:
         True if conversion was successful
@@ -4694,6 +6040,123 @@ def convert_hyp_to_gds(
         print("Padstacks:")
         for idx, ps in sorted(parser.padstacks.items()):
             print(f"  P={idx}: {' -> '.join(ps.layers)}")
+
+    # Die outlines, read from each die's own GDS. Here, right after the parse
+    # and before the interposer GDS, its sidecars or the .chiplet are
+    # written, for the reason the parity gate gives: the .chiplet update runs
+    # after the write, and a refusal there would leave a finished layout/
+    # behind for a run that failed. One reader for the run; the .chiplet
+    # update and add_device reuse what it read.
+    outline_reader = _die_outline.DieGdsReader()
+    die_plan = _die_outline.DieOutlinePlan()
+    head_io_pad_refs = _io_pad_refs(io_pads_json) if chiplet_file_path else []
+    if chiplet_file_path or with_chiplets:
+        head_chiplet = None
+        if chiplet_file_path:
+            try:
+                head_chiplet = _vendored_cfio().load(
+                    chiplet_file_path, allow_intermediate=True)
+            except Exception as exc:
+                print(f"\nERROR: cannot read {chiplet_file_path} to size its "
+                      f"dies: {exc}", file=sys.stderr)
+                return False
+        try:
+            die_plan = resolve_die_outlines(
+                head_chiplet,
+                str(Path(chiplet_file_path).resolve().parent)
+                if chiplet_file_path else "",
+                parser.devices, die_outline_layers, die_outline_exempt,
+                outline_reader, head_io_pad_refs)
+        except DieOutlineRefused as exc:
+            print("", file=sys.stderr)
+            for line in exc.lines():
+                print(line, file=sys.stderr)
+            print("  Refusing to export: no layout, sidecar or .chiplet was "
+                  "written.", file=sys.stderr)
+            return False
+        if die_plan.outlines or die_plan.exempt:
+            print("Die outlines:")
+        for ref, outline in die_plan.outlines.items():
+            print(f"  {ref}: {outline.width_um} x {outline.height_um} um from "
+                  f"{_die_outline.format_layer(outline.layer)} under "
+                  f"{outline.gds.top_cell} in {outline.gds.path}")
+        for ref in die_plan.exempt:
+            print(f"  {ref}: exempt (--die-outline-exempt): keeps its .chiplet "
+                  f"width/height and the cell bbox as boundary")
+    elif die_outline_layers or die_outline_exempt:
+        print("Warning: --die-outline-layers and --die-outline-exempt are "
+              "ignored without --update-chiplet-file or --with-chiplets.",
+              file=sys.stderr)
+
+    # Full die layouts, checked against their contracts here for the die
+    # outlines' reason, and against the dies the plan above decided. Without
+    # a .chiplet the frame check would not run, so the run is refused rather
+    # than carried on with the flag ignored.
+    head_die_layouts = None
+    if die_layouts_json and not chiplet_file_path:
+        print("Error: --die-layouts needs --update-chiplet-file: the full "
+              "layouts go into the .chiplet, and without one their frame "
+              "check would not run; nothing was written.", file=sys.stderr)
+        return False
+    elif die_layouts_json:
+        try:
+            head_die_layouts = resolve_die_layouts(
+                head_chiplet, die_plan, _die_layouts.load(die_layouts_json),
+                outline_reader)
+        except DieLayoutRefused as exc:
+            print("", file=sys.stderr)
+            for line in exc.lines():
+                print(line, file=sys.stderr)
+            print("  Refusing to export: no layout, sidecar or .chiplet was "
+                  "written.", file=sys.stderr)
+            return False
+        print(f"Die layouts from {die_layouts_json}:")
+        for ref, entry in head_die_layouts.items():
+            print(f"  {ref}: {entry.layout} (top cell {entry.top_cell}); the "
+                  f"assembly places {die_plan.gds(ref).path}")
+
+    # The mount plane, read here for the die outlines' reason: a .chiplet
+    # cannot be finalized without it, and nothing is written before.
+    attach_frame = None
+    if chiplet_file_path:
+        try:
+            attach_frame = read_attach_frame()
+        except AttachFrameRefused as exc:
+            print(f"\nAttach frame refused: {exc}", file=sys.stderr)
+            print("  Refusing to export: no layout, sidecar or .chiplet was "
+                  "written.", file=sys.stderr)
+            return False
+        print(f"Mount plane: {ATTACH_FRAME_KEY} = {attach_frame.at()} um "
+              f"({attach_frame.source})")
+
+    # Technology ids from the System .chiplet, decided here for the die
+    # outlines' reason: the finalizer runs after the layout is written.
+    system_chiplet = None
+    if system_chiplet_path and not chiplet_file_path:
+        print("Warning: --system-chiplet is ignored without "
+              "--update-chiplet-file.", file=sys.stderr)
+    elif system_chiplet_path:
+        try:
+            system_chiplet = _vendored_cfio().load(system_chiplet_path)
+        except Exception as exc:
+            print(f"\nERROR: cannot read the System .chiplet "
+                  f"{system_chiplet_path}: {exc}", file=sys.stderr)
+            print("  Refusing to export: no layout, sidecar or .chiplet was "
+                  "written.", file=sys.stderr)
+            return False
+        try:
+            bindings, _unused = _technology_overlay.plan(
+                head_chiplet, system_chiplet, head_io_pad_refs)
+        except TechnologyRefused as exc:
+            print("", file=sys.stderr)
+            for line in exc.lines():
+                print(line, file=sys.stderr)
+            print("  Refusing to export: no layout, sidecar or .chiplet was "
+                  "written.", file=sys.stderr)
+            return False
+        print(f"Technologies from {system_chiplet_path}:")
+        for ident, tech in bindings.items():
+            print(f"  {ident}: {tech}")
 
     # Read the cap_cmim sidecar up front: whether the board has real devices to
     # place is what decides the no-geometry guard below, not the mere presence
@@ -4746,6 +6209,11 @@ def convert_hyp_to_gds(
 
     # Process segments and arcs as connected paths (smooth corners)
     num_paths = generator.add_segments_as_paths(parser.segments, parser.arcs)
+    try:
+        refuse_touching_nets(generator.trace_copper, generator.layout.dbu)
+    except TrackEndRefused as exc:
+        _report_refusal("track ends", exc)
+        return False
     print(f"Created {num_paths} continuous paths from {len(parser.segments)} segments and {len(parser.arcs)} arcs")
 
     # Loud guard: a board whose copper layers are not named after the PDK
@@ -4910,8 +6378,12 @@ def convert_hyp_to_gds(
                             if m_in_table else bm.DrcParams())
                 try:
                     m_fab = im.fab_params(m)
-                except KeyError:
-                    m_fab = {}
+                    m_opening, m_enclosure = resolve_carrier_profile(
+                        m, m_fab, m_diameter, bm.CUPILLAR_TABLE_6_1)
+                except (KeyError, ValueError) as exc:
+                    print(f"ERROR: Cannot draw carrier landing for {m}: "
+                          f"{exc}", file=sys.stderr)
+                    return False
                 try:
                     m_pr = im.pitch_rules(m)
                 except KeyError:
@@ -4931,8 +6403,8 @@ def convert_hyp_to_gds(
                 # targets max(pitch, diameter + spacing), pushed for 55 um where
                 # the method asks for 50. In-table methods declare the table's
                 # own opening, so this is a no-op for them.
-                if m_fab.get("passiv_opening_um") is not None:
-                    m_params.diameter_um = m_fab["passiv_opening_um"]
+                m_params.diameter_um = m_opening
+                m_params.min_enclosure_um = m_enclosure
                 if not m_in_table:
                     if m_overrode:
                         print(f"  Note: {m} body diameter {m_diameter} um is "
@@ -4960,7 +6432,7 @@ def convert_hyp_to_gds(
                     bm.CuPillarGenerator(
                         enclosure_um=m_params.min_enclosure_um,
                         bodies=m_bodies,
-                        passiv_opening_um=m_fab.get("passiv_opening_um")),
+                        passiv_opening_um=m_opening),
                     m_params, m_diameter)
                 # The numbers this method's bumps are placed and auto-resolved
                 # against travel with the drawn pads, in the pillar manifest.
@@ -5013,8 +6485,8 @@ def convert_hyp_to_gds(
                 dev_report = report.to_dict()
                 dev_report["connection"] = method
                 device_reports[dev_ref] = dev_report
-                total_pillars += pillar_gen.add_device_bumps(
-                    dev_ref, resolved, body_diameter)
+                total_pillars += _add_device_pillars(
+                    bm, pillar_gen, dev_ref, resolved, body_diameter)
                 # Record the as-drawn centers for the pillar manifest: the
                 # exact positions add_device_bumps just placed (resolved is
                 # index-aligned with the pre-resolve bumps list; the 0.01 um
@@ -5164,8 +6636,28 @@ def convert_hyp_to_gds(
                 file=sys.stderr)
             return False
 
-    # Write interposer GDS (routing + cu-pillars, without chiplet dies)
-    generator.write(output_path)
+    # Seal ring on the board outline. After the CMIM PCells, because both bind
+    # the layout to the intm4tm2 technology, and before write(), which stops
+    # when the drawn geometry crowds the ring.
+    if seal_ring:
+        try:
+            ring = generator.add_seal_ring()
+        except SealRingRefused as exc:
+            _report_refusal("seal ring", exc)
+            return False
+        print("Seal ring: drawn on the board outline (%.3f, %.3f)-(%.3f, "
+              "%.3f) um, %.3f x %.3f um" % (ring.left, ring.bottom, ring.right,
+                                            ring.top, ring.width(),
+                                            ring.height()))
+
+    # Write interposer GDS (routing + cu-pillars, without chiplet dies). With
+    # the fill on, the sidecars wait for it: the boundary manifest binds the
+    # digest of the final bytes, and the fill rewrites the file in place.
+    try:
+        generator.write(output_path, sidecars=not insert_metal_fill)
+    except SealRingRefused as exc:
+        _report_refusal("seal ring", exc)
+        return False
     print(f"Interposer GDS file written to: {output_path}")
 
     # Metal density fill (PDK engine, on the interposer GDS in place). Runs
@@ -5177,6 +6669,7 @@ def convert_hyp_to_gds(
             output_path, cell_name, fill_mode, _filler_layers(layer_map))
         if fill_result["status"] == "error":
             return False
+        generator.write_sidecars(output_path)
         report = fill_result.get("report") or {}
         if isinstance(report, dict):
             concerns = []
@@ -5222,13 +6715,20 @@ def convert_hyp_to_gds(
         # it, so reporting exit 0 here would hand studio an unusable file.
         if not update_chiplet_file(chiplet_file_path, output_path, bbox,
                            connection_type=connection_type,
+                           attachment_surface_z=attach_frame,
                            io_pads=placed_io_pads,
                            devices=parser.devices,
                            die_connections=die_connections,
                            die_thicknesses=die_thicknesses,
                            outline_bbox=outline_bbox,
                            to_um=generator._to_um,
-                           to_um_y=generator._to_um_y):
+                           to_um_y=generator._to_um_y,
+                           die_outline_layers=die_outline_layers,
+                           die_outline_exempt=die_outline_exempt,
+                           outline_reader=outline_reader,
+                           io_pad_refs=head_io_pad_refs,
+                           system_chiplet=system_chiplet,
+                           die_layouts=head_die_layouts):
             print(f"ERROR: failed to finalize chiplet file "
                   f"'{chiplet_file_path}'.", file=sys.stderr)
             return False
@@ -5282,14 +6782,39 @@ def convert_hyp_to_gds(
 
         # Add devices to the layout
         device_success = 0
+        unplaced_dies = []
         for device in parser.devices:
             is_flip = device.ref in flip_chip_refs
-            if generator.add_device(device, flip_chip=is_flip):
+            outline = die_plan.outlines.get(device.ref)
+            if outline is None:
+                why = ("exempt" if device.ref in die_plan.exempt
+                       else "no die outline declared")
+                print(f"  {device.ref}: boundary is the placed cell bbox "
+                      f"({why})")
+            try:
+                placed = generator.add_device(device, flip_chip=is_flip,
+                                              outline=outline)
+            except DieGdsError as exc:
+                print(f"ERROR: {device.ref}: {exc}. Refusing to write the "
+                      f"complete GDS.", file=sys.stderr)
+                return False
+            if placed:
                 device_success += 1
                 if is_flip:
                     print(f"  {device.ref}: placed with mirror-X (flip-chip)")
+            elif die_plan.gds(device.ref) is not None:
+                unplaced_dies.append(device.ref)
 
         print(f"Successfully added {device_success}/{len(parser.devices)} devices")
+
+        # A die the head sized or exempted is one the .chiplet describes and
+        # the boundary manifest must carry; a complete GDS without it is not
+        # the assembly the .chiplet says.
+        if unplaced_dies:
+            print(f"ERROR: die(s) {', '.join(unplaced_dies)} could not be "
+                  f"placed (see above); refusing to write the complete GDS.",
+                  file=sys.stderr)
+            return False
 
         if device_success == 0:
             print(f"ERROR: --with-chiplets requested but 0 of "
@@ -5309,6 +6834,8 @@ def convert_hyp_to_gds(
         if complete_output_path:
             generator.write(complete_output_path)
             print(f"Complete GDS file (with chiplets) written to: {complete_output_path}")
+            if generator.has_seal_ring():
+                print("Seal ring: carried into the complete GDS")
     elif with_chiplets and not parser.devices:
         print("Warning: --with-chiplets specified but no GDS_FILE devices found in HYP")
 
@@ -5329,8 +6856,10 @@ Examples:
   # Generate both interposer and complete GDS with chiplets:
   %(prog)s interposer_template.hyp -o interposer.gds --with-chiplets --complete-output complete.gds
 
-  # Also update a .chiplet file with the interposer GDS path:
-  %(prog)s interposer_template.hyp -o interposer.gds --update-chiplet-file design.chiplet
+  # Also update a .chiplet file with the interposer GDS path, sizing U1 and U2
+  # from the 39/4 outline in their own GDS and leaving U3 as it is:
+  %(prog)s interposer_template.hyp -o interposer.gds --update-chiplet-file design.chiplet \
+      --die-outline-layers U1=39/4,U2=39/4 --die-outline-exempt U3
 
   # Generate cu-pillar pads at chiplet pad locations:
   %(prog)s interposer_template.hyp --with-chiplets --pad-locations U1=pins_interposer.json,U2=pins_diffamp.json
@@ -5383,7 +6912,7 @@ Examples:
         "--update-chiplet-file",
         type=str,
         metavar="CHIPLET_FILE",
-        help="Update .chiplet file with interposer GDS absolute path"
+        help="Update .chiplet file with interposer GDS path"
     )
     parser.add_argument(
         "--pad-locations",
@@ -5407,9 +6936,13 @@ Examples:
         choices=_connection_type_cli_choices(),
         default="",
         metavar="TYPE",
-        help="Connection stack type for chiplet file (e.g., cupillar_opt1, sbump_sac305). "
-             "Injects connection_stacks section and sets connection on die components. "
-             "Choices: %(choices)s"
+        # Checked against the manifest's methods when one is found, but not
+        # printed: docs/reference/ publishes this --help, so it must read the
+        # same on any host.
+        help="Connection stack type for chiplet file: a method id the "
+             "interconnect PDK manifest lists (e.g., cupillar_opt1, "
+             "sbump_sac305). Injects connection_stacks section and sets "
+             "connection on die components."
     )
     parser.add_argument(
         "--die-connections",
@@ -5432,10 +6965,31 @@ Examples:
              "(connection_stacks); do not fold them in here."
     )
     parser.add_argument(
+        "--die-outline-layers",
+        type=str,
+        metavar="REF=LAYER/DATATYPE[,...]",
+        help="The layer each die's own GDS draws its die outline on (e.g. "
+             "U1=39/4,U2=39/4). With --update-chiplet-file, a declared die's "
+             "width/height in the .chiplet become that outline's size, and "
+             "with --with-chiplets it is the die's boundary. The layer must "
+             "merge to exactly one rectangle under the GDS's one top cell; "
+             "anything else refuses. Every die of the .chiplet must be named "
+             "here or in --die-outline-exempt, and only one of them."
+    )
+    parser.add_argument(
+        "--die-outline-exempt",
+        type=str,
+        metavar="REF[,REF,...]",
+        help="Dies that keep the width/height already in the .chiplet and "
+             "the placed cell bbox as boundary (e.g. U3). Each is logged "
+             "by name. Their GDS must still exist and have one top cell."
+    )
+    parser.add_argument(
         "--io-pads",
         type=str,
         metavar="JSON_FILE",
-        help="Sidecar JSON with external I/O pad locations (produced by "
+        help="Sidecar JSON with external I/O pad locations in planner net names "
+             "(never inverted here; produced by "
              "gds_to_kicad/io_pads/kicad_pcb_to_iopads.py). Each entry is "
              "rendered in the interposer GDS based on its io_class field "
              "(wire_bond now; flipped_bump and tsv_bump reserved). When "
@@ -5447,6 +7001,29 @@ Examples:
         type=str,
         metavar="JSON_FILE",
         help="Sidecar JSON with cap_cmim footprint parameters for IntM4TM2 PCell placement."
+    )
+    parser.add_argument(
+        "--system-chiplet",
+        type=str,
+        metavar="CHIPLET_FILE",
+        help="The System .chiplet the assembly was built from. With "
+             "--update-chiplet-file, the interposer's and each die's "
+             "technology, and the technologies block, are taken from it by "
+             "component id. Refused, with nothing written, when a component "
+             "or a technology id has no match there."
+    )
+    parser.add_argument(
+        "--die-layouts",
+        type=str,
+        metavar="JSON_FILE",
+        help="Sidecar JSON naming, per die reference, its full layout (an "
+             "absolute path), the contract's top_cell and bbox_um. Needs "
+             "--update-chiplet-file, where that die's layout and top_cell "
+             "become "
+             "the full layout's, and its metadata names the abstract its "
+             "GDS_FILE gives, which the complete GDS keeps. Refused, with "
+             "nothing written, when an entry names no die or either file's "
+             "top cell box is not bbox_um exactly."
     )
     parser.add_argument(
         "--nofill-regions",
@@ -5474,6 +7051,17 @@ Examples:
              "closure: density-feedback loop for M4/M5 (slower, verifies the "
              "density band against the sign-off deck). Ignored without "
              "--insert-metal-fill."
+    )
+    parser.add_argument(
+        "--seal-ring",
+        action="store_true",
+        help="Draw the interposer PDK's seal ring (IntM4TM2 sealring PCell) "
+             "on the board outline, which must be one axis-aligned "
+             "rectangle. Refused, with nothing written, when the outline is "
+             "missing, not a rectangle or under the PCell minimum, or when "
+             "fabricated geometry sits in the ring band or closer to the "
+             "ring than its space rule. Off by default; the complete GDS "
+             "carries the ring."
     )
     parser.add_argument(
         "--annotate-boundaries",
@@ -5510,13 +7098,12 @@ Examples:
 
     # Default lyp: the interposer PDK's canonical copy (env/walk); no
     # plugin-local fallback, the .lyp belongs to the PDK.
-    if args.lyp is None:
-        args.lyp = _find_default_lyp()
+    args.lyp = _or_exit(_layer_map.resolve_lyp_path, args.lyp, start=__file__)
 
     # Expand ${VAR} ecosystem-root references in every path argument
     # (env -> sibling-checkout walk -> loud failure). Plain absolute or
     # relative paths pass through untouched.
-    for _attr in ("hyp_file", "output", "lyp", "tech_json",
+    for _attr in ("hyp_file", "output", "tech_json",
                   "complete_output", "update_chiplet_file",
                   "cupillar_gds", "io_pads", "cmim_devices", "nofill_regions"):
         setattr(args, _attr, _expand_path_vars(getattr(args, _attr)))
@@ -5579,6 +7166,25 @@ Examples:
                 return 1
             die_thicknesses[ref.strip()] = value
 
+    # Parse the die outline declarations: "U1=39/4,U2=39/4" and "U3". Strict:
+    # an empty or malformed token is an error naming it, never skipped. Given
+    # but empty ("") is malformed too; absent is None.
+    die_outline_layers = None
+    die_outline_exempt = None
+    try:
+        if args.die_outline_layers is not None:
+            die_outline_layers = _die_outline.parse_outline_layers(
+                args.die_outline_layers)
+        if args.die_outline_exempt is not None:
+            die_outline_exempt = _die_outline.parse_outline_exempt(
+                args.die_outline_exempt)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if args.die_layouts is not None and not args.die_layouts:
+        print("Error: --die-layouts was given an empty path.", file=sys.stderr)
+        return 1
+
     # Parse the annotation layer "LAYER/DATATYPE" (only used if --annotate-boundaries)
     try:
         _vl, _vd = args.boundary_viz_layer.split('/', 1)
@@ -5626,6 +7232,11 @@ Examples:
         nofill_regions_json=args.nofill_regions,
         insert_metal_fill=args.insert_metal_fill,
         fill_mode=args.fill_mode,
+        die_outline_layers=die_outline_layers,
+        die_outline_exempt=die_outline_exempt,
+        seal_ring=args.seal_ring,
+        system_chiplet_path=args.system_chiplet,
+        die_layouts_json=args.die_layouts,
     )
 
     return 0 if success else 1
@@ -5646,6 +7257,15 @@ def _main_reporting_refusals():
         print("  Refusing to export: a cross-repo source is present and "
               "cannot be used.", file=sys.stderr)
         return exc.exit_code
+    except (DieOutlineRefused, TechnologyRefused, DieLayoutRefused) as exc:
+        # convert_hyp_to_gds reports these itself at the head; this catches a
+        # refusal from a path that raises it instead (update_chiplet_file).
+        for line in exc.lines():
+            print(line, file=sys.stderr)
+        return 1
+    except AttachFrameRefused as exc:
+        print("Attach frame refused: %s" % exc, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

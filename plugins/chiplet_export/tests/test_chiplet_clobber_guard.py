@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""H-A clobber guard: prove-it-can-fail tests for pipeline/chiplet_merge.py.
+"""Clobber guard: prove-it-can-fail tests for pipeline/chiplet_merge.py.
 
-The defect (reproducible today): the orchestrator stages the freshly regenerated
-intermediate .chiplet over the canonical file with a bare ``shutil.copy2``. The
-intermediate is board-derived and carries no ``flow:``/``netlist:`` block, so a
-pasted ``flow:`` block (required, because Chiplet Studio's FlowEngine reads it
-only from the EMBEDDED block) is silently destroyed on every KiCad re-export.
+The defect: the orchestrator publishes the freshly regenerated intermediate
+.chiplet in place of the canonical file (staged next to it, finalized by the
+worker, then moved over it). The intermediate is board-derived and carries no
+``flow:``/``netlist:`` block, so without the guard a pasted ``flow:`` block
+(required, because Chiplet Studio's FlowEngine reads it only from the EMBEDDED
+block) is silently destroyed on every KiCad re-export. The tests below stand
+for that publication with a bare ``shutil.copy2``: the top-level blocks that
+reach the canonical path are the same either way.
 
 The guard is PURE STDLIB (no PyYAML, no chiplet_format_io): it runs in KiCad's
 bundled Python, which has neither (discovery.py:4-7). It works on raw top-level
@@ -151,7 +154,7 @@ def test_defect_reproduced_bare_copy2_loses_flow_block(tmp_path):
     _write(inter, _fresh_intermediate())
     assert "flow" in cm.split_top_level_blocks(_read(final))
 
-    # The unguarded door, verbatim (orchestrator.py emit_chiplet branch).
+    # The unguarded door: the intermediate published over the canonical file.
     shutil.copy2(inter, final)
 
     blocks = cm.split_top_level_blocks(_read(final))
@@ -386,30 +389,25 @@ def test_corrupt_sidecar_does_not_trip(tmp_path):
 # wire AND a corrupt canonical, and that a corrupt canonical fails CLOSED.
 
 def _emit_chiplet_guard_decision(chiplet_final, force):
-    """Mirror of orchestrator.run_export's pre-copy guard (emit_chiplet branch).
+    """orchestrator.run_export's pre-staging guard, driven directly.
 
-    Returns an ExportResult on abort, or None to proceed. Uses the real
-    chiplet_merge detector and the real ExportResult so a drift in either shows
-    up here.
+    This USED to be a hand-written mirror of the branch inside run_export
+    (unreachable on host Python, which has no pcbnew). A mirror answers for
+    itself: it stayed green when the original changed, and it could not fail at
+    all for the regression that matters most here, the guard going silent. The
+    branch now lives in ``orchestrator.evaluate_content_guard`` and this calls
+    it, so there is one copy and these tests are about it.
+
+    Returns an ExportResult on abort, or None to proceed.
     """
-    from chiplet_export.pipeline.orchestrator import ExportResult
+    from chiplet_export.pipeline.orchestrator import (
+        ExportResult, evaluate_content_guard)
     layout_refusal = cm.unwritable_reason(chiplet_final)
     if layout_refusal:
         return ExportResult(error=layout_refusal)
-    if not force:
-        try:
-            tripped = cm.foreign_hand_edit_detected(chiplet_final)
-        except Exception as exc:
-            return ExportResult(error=(
-                "Could not verify the canonical .chiplet against the last "
-                "export (%s); refusing to overwrite it. Fix or remove the "
-                "file, or re-run with force=True.\n  File: %s"
-                % (exc, chiplet_final)))
-        if tripped:
-            return ExportResult(error=(
-                "The canonical .chiplet has hand edits to exporter-owned "
-                "content ...\n  File: %s" % chiplet_final))
-    return None
+    refusal, _note = evaluate_content_guard(chiplet_final, force,
+                                            lambda line: None)
+    return ExportResult(error=refusal) if refusal else None
 
 
 def _corrupt_canonical_with_baseline(tmp_path):
@@ -426,14 +424,63 @@ def test_orchestrator_branch_fails_closed_on_corrupt_canonical(tmp_path):
     result = _emit_chiplet_guard_decision(str(final), force=False)
     assert result is not None
     assert result.error
-    assert "force=True" in result.error
     assert str(final) in result.error
+    # The reason, not the substring. This asserted `"force=True" in error`,
+    # which a message saying "force=True does not bypass this" satisfies just as
+    # well as one offering force as the remedy. Under the rule the refusal now
+    # carries, force is NOT the remedy, so the old assertion would have passed
+    # either way and measured nothing about what the user is told to do.
+    assert "unchanged" in result.error, (
+        "a refusal has to say the file was left alone: %r" % result.error)
+    assert "does not bypass" in result.error
 
 
-def test_orchestrator_branch_force_bypasses_corrupt_canonical(tmp_path):
+@pytest.mark.parametrize("force", [False, True])
+def test_an_unreadable_canonical_is_refused_with_or_without_force(tmp_path,
+                                                                  force):
+    """Inverted deliberately: force used to proceed here, and that lost bytes.
+
+    The old expectation was "force must never call the detector, so the corrupt
+    file cannot abort". It held, and the export then copied over a document
+    nobody could read, which was the user's only copy of it.
+
+    This is not a new principle, it is the existing one applied where it was
+    missing. The unmodelled-layout refusal below already sits outside the force
+    arm for the same reason: force overrides the hand-edit tripwire, a judgement
+    about content this exporter CAN read, and it was never a licence to discard
+    a file this exporter cannot read at all. A document that will not decode
+    belongs on that side of the line.
+    """
     final = _corrupt_canonical_with_baseline(tmp_path)
-    # force must never call the detector, so the corrupt file cannot abort.
-    assert _emit_chiplet_guard_decision(str(final), force=True) is None
+    before = final.read_bytes()
+    result = _emit_chiplet_guard_decision(str(final), force=force)
+    assert result is not None and result.error, (
+        "force=%s proceeded over an unreadable .chiplet" % force)
+    assert str(final) in result.error
+    assert final.read_bytes() == before, "the refusal rewrote the file"
+
+
+def test_an_unreadable_canonical_is_refused_with_no_baseline_at_all(tmp_path):
+    """The actual PLUG-19 defect: no sidecar, so nothing ever decoded the file.
+
+    With a baseline present the digest tripwire reached the decode and raised,
+    which is why the failure looked handled. Remove the baseline and the
+    tripwire returns early with no_baseline, the layout check used to return
+    None on a decode error, and nothing was left to object. Not force, not a
+    hand edit, just an unreadable file and an export that overwrote it.
+    """
+    final = tmp_path / "demo.chiplet"
+    with open(final, "wb") as fh:
+        fh.write(b"\xff\xfe\x00 the user's only copy \x83\x28")
+    before = final.read_bytes()
+    assert not (tmp_path / ("demo.chiplet" + cm.DIGEST_SIDECAR_SUFFIX)).exists()
+
+    for force in (False, True):
+        result = _emit_chiplet_guard_decision(str(final), force=force)
+        assert result is not None and result.error, (
+            "force=%s overwrote an unreadable .chiplet that had no baseline"
+            % force)
+        assert final.read_bytes() == before
 
 
 def test_orchestrator_branch_refuses_an_unmodelled_layout_even_forced(tmp_path):

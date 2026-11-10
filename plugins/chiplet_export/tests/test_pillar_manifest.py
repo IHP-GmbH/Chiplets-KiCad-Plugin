@@ -32,6 +32,7 @@ if str(PLUGIN_ROOT.parent) not in sys.path:
 import hyp_to_gds as h  # noqa: E402
 from chiplet_export.tests.test_hyp_to_gds_decoupling import (  # noqa: E402
     MIXED_HYP, _write_pin_list)
+from chiplet_export.tests.conftest import use_sibling_checkouts  # noqa: E402
 
 # Bump generation asserts real sibling-PDK content (bump_mirror in the
 # interposer PDK, method geometry in the interconnect manifest). On a lone
@@ -41,10 +42,10 @@ _MISSING_ROOTS = [
                     "GDS_TO_KICAD_ROOT")
     if h._discover_path_var(var) is None
 ]
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.needs_sibling_sources, pytest.mark.skipif(
     bool(_MISSING_ROOTS),
     reason="needs sibling ecosystem checkouts; unresolved: %s"
-           % ", ".join(_MISSING_ROOTS))
+           % ", ".join(_MISSING_ROOTS))]
 
 
 def _write_pins(tmp_path, ref, coords_um):
@@ -63,8 +64,8 @@ def _write_pins(tmp_path, ref, coords_um):
 
 
 def _convert(tmp_path, monkeypatch, pad_locations, name="mixed", **kwargs):
-    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
-    monkeypatch.delenv("INTERCONNECT_PDK_ROOT", raising=False)
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT",
+                          "INTERCONNECT_PDK_ROOT")
     hyp = tmp_path / ("%s.hyp" % name)
     hyp.write_text(MIXED_HYP)
     out = tmp_path / ("%s_interposer.gds" % name)

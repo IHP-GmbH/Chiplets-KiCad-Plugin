@@ -1,0 +1,12 @@
+{
+  "repository": "interposer-pnr",
+  "source_commit": "0120739ce764cb00890cbdece72992fdb561ceca",
+  "writer_base": "3533fc4",
+  "command": "PYTHONPATH=src python -m pytest tests/test_round_trip_names.py::test_reads_the_real_form_export_and_board_record_without_changing_it --basetemp=/tmp/ipnr-sheet-report",
+  "helper": "tests.test_sheet_form.export_with_form(with_carriers(form_data()) plus one lone net, pads=CARRIER_PADS)",
+  "normalization": "Temporary absolute prefix replaced with <tmp> in board/report; the rules sources' checkout prefixes replaced with <interposer> and <interposer-pnr> in the report; receipt naming maps unchanged. Board digest remains the original export digest, not a digest of the normalized fixture.",
+  "copied_files": {
+    "board.kicad_pcb": "<case tmp>/draft.kicad_pcb",
+    "export.json": "<case tmp>/export.json"
+  }
+}

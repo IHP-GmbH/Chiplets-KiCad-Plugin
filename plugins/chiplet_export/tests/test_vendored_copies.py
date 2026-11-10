@@ -12,11 +12,13 @@ Two questions, deliberately separate:
 * the pin names a commit whose blob IS those bytes (runs where chiplet-spec is
   checked out, and reads the COMMIT, not the working tree).
 
-The second one reads ``git show <commit>:<path>`` rather than the checkout's
-current file on purpose. A sibling checkout parked on a feature branch is not
-evidence that this copy drifted, and a gate that goes red for that reason trains
-people to ignore it. Drift that matters is a decision to re-vendor, which is made
-by looking at upstream, not by a red here.
+Under a tiered runner the second one binds the pin to the export: chiplet-spec
+there is the pinned commit, one deep, and a constant naming another one fails
+(``spec_blob_at_pin`` in conftest.py). On a host it reads the commit's blob
+rather than the checkout's current file on purpose. A sibling checkout parked on
+a feature branch is not evidence that this copy drifted, and a gate that goes
+red for that reason trains people to ignore it. Drift that matters is a decision
+to re-vendor, which is made by looking at upstream, not by a red here.
 """
 
 from __future__ import annotations
@@ -31,18 +33,21 @@ import sys
 
 import pytest
 
+from .conftest import SPEC_SOURCE, chiplet_spec_pin, spec_blob_at_pin, spec_root
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_ROOT = os.path.dirname(HERE)
 
-#: Vendored byte-for-byte from chiplet-spec; see ``VENDORED.md``, which carries
-#: the same three facts and must be updated in the same commit as the copy.
+#: Vendored byte-for-byte from chiplet-spec; see ``VENDORED.md``. The pin is
+#: ``chiplet_format_io.SOURCE`` (:func:`conftest.chiplet_spec_pin`), and moves in
+#: the same commit as the copy.
 READER_PATH = os.path.join(PLUGIN_ROOT, "vendor", "chiplet_format_io", "__init__.py")
 READER_UPSTREAM = "reference/python/chiplet_format_io/__init__.py"
 #: The same file addressed inside THIS repo, for git history queries.
 READER_UPSTREAM_LOCAL = "plugins/chiplet_export/vendor/chiplet_format_io/__init__.py"
 ORACLE_PATH = os.path.join(HERE, "fixtures", "top_level_blocks_cases.json")
-READER_COMMIT = "cdfa737"
-READER_SHA256 = "5c1d3ebe71c2926bc1c1505e2b42493c98a8fff1ef0b503beed9a32ded624cf2"
+READER_COMMIT, READER_DIR, READER_DIGESTS = chiplet_spec_pin()
+READER_SHA256 = READER_DIGESTS.get("__init__.py")
 
 
 def _sha256(blob):
@@ -56,48 +61,130 @@ def test_the_reader_copy_is_unmodified():
     assert got == READER_SHA256, (
         "vendor/chiplet_format_io/__init__.py was edited in place. It is a copy "
         "of chiplet-spec %s; change it upstream and re-vendor, updating "
-        "READER_SHA256/READER_COMMIT and VENDORED.md in the same commit."
+        "vendor/chiplet_format_io.SOURCE and VENDORED.md in the same commit."
         % READER_COMMIT)
 
 
-def _spec_root():
-    env = os.environ.get("CHIPLET_SPEC_ROOT")
-    if env and os.path.isdir(env):
-        return env
-    sibling = os.path.abspath(os.path.join(PLUGIN_ROOT, "..", "..", "..", "chiplet-spec"))
-    return sibling if os.path.isdir(os.path.join(sibling, ".git")) else None
-
-
+@pytest.mark.needs_sibling_sources
 def test_the_pinned_commit_really_carries_those_bytes():
     """The pin names a real commit, and that commit's blob is what we vendored.
 
     Without this the sha256 above only says the copy did not change since
     somebody typed it, which is true of a copy of anything.
     """
-    root = _spec_root()
+    root = spec_root()
     if root is None:
         pytest.skip("chiplet-spec checkout not found (set CHIPLET_SPEC_ROOT)")
-    proc = subprocess.run(
-        ["git", "-C", root, "show", "%s:%s" % (READER_COMMIT, READER_UPSTREAM)],
-        capture_output=True)
-    if proc.returncode != 0:
-        pytest.skip("chiplet-spec checkout does not have %s (shallow or stale)"
-                    % READER_COMMIT)
-    assert _sha256(proc.stdout) == READER_SHA256, (
+    blob = spec_blob_at_pin(root, READER_COMMIT, READER_UPSTREAM)
+    assert _sha256(blob) == READER_SHA256, (
         "chiplet-spec %s:%s does not hash to the pinned sha256. The pin names "
         "the wrong commit, or the copy came from somewhere else."
         % (READER_COMMIT, READER_UPSTREAM))
 
 
+def _vendored_md():
+    with open(os.path.join(PLUGIN_ROOT, "VENDORED.md"), "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+def vendored_md_entry(copy, upstream):
+    """The commit and sha256 VENDORED.md's entry for ``copy`` states: its
+    header lines, not a mention anywhere in the file, which the history below
+    each entry would satisfy with an older pin."""
+    text = _vendored_md()
+    found = re.search(r"\*\*`%s`\*\*\nfrom `%s` at commit `([0-9a-f]+)`,\nsha256 `([0-9a-f]{64})`,"
+                      % (re.escape(copy), re.escape(upstream)), text)
+    assert found, "VENDORED.md has no entry for %s from %s" % (copy, upstream)
+    return found.groups()
+
+
 def test_vendored_md_declares_the_same_pin():
     """The prose and the gate cannot disagree about what was vendored."""
+    commit, sha256 = vendored_md_entry("vendor/chiplet_format_io/__init__.py", READER_UPSTREAM)
+    assert READER_COMMIT.startswith(commit) and len(commit) >= 7 and sha256 == READER_SHA256, (
+        "VENDORED.md states %s at %s, the pin is %s at %s. Update it in the same "
+        "commit as the re-vendor; a provenance file that lags the pin is worse "
+        "than none, because it is believed." % (sha256, commit, READER_SHA256, READER_COMMIT))
+
+
+def test_vendored_md_states_what_the_copy_holds(tmp_path):
+    """The release and each standing rule's value, read off the copy itself.
+
+    A re-vendor that moves only the pin would leave these behind, and they are
+    what a reader of the file acts on.
+    """
+    with open(READER_PATH, "rb") as fh:
+        copy = _load_reader(fh.read(), "cfio_stated", tmp_path)
+    text = _vendored_md()
+    since = sorted((member, minor) for members in copy.MEMBER_SINCE.values()
+                   for member, minor in members.items())
+    assert since == [("solder_bump", "1.1")], (
+        "MEMBER_SINCE is now %s; restate its VENDORED.md rule" % since)
+    stated = [
+        "sha256 `%s`,\nreader release %s." % (READER_SHA256, copy.__version__),
+        "What this copy holds the plugin to, at %s:" % copy.__version__,
+        "A document of format `%s` or below" % max(copy.ACCEPTED_FORMAT_VERSIONS),
+        "`SUPPORTED_FORMAT_VERSION` is `%s`." % copy.SUPPORTED_FORMAT_VERSION,
+        "today only `solder_bump`, since 1.1",
+    ]
+    missing = [line for line in stated if line not in text]
+    assert not missing, "VENDORED.md does not state %s" % missing
+
+
+def test_the_plugin_calls_none_of_the_readers_it_says_it_does_not():
+    """VENDORED.md says the plugin never relaxes the source refusal and calls
+    neither top-level API. A mention in a comment fails this too, which errs
+    toward asking."""
+    names = ("allow_source", "split_top_level_keys", "capture_top_level_blocks")
+    found = []
+    for base, dirs, files in os.walk(PLUGIN_ROOT):
+        dirs[:] = [d for d in dirs if d not in ("vendor", "tests", "__pycache__")]
+        for name in files:
+            if name.endswith(".py"):
+                path = os.path.join(base, name)
+                with open(path, "r", encoding="utf-8") as fh:
+                    source = fh.read()
+                found += ["%s: %s" % (os.path.relpath(path, PLUGIN_ROOT), n)
+                          for n in names if n in source]
+    assert not found, "restate VENDORED.md's rules, or drop the call: %s" % found
+
+
+def test_the_reader_source_file_names_the_reader_alone():
+    """SOURCE names a full commit, the reader's directory and the copy's sha256,
+    and nothing else."""
+    assert re.fullmatch(r"[0-9a-f]{40}", READER_COMMIT), (
+        "%s names %r; a pin is a full commit id" % (SPEC_SOURCE, READER_COMMIT))
+    assert READER_DIR == os.path.dirname(READER_UPSTREAM)
+    assert list(READER_DIGESTS) == ["__init__.py"]
+
+
+#: interposer-pnr's round_trip reader, pinned in its own SOURCE file (the
+#: format gds_to_kicad's copy of this file uses): line one names the
+#: commit and upstream path, line two the sha256 of the copy.
+NAMES_SOURCE = os.path.join(PLUGIN_ROOT, "vendor", "round_trip_names.SOURCE")
+NAMES_PATH = os.path.join(PLUGIN_ROOT, "vendor", "round_trip_names.py")
+
+
+def _names_pin():
+    with open(NAMES_SOURCE, "r", encoding="utf-8") as fh:
+        head, digest = fh.read().splitlines()
+    marker, repo, commit, upstream = head.split()
+    sha256, name = digest.split()
+    assert (marker, repo, name) == ("#", "interposer-pnr", "round_trip_names.py")
+    return commit, upstream, sha256
+
+
+def test_the_round_trip_reader_copy_is_its_pinned_bytes():
+    """The copy is the bytes SOURCE pins, and VENDORED.md states the same pin."""
+    commit, upstream, sha256 = _names_pin()
+    with open(NAMES_PATH, "rb") as fh:
+        assert _sha256(fh.read()) == sha256, (
+            "vendor/round_trip_names.py was edited in place. It is a copy of "
+            "interposer-pnr %s:%s; change it upstream and re-vendor." % (commit, upstream))
     with open(os.path.join(PLUGIN_ROOT, "VENDORED.md"), "r", encoding="utf-8") as fh:
         text = fh.read()
-    for fact in (READER_UPSTREAM, READER_COMMIT, READER_SHA256):
-        assert fact in text, (
-            "VENDORED.md does not mention %r. Update it in the same commit as "
-            "the re-vendor; a provenance file that lags the pin is worse than "
-            "none, because it is believed." % fact)
+    for fact in (upstream, commit[:7], sha256):
+        assert fact in text, "VENDORED.md does not mention %r" % fact
 
 
 _VERSION_RE = re.compile(r'^__version__\s*=\s*["\']([^"\']+)["\']', re.M)
@@ -215,8 +302,8 @@ def test_a_reader_whose_answers_changed_moved_more_than_the_patch(tmp_path):
     block oracle, so the frontier it sees is the line-break and grammar one. A
     refusal relaxed somewhere else (a vocabulary rule, a version gate) is
     invisible here. That frontier is the one worth pinning in THIS repo anyway:
-    it is what SPEC-36 was about, and the previously vendored reader loaded a
-    smuggled key straight through it.
+    a smuggled key is what it guards against, and the previously vendored reader
+    loaded one straight through it.
     """
     previous, current = _previous_and_current_reader()
     with open(ORACLE_PATH, "r", encoding="utf-8") as fh:

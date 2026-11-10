@@ -34,6 +34,8 @@ from hyp_to_gds import (  # noqa: E402
 )
 
 LYP_PATH = Path(os.environ.get("INTERPOSER_LYP", _h._find_default_lyp()))
+# Every case here reads the interposer PDK: its .lyp, and its CMIM PCells.
+pytestmark = pytest.mark.needs_sibling_sources
 
 # 5 pF part from intm4tm2.pretty: a 57.68 um plate, with the Metal5 bottom
 # plate overhanging by Mim_c = 0.6 um on every side.

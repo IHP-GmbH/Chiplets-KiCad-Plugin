@@ -12,8 +12,8 @@ on the YAML output:
   - die components carry anchor=gds_origin
   - flip-chip dies carry connection=cupillar_opt2
 
-Byte-exact equivalence vs the C++ exporter is deferred to Gate 47.7
-once both exporters can run side-by-side in the same Docker session.
+Byte-exact equivalence with the C++ exporter is checked in
+test_byte_exact_writers.py.
 
 Skipped if pcbnew is not importable (host Python without KiCad).
 """
@@ -24,7 +24,8 @@ from pathlib import Path
 
 import pytest
 
-pcbnew = pytest.importorskip("pcbnew")
+pcbnew = pytest.importorskip(
+    "pcbnew", reason="needs pcbnew (KiCad Python)")
 yaml = pytest.importorskip("yaml")
 
 # Allow the plugin package to be imported regardless of CWD when the
@@ -147,14 +148,47 @@ def test_writer_survives_board_without_text_vars(tmp_path):
     SWIG wrapper lacks GetTextVars. Repro board is the KiCad demo
     interf_u, which loads as a raw SwigPyObject project.
     """
-    interfu = (PLUGIN_ROOT.parent / "kicad" / "demos"
-               / "interf_u" / "interf_u.kicad_pcb")
-    if not interfu.exists():
+    # KiCad installs its demos under share/kicad beside the lib/ that holds
+    # pcbnew (/usr in the image, usr/ in an AppDir).
+    demo = Path("demos") / "interf_u" / "interf_u.kicad_pcb"
+    candidates = [PLUGIN_ROOT.parent / "kicad" / demo,
+                  Path(pcbnew.__file__).resolve().parents[3] / "share" / "kicad" / demo]
+    interfu = next((c for c in candidates if c.exists()), None)
+    if interfu is None:
         pytest.skip("interf_u demo not available")
     board = pcbnew.LoadBoard(str(interfu))
     out = tmp_path / "interf_u.chiplet"
     assert write_chiplet(board, str(out)) is True
     assert out.exists() and out.stat().st_size > 0
+
+
+def test_writer_forwards_the_preflight_manifest_to_every_query(
+        fixture_board_path, tmp_path, monkeypatch):
+    """The writer cannot rediscover a different catalogue mid-export."""
+    import chiplet_export.writers.chiplet_writer as writer
+
+    manifest = {"schema_version": "1.0", "methods": {"method_a": {}}}
+    seen_validation = []
+    seen_emission = []
+
+    def validate(*_args, **kwargs):
+        seen_validation.append(kwargs.get("manifest"))
+
+    def emit(snapshot=None):
+        seen_emission.append(snapshot)
+        return "connection_stacks: {}\n"
+
+    monkeypatch.setattr(writer, "validate_interconnect_ids", validate)
+    monkeypatch.setattr(writer, "emit_connection_stacks_block", emit)
+
+    board = pcbnew.LoadBoard(fixture_board_path)
+    output = tmp_path / "snapshot.chiplet"
+    assert writer.write_chiplet(
+        board, str(output), interconnect_manifest=manifest) is True
+    assert seen_validation == [manifest]
+    assert seen_validation[0] is manifest
+    assert seen_emission == [manifest]
+    assert seen_emission[0] is manifest
 
 
 def test_die_connection_field_roundtrip(fixture_board_path):
@@ -268,3 +302,109 @@ def test_read_die_thicknesses_skips_malformed(fixture_board_path, capsys):
     err = capsys.readouterr().err
     assert target not in result
     assert "not-a-number" in err
+
+
+def test_die_outline_layer_field_roundtrip(fixture_board_path):
+    """write_die_outline_layers against real footprints: it writes the
+    DIE_OUTLINE_LAYER field of a die sized from its GDS, keeps it hidden on
+    F.Fab, never clears it, and leaves marked dies and non-dies alone
+    (in-memory board; nothing is saved here)."""
+    from chiplet_export.die_outline import (
+        FIELD, OUTLINE_DIE, die_role, read_die_outline_layers)
+    from chiplet_export.writers.chiplet_writer import (
+        _field_text, _get_field, write_die_outline_layers)
+
+    board = pcbnew.LoadBoard(fixture_board_path)
+    outline = read_die_outline_layers(board)
+    assert outline, "fixture board has no die sized from its GDS"
+
+    target = sorted(outline)[0]
+    new_value = "39/4" if outline[target] != "39/4" else "206/0"
+
+    assert write_die_outline_layers(board, {target: new_value}) == [target]
+    assert read_die_outline_layers(board)[target] == new_value
+    die = next(fp for fp in board.Footprints()
+               if fp.GetReference() == target)
+    field = _get_field(die, FIELD)
+    assert field.GetLayer() == pcbnew.F_Fab
+    assert not field.IsVisible()
+
+    # Same value again -> no-op.
+    assert write_die_outline_layers(board, {target: new_value}) == []
+
+    # An empty text never clears the field.
+    assert write_die_outline_layers(board, {target: ""}) == []
+    assert write_die_outline_layers(board, {target: "  "}) == []
+    assert read_die_outline_layers(board)[target] == new_value
+
+    # A marked die keeps its archived size and a non-die is not a die: neither
+    # gets the field, whatever the mapping says.
+    others = [fp for fp in board.Footprints()
+              if die_role(fp, pcbnew) != OUTLINE_DIE]
+    if not others:
+        pytest.skip("fixture board has only dies sized from their GDS")
+    before = {fp.GetReference(): _field_text(fp, FIELD) for fp in others}
+    mapping = {ref: "39/4" for ref in before if ref not in outline}
+    assert write_die_outline_layers(board, mapping) == []
+    assert {fp.GetReference(): _field_text(fp, FIELD)
+            for fp in others} == before
+
+
+def _add_die(board, ref, lyp, x_mm):
+    """A bare die footprint naming its layer sheet in LYP_FILE."""
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference(ref)
+    fp.SetField("LYP_FILE", lyp)
+    fp.SetField("GDS_FILE", ref + ".gds")
+    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x_mm), pcbnew.FromMM(1.0)))
+    board.Add(fp)
+
+
+def _write_with_dies(fixture_board_path, tmp_path, dies):
+    board = pcbnew.LoadBoard(fixture_board_path)
+    for i, (ref, lyp) in enumerate(dies):
+        _add_die(board, ref, lyp, 1.0 + i)
+    out = tmp_path / "dies.chiplet"
+    assert write_chiplet(board, str(out)) is True
+    data = yaml.safe_load(out.read_text())
+    techs = {c["id"]: c.get("technology") for c in data["components"]}
+    return data["technologies"], techs
+
+
+def test_project_sheets_name_their_technology_by_folder(
+        fixture_board_path, tmp_path, capsys):
+    """Two dies on project sheets (inputs/tech/<id>/layers.lyp) are two
+    technologies named by their folders, not one technology 'layers'."""
+    sheet_a = "${CHIPLET_FLOW_TECH}/projtech_a/layers.lyp"
+    sheet_b = "${CHIPLET_FLOW_TECH}/projtech_b/layers.lyp"
+    technologies, techs = _write_with_dies(
+        fixture_board_path, tmp_path, [("PA1", sheet_a), ("PB1", sheet_b)])
+
+    assert "layers" not in technologies
+    assert technologies["projtech_a"]["layer_properties"] == sheet_a
+    assert technologies["projtech_b"]["layer_properties"] == sheet_b
+    assert techs["PA1"] == "projtech_a"
+    assert techs["PB1"] == "projtech_b"
+    assert "two different layer sheets" not in capsys.readouterr().err
+
+
+def test_two_sheets_for_one_technology_warn(
+        fixture_board_path, tmp_path, capsys):
+    """Two dies whose different sheets resolve to one id share one entry,
+    and the writer says so on stderr, naming the sheet it kept. Which one
+    is kept follows the board's footprint order, not the order the dies
+    were added in, so the test reads it from the output."""
+    first = "${CHIPLET_FLOW_TECH}/projtech_a/layers.lyp"
+    second = "/elsewhere/projtech_a/layers.lyp"
+    technologies, techs = _write_with_dies(
+        fixture_board_path, tmp_path, [("PA1", first), ("PA2", second)])
+
+    kept = technologies["projtech_a"]["layer_properties"]
+    assert kept in (first, second)
+    assert techs["PA1"] == techs["PA2"] == "projtech_a"
+    err = capsys.readouterr().err
+    assert ("name technology 'projtech_a' with two different layer sheets"
+            in err)
+    assert "PA1" in err and "PA2" in err
+    assert first in err and second in err
+    assert "keeps %s for both" % kept in err

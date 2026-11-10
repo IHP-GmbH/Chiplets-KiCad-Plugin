@@ -80,6 +80,7 @@ if (os.path.basename(chiplet_export_dir) != "chiplet_export"
     sys.modules["chiplet_export"] = _pkg
 
 TARGETS = [
+    "chiplet_export.die_outline",
     "chiplet_export.pipeline.orchestrator",
     "chiplet_export.pipeline.chiplet_merge",
     "chiplet_export.pipeline.discovery",
@@ -180,9 +181,10 @@ def _gui_tier_sources():
     """Every GUI-tier .py: pipeline/ + writers/ + the top-level GUI modules.
 
     The named files are the modules KiCad loads into its own process: the plugin
-    package ``__init__``, the action, the dialog, and the fill read-back helper
-    the dialog imports. ``fill_readback.py`` is pcbnew-bound so the dynamic layer
-    cannot reach it; the static lint covers it (and the others) instead.
+    package ``__init__``, the action, the dialog, the fill read-back helper
+    the dialog imports, and the die outline field module run_export's preflight
+    imports. ``fill_readback.py`` is pcbnew-bound so the dynamic layer cannot
+    reach it; the static lint covers it (and the others) instead.
 
     Excludes vendor/ (the reference parser legitimately imports yaml),
     hyp_to_gds.py (runs in the worker tier), and tests/.
@@ -191,7 +193,8 @@ def _gui_tier_sources():
     for sub in ("pipeline", "writers"):
         files.extend(sorted((CHIPLET_EXPORT_ROOT / sub).rglob("*.py")))
     for name in ("__init__.py", "dialog_chiplet_export.py",
-                 "chiplet_export_action.py", "fill_readback.py"):
+                 "chiplet_export_action.py", "fill_readback.py",
+                 "die_outline.py"):
         p = CHIPLET_EXPORT_ROOT / name
         if p.exists():
             files.append(p)
