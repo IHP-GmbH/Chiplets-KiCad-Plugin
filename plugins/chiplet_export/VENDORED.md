@@ -29,7 +29,7 @@ that is kept and never rebased, squashed or deleted; never the head of a branch 
 because a pin has to name a commit that survives whatever the merge does.
 
 **`vendor/chiplet_format_io/__init__.py`**
-from `reference/python/chiplet_format_io/__init__.py` at commit `ef8f823`,
+from `reference/python/chiplet_format_io/__init__.py` at commit `e846129`,
 sha256 `256191bb3b7a9538cc5c7ace9a48b8f9c967bb66be0e9ed47a389d8a1af879da`,
 reader release 1.22.0.
 Gated by `tests/test_vendored_copies.py`. `vendor/chiplet_format_io.SOURCE` states the
@@ -66,6 +66,7 @@ line-break and grammar oracle, so that is the frontier it covers.
 
 | date | move | what changed for this plugin |
 |---|---|---|
+| 2026-11-10 | pin moved within 1.22.0, off a commit that never reached the published `dev`, onto the `dev` commit with the same tree | None: identical tree, so reader and oracle bytes are unchanged. |
 | 2026-11-09 | pin moved within 1.22.0, onto the mount-plane commits that `dev` fast-forwards to | None: mount-plane conformance cases, the description, docs and reader tests only. Reader and oracle bytes unchanged. |
 | 2026-11-08 | 1.21.0 to 1.22.0, the merge of the v2026.11 release into dev | Release number only. `technology_package` (the technology package validator) stays unvendored and unread here. Oracle bytes unchanged. |
 | 2026-11-06 | pin moved within 1.21.0, onto the v2026.11 release branch | None: the chiplet pad vocabulary's version, under `schemas/`, only. Reader and oracle bytes unchanged. |
@@ -89,7 +90,7 @@ line-break and grammar oracle, so that is the frontier it covers.
 | 2026-09-05 | 1.4.0 to 1.5.0 | Additive: `split_top_level_keys` and `TopLevelKeys`. |
 
 **`tests/fixtures/top_level_blocks_cases.json`**
-from `conformance/fixtures/top_level_blocks_cases.json` at commit `ef8f823`,
+from `conformance/fixtures/top_level_blocks_cases.json` at commit `e846129`,
 sha256 `45c37f47f142d88c63dfd3056a3dceba07afe6f2035d25243b7f87f2c37bccd0`,
 oracle version 5. Its commit is the reader's pin.
 Gated by `tests/test_top_level_block_grammar.py`
