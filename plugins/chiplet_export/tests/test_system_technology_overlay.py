@@ -3,7 +3,7 @@
 
 The pair under fixtures/two_die_bondpad comes from a reference flow run of
 the two-die bondpad example: design.chiplet is the System document the
-assembly was built from, draft.chiplet the run's draft .chiplet. That one
+assembly was built from (regenerated since, see its README), draft.chiplet the run's draft .chiplet. That one
 was already finalized, by a plugin from before a null technologies became
 {}, so the tests run the finalizer on it a second time. finalized.chiplet is
 what that pass made of it, with these tests' inputs, before the flag
@@ -122,7 +122,22 @@ def test_the_overlay_sets_each_id_and_the_catalog(tmp_path):
     result = h._vendored_cfio().load(str(chiplet))
     assert {c["id"]: c.get("technology") for c in result["components"]} == {
         "interposer": "intm4tm2", "U1": "sg13g2", "U2": "sg13g2"}
-    assert result["technologies"] == system["technologies"]
+    # Spelled out: equality with the System alone passes for a pair that
+    # declares no paths.
+    assert result["technologies"] == system["technologies"] == {
+        "intm4tm2": {
+            "description": "IHP 130nm IntM4TM2 aluminium BEOL interposer",
+            "layer_properties":
+                "${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp",
+            "stackup": "${CHIPLET_STUDIO_ROOT}/configs/stackups/intm4tm2.yaml",
+            "dbu": 0.001},
+        "sg13g2": {
+            "description": "IHP SG13G2 130nm BiCMOS die",
+            "layer_properties":
+                "${PDK_ROOT}/ihp-sg13g2/libs.tech/klayout/tech/sg13g2.lyp",
+            "stackup":
+                "${CHIPLET_STUDIO_ROOT}/configs/stackups/ihp-sg13g2.yaml",
+            "dbu": 0.001}}
     assert list(result["technologies"]) == ["intm4tm2", "sg13g2"]
     # Nothing else moves: without the ids it is the output from before.
     for component in result["components"]:

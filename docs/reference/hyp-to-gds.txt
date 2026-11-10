@@ -50,11 +50,11 @@ options:
   --cupillar-gds FILE   Pre-generated cu-pillar GDS file (from bump_mirror.py)
                         to merge into the interposer layout
   --connection-type TYPE
-                        Connection stack type for chiplet file (e.g.,
+                        Connection stack type for chiplet file: a method id
+                        the interconnect PDK manifest lists (e.g.,
                         cupillar_opt1, sbump_sac305). Injects
                         connection_stacks section and sets connection on die
-                        components. Choices: cupillar_opt1, cupillar_opt2,
-                        cupillar_opt3, sbump_sac305, vendorx_microbump
+                        components.
   --die-connections REF=METHOD[,REF=METHOD,...]
                         Per-die connection stack overrides (e.g.
                         U1=cupillar_opt1,U2=vendorx_microbump). Dies not

@@ -29,9 +29,9 @@ that is kept and never rebased, squashed or deleted; never the head of a branch 
 because a pin has to name a commit that survives whatever the merge does.
 
 **`vendor/chiplet_format_io/__init__.py`**
-from `reference/python/chiplet_format_io/__init__.py` at commit `6f8e0dc`,
-sha256 `b48aadf2af08c47606047703df7d3508960ed9234d09339d901ce1553885cf6f`,
-reader release 1.21.0.
+from `reference/python/chiplet_format_io/__init__.py` at commit `48a3052`,
+sha256 `256191bb3b7a9538cc5c7ace9a48b8f9c967bb66be0e9ed47a389d8a1af879da`,
+reader release 1.22.0.
 Gated by `tests/test_vendored_copies.py`. `vendor/chiplet_format_io.SOURCE` states the
 same pin in the format gds_to_kicad's copy uses, and the gate checks it too.
 Its license is the repository's `LICENSES/Apache-2.0.txt`, the bytes of upstream's
@@ -40,7 +40,7 @@ it. Not gated: re-copy it only if upstream changes it. It sits outside the packa
 because adk-tools' `ci/check_vendored_reader.py` holds every file under a copy to a file of
 the reference, and the reference directory carries no license.
 
-What this copy holds the plugin to, at 1.21.0:
+What this copy holds the plugin to, at 1.22.0:
 
 - A document of format `1.5` or below reads without the newer-minor warning
   (`ACCEPTED_FORMAT_VERSIONS`). The assembly stamp `SUPPORTED_FORMAT_VERSION` is `1.0`.
@@ -66,6 +66,9 @@ line-break and grammar oracle, so that is the frontier it covers.
 
 | date | move | what changed for this plugin |
 |---|---|---|
+| 2026-11-10 | pin moved within 1.22.0, off a commit that never reached the published `dev`, onto the `dev` commit with the same tree | None: identical tree, so reader and oracle bytes are unchanged. |
+| 2026-11-09 | pin moved within 1.22.0, onto the mount-plane commits that `dev` fast-forwards to | None: mount-plane conformance cases, the description, docs and reader tests only. Reader and oracle bytes unchanged. |
+| 2026-11-08 | 1.21.0 to 1.22.0, the merge of the v2026.11 release into dev | Release number only. `technology_package` (the technology package validator) stays unvendored and unread here. Oracle bytes unchanged. |
 | 2026-11-06 | pin moved within 1.21.0, onto the v2026.11 release branch | None: the chiplet pad vocabulary's version, under `schemas/`, only. Reader and oracle bytes unchanged. |
 | 2026-11-03 | 1.22.0 back to 1.21.0 | Release number only: this release keeps the 1.21.0 pin, so the copy returns to it. Oracle bytes unchanged. |
 | 2026-11-01 | 1.21.0 to 1.22.0, a dev commit after the release commit | Release number only. Adds `technology_package` (the technology package validator), which this plugin does not vendor or read. Oracle bytes unchanged. |
@@ -87,7 +90,7 @@ line-break and grammar oracle, so that is the frontier it covers.
 | 2026-09-05 | 1.4.0 to 1.5.0 | Additive: `split_top_level_keys` and `TopLevelKeys`. |
 
 **`tests/fixtures/top_level_blocks_cases.json`**
-from `conformance/fixtures/top_level_blocks_cases.json` at commit `6f8e0dc`,
+from `conformance/fixtures/top_level_blocks_cases.json` at commit `48a3052`,
 sha256 `45c37f47f142d88c63dfd3056a3dceba07afe6f2035d25243b7f87f2c37bccd0`,
 oracle version 5. Its commit is the reader's pin.
 Gated by `tests/test_top_level_block_grammar.py`

@@ -54,3 +54,4 @@ def test_the_reference_carries_no_host_path(name):
 def test_every_reference_file_has_a_command():
     written = {name for name, _ in WRITER.COMMANDS}
     assert {p.name for p in WRITER.OUT.iterdir()} == written
+

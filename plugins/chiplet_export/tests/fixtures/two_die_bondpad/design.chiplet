@@ -7,9 +7,13 @@ assembly:
 technologies:
   intm4tm2:
     description: IHP 130nm IntM4TM2 aluminium BEOL interposer
+    layer_properties: ${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp
+    stackup: ${CHIPLET_STUDIO_ROOT}/configs/stackups/intm4tm2.yaml
     dbu: 0.001
   sg13g2:
     description: IHP SG13G2 130nm BiCMOS die
+    layer_properties: ${PDK_ROOT}/ihp-sg13g2/libs.tech/klayout/tech/sg13g2.lyp
+    stackup: ${CHIPLET_STUDIO_ROOT}/configs/stackups/ihp-sg13g2.yaml
     dbu: 0.001
 components:
 - id: interposer
@@ -25,6 +29,7 @@ components:
     width: 2000.0
     height: 3200.0
     thickness: 10.8103
+  attachment_surface_z: 10.8103
 - id: U1
   type: die
   technology: sg13g2

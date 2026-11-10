@@ -4265,9 +4265,7 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                 # field, decoupled from the physical body. dimensions.thickness
                 # is intentionally NOT overwritten here: it keeps the KiCad
                 # board-stackup value the writer emitted (the physical interposer
-                # body). Consumers read attachment_surface_z as the mount
-                # reference and fall back to dimensions.thickness only for legacy
-                # files that predate this split.
+                # body). attachment_surface_z is the mount plane.
                 component['attachment_surface_z'] = attachment_surface_z
 
                 # Update width/height from bbox
@@ -6938,9 +6936,13 @@ Examples:
         choices=_connection_type_cli_choices(),
         default="",
         metavar="TYPE",
-        help="Connection stack type for chiplet file (e.g., cupillar_opt1, sbump_sac305). "
-             "Injects connection_stacks section and sets connection on die components. "
-             "Choices: %(choices)s"
+        # Checked against the manifest's methods when one is found, but not
+        # printed: docs/reference/ publishes this --help, so it must read the
+        # same on any host.
+        help="Connection stack type for chiplet file: a method id the "
+             "interconnect PDK manifest lists (e.g., cupillar_opt1, "
+             "sbump_sac305). Injects connection_stacks section and sets "
+             "connection on die components."
     )
     parser.add_argument(
         "--die-connections",
