@@ -32,9 +32,11 @@ options:
                         interconnect.adapter from the .chiplet (absent there =
                         no interconnect axis).
   --connection CONNECTION
-                        Connection stack (e.g. cupillar_opt1/2/3,
-                        sbump_sac305). A cupillar stack auto-generates pillars
-                        from the die pads.
+                        Connection stack (e.g. cupillar_opt1/2/3). A cupillar
+                        stack auto-generates pillars from the die pads. A
+                        method whose landing the worker cannot draw
+                        (connection_methods.py) is refused before the export
+                        stages anything.
   --insert-metal-fill   Stamp metal density fill on the interposer GDS via the
                         interposer PDK engine. Needs the PDK fill work and the
                         klayout binary; off by default.

@@ -678,6 +678,44 @@ def test_a_solder_bump_die_is_refused_before_the_gds(
     assert "cannot draw that landing" in err
 
 
+def test_the_methods_command_reports_what_the_pad_loop_refuses():
+    """connection_methods.py run as the dialog and run_export run it."""
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    from chiplet_export.pipeline import orchestrator
+    availability, command = orchestrator.query_connection_availability(
+        sys.executable, str(PLUGIN_ROOT), orchestrator.ExportOptions())
+    assert command == [sys.executable, str(PLUGIN_ROOT / "connection_methods.py")]
+    assert availability == h.connection_method_availability()
+    assert {m for m, reason in availability.items() if reason} == {"sbump_sac305"}
+    assert "ihp_sbump_anchor opens 9/36, 41/36, 99/36" in availability["sbump_sac305"]
+    for method in ("cupillar_opt1", "cupillar_opt2", "cupillar_opt3",
+                   "vendorx_microbump"):
+        assert availability[method] is None
+
+
+def test_without_the_pad_cell_every_method_is_unavailable(monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    monkeypatch.setattr(h, "_import_bump_mirror", lambda: None)
+    availability = h.connection_method_availability()
+    assert availability
+    assert all("needs bump_mirror" in reason for reason in availability.values())
+
+
+def test_an_unusable_method_list_is_a_typed_refusal(monkeypatch, capsys):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    import connection_methods
+    im = h._import_interconnect_manifest()
+
+    def torn(*args, **kwargs):
+        raise RuntimeError("torn")
+    monkeypatch.setattr(im, "list_methods", torn)
+    with pytest.raises(h.SourceRefused, match="the method list"):
+        h.connection_method_availability()
+    assert connection_methods.main([]) == h.EXIT_SOURCE_UNREACHABLE
+    out = capsys.readouterr()
+    assert out.out == "" and "the method list" in out.err
+
+
 # ---------------------------------------------------------------------------
 # Board outline -> prBoundary 235/0 (interposer extent = Edge.Cuts, not copper)
 # ---------------------------------------------------------------------------

@@ -1046,6 +1046,84 @@ def build_worker_env(options: ExportOptions,
     return env
 
 
+#: The worker command that reports which methods it can draw a landing for.
+CONNECTION_METHODS_SCRIPT = "connection_methods.py"
+CONNECTION_METHODS_FORMAT = "chiplet_export.connection_methods"
+CONNECTION_METHODS_TIMEOUT_SECONDS = 60
+
+
+class ConnectionAvailabilityError(Exception):
+    """The worker's method availability could not be read."""
+
+
+def query_connection_availability(worker_py: str, plugin_dir: str,
+                                  options: ExportOptions,
+                                  timeout: float = CONNECTION_METHODS_TIMEOUT_SECONDS
+                                  ) -> Tuple[Dict[str, Optional[str]], List[str]]:
+    """Run the worker's connection_methods.py with the export's PDK roots.
+
+    Returns ``(availability, command)``: each manifest method id mapped to
+    None when the worker can draw its landing, else the reason it refuses,
+    and the command that was run. Raises ConnectionAvailabilityError when the
+    command fails or its report is malformed.
+    """
+    import json
+    import subprocess
+
+    command = [worker_py, str(Path(plugin_dir) / CONNECTION_METHODS_SCRIPT)]
+    shown = " ".join(command)
+    try:
+        proc = subprocess.run(command, env=build_worker_env(options),
+                              stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ConnectionAvailabilityError("%s: %s" % (shown, exc)) from exc
+    if proc.returncode != 0:
+        lines = proc.stderr.strip().splitlines()
+        raise ConnectionAvailabilityError("%s exited %d: %s" % (
+            shown, proc.returncode, lines[-1] if lines else "no message"))
+    try:
+        report = json.loads(proc.stdout)
+    except ValueError as exc:
+        raise ConnectionAvailabilityError(
+            "%s printed no JSON report (%s)" % (shown, exc)) from exc
+    if not isinstance(report, dict):
+        report = {}
+    entries = report.get("methods")
+    if (report.get("format") != CONNECTION_METHODS_FORMAT
+            or report.get("version") != 1 or not isinstance(entries, list)):
+        raise ConnectionAvailabilityError(
+            "%s printed an unrecognized report" % shown)
+    availability = {}
+    for entry in entries:
+        valid = (isinstance(entry, dict) and isinstance(entry.get("id"), str)
+                 and isinstance(entry.get("available"), bool))
+        reason = entry.get("reason") if valid else None
+        if not valid or entry["available"] != (reason is None) or not (
+                reason is None or (isinstance(reason, str) and reason)):
+            raise ConnectionAvailabilityError(
+                "%s printed a malformed method entry: %r" % (shown, entry))
+        availability[entry["id"]] = reason
+    return availability, command
+
+
+def refused_landings(availability: Dict[str, Optional[str]],
+                     die_refs, die_connections: Dict[str, str],
+                     default_method: str) -> List[Tuple[str, str, str]]:
+    """``(ref, method, reason)`` for each die whose landing would be refused.
+
+    A die's method resolves as in the worker's pad loop: its own entry, else
+    the assembly-wide default. Ids the report does not name pass.
+    """
+    refused = []
+    for ref in sorted(die_refs):
+        method = (die_connections or {}).get(ref, default_method)
+        reason = availability.get(method) if method else None
+        if reason:
+            refused.append((ref, method, reason))
+    return refused
+
+
 def build_adk_drc_argv(adk_runner_path: str,
                        gds_path: str,
                        interposer_adapter: str,
@@ -2011,6 +2089,29 @@ def run_export(board, options, plugin_dir,
             die_methods=effective_die_conns.values(),
             manifest=interconnect_manifest,
         )
+
+        # The worker refuses a die whose landing it cannot draw, but only after
+        # the intermediates are staged. Ask it first, with the same roots, for
+        # the dies it would draw pads for; a pre-generated cupillar_gds is
+        # merged as given and draws none.
+        landing_refs = [] if options.cupillar_gds else list(effective_pad_locs)
+        if any((effective_die_conns or {}).get(ref, options.connection_type)
+               for ref in landing_refs):
+            try:
+                availability, query = query_connection_availability(
+                    worker_py, plugin_dir, dataclasses.replace(
+                        options,
+                        interconnect_pdk_root=interconnect_manifest.root))
+            except ConnectionAvailabilityError as exc:
+                return ExportResult(
+                    error="Cannot check the connection methods: %s" % exc)
+            _log("$ " + " ".join(query))
+            refused = refused_landings(availability, landing_refs,
+                                       effective_die_conns,
+                                       options.connection_type)
+            if refused:
+                return ExportResult(error="Cannot draw the landing of %s" % (
+                    "; ".join("%s (%s): %s" % entry for entry in refused)))
 
         # All pre-worker validation passed: stage the intermediate into the
         # output dir now, as a sibling of the canonical .chiplet that hyp_to_gds

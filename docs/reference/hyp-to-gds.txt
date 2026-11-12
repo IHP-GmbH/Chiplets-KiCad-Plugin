@@ -52,9 +52,10 @@ options:
   --connection-type TYPE
                         Connection stack type for chiplet file: a method id
                         the interconnect PDK manifest lists (e.g.,
-                        cupillar_opt1, sbump_sac305). Injects
-                        connection_stacks section and sets connection on die
-                        components.
+                        cupillar_opt1). Injects connection_stacks section and
+                        sets connection on die components. A die whose landing
+                        the pad cell cannot draw is refused;
+                        connection_methods.py lists which methods those are.
   --die-connections REF=METHOD[,REF=METHOD,...]
                         Per-die connection stack overrides (e.g.
                         U1=cupillar_opt1,U2=vendorx_microbump). Dies not

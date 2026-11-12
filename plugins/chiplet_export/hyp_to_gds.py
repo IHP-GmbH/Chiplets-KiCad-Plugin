@@ -5344,6 +5344,35 @@ def _check_landing_anchor(connection_type, bm):
                           manifest.get("fab_anchors"), drawn)
 
 
+def connection_method_availability():
+    """Every manifest method id, mapped to None or the reason it is refused.
+
+    Runs _check_landing_anchor, the check the pad loop refuses on, for each
+    method, so a list built from this offers only what an export can draw.
+    Empty when no interconnect PDK is found; an unusable manifest raises
+    SourceRefused.
+    """
+    im = _import_interconnect_manifest()
+    if im is None:
+        return {}
+    try:
+        methods = im.list_methods()
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        raise _manifest_refusal(exc, "the method list")
+    bm = _import_bump_mirror() if methods else None
+    availability = {}
+    for method in methods:
+        try:
+            _check_landing_anchor(method, bm)
+        except ValueError as exc:
+            availability[method] = str(exc)
+        else:
+            availability[method] = None
+    return availability
+
+
 def _connection_to_adapter(connection_type):
     """Interconnect adapter id for a connection-stack id, or None.
 
@@ -6978,9 +7007,10 @@ Examples:
         # printed: docs/reference/ publishes this --help, so it must read the
         # same on any host.
         help="Connection stack type for chiplet file: a method id the "
-             "interconnect PDK manifest lists (e.g., cupillar_opt1, "
-             "sbump_sac305). Injects connection_stacks section and sets "
-             "connection on die components."
+             "interconnect PDK manifest lists (e.g., cupillar_opt1). Injects "
+             "connection_stacks section and sets connection on die "
+             "components. A die whose landing the pad cell cannot draw is "
+             "refused; connection_methods.py lists which methods those are."
     )
     parser.add_argument(
         "--die-connections",

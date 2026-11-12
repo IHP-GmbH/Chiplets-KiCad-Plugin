@@ -28,6 +28,7 @@ COMMANDS = [
     ("chiplet-export.txt", "chiplet_export_cli.py"),
     ("board-snapshot.txt", "board_snapshot_cli.py"),
     ("hyp-to-gds.txt", "hyp_to_gds.py"),
+    ("connection-methods.txt", "connection_methods.py"),
 ]
 
 # Runs the script as `python3 script --help` does (its directory first on

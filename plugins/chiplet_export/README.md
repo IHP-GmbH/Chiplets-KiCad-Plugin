@@ -370,6 +370,12 @@ written, and the message names `INTERPOSER_PDK_ROOT` and the key.
   dies' existing connection field untouched. This is the assembly-wide
   default; per-die rows below override it.
 
+  A method whose landing the worker cannot draw is labelled
+  `(unavailable)` here and in the per-die rows, its reason replaces the
+  grey line, and Run stays disabled while a die uses it. The dialog asks
+  the worker with `connection_methods.py`, the same command chiplet-export
+  runs before it stages anything, and logs the command it ran.
+
   Each entry is labelled with the numbers the choice actually turns on —
   `cupillar_opt1 - 75um pitch, 44um dia` — and the grey line underneath
   spells the selected method out in full (pitch, minimum spacing,
@@ -896,7 +902,9 @@ landing only when the UBM openings that anchor declares in the manifest's
 that cell is CuPillarPad, so `ihp_cupillar_anchor` methods export and an
 `ihp_sbump_anchor` method (`sbump_sac305`) is refused before the GDS is
 written instead of losing its landings, whenever the worker draws the pads
-from pin locations. A pre-generated `--cupillar-gds` is merged as given; for
+from pin locations. `connection_methods.py` runs that check for every method
+and prints the result as JSON; the dialog and chiplet-export use it to refuse
+such a die before the export stages anything. A pre-generated `--cupillar-gds` is merged as given; for
 marked boards the preflight refuses that override. For every method the
 landing diameter is `passiv_opening_um + 2 * tm2_enclosure_um` from the
 manifest. A solder bump's `body_diameter_um` is the ball, a 3D body only, and
