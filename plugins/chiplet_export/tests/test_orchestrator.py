@@ -40,6 +40,8 @@ from chiplet_export.pipeline.orchestrator import (  # noqa: E402
     derive_interconnect_methods, write_ixn_methods_sidecar,
     _read_component_connections, _open_run_log,
 )
+from chiplet_export.connection_methods import (  # noqa: E402
+    refused_landings, resolve_die_methods)
 from chiplet_export.writers.connection_stacks import (  # noqa: E402
     InterconnectManifestSnapshot,
 )
@@ -2690,14 +2692,14 @@ def test_the_availability_query_reads_the_report_with_the_export_roots(tmp_path)
         "env = os.environ\n"
         "print(json.dumps({'format': 'chiplet_export.connection_methods',"
         " 'version': 1, 'methods': ["
-        "{'id': 'pillar', 'available': True, 'reason': None},"
-        "{'id': 'bump', 'available': False, 'reason': '%s|%s' % ("
+        "{'id': 'pillar', 'reason': None},"
+        "{'id': 'bump', 'reason': '%s|%s' % ("
         "env['INTERPOSER_PDK_ROOT'], env['INTERCONNECT_PDK_ROOT'])}]}))\n"))
-    availability, command = orchestrator.query_connection_availability(
+    availability, shown = orchestrator.query_connection_availability(
         sys.executable, plugin, ExportOptions(
             interposer_pdk_root="/interposer", interconnect_pdk_root="/ic"))
-    assert command == [sys.executable,
-                       str(Path(plugin) / "connection_methods.py")]
+    assert shown == "INTERPOSER_PDK_ROOT=/interposer INTERCONNECT_PDK_ROOT=/ic %s %s" % (
+        sys.executable, Path(plugin) / "connection_methods.py")
     assert availability == {"pillar": None, "bump": "/interposer|/ic"}
     assert list(availability) == ["pillar", "bump"]
 
@@ -2706,16 +2708,24 @@ def test_the_availability_query_reads_the_report_with_the_export_roots(tmp_path)
     ("sys.stderr.write('Error: torn manifest\\n'); sys.exit(5)\n",
      "exited 5: Error: torn manifest"),
     ("print('not json')\n", "printed no JSON report"),
+    # Bytes that are not UTF-8 still reach the error, not a decode traceback.
+    ("sys.stderr.buffer.write(b'\\xff torn\\n'); sys.exit(3)\n",
+     "exited 3: \ufffd torn"),
     ("print('[]')\n", "printed an unrecognized report"),
     ("print(json.dumps({'format': 'other', 'version': 1, 'methods': []}))\n",
      "printed an unrecognized report"),
-    (_report({"id": "bump", "available": False, "reason": None}),
+    ("print(json.dumps({'format': 'chiplet_export.connection_methods',"
+     " 'version': True, 'methods': []}))\n", "printed an unrecognized report"),
+    ("print(json.dumps({'format': 'chiplet_export.connection_methods',"
+     " 'version': 2, 'methods': []}))\n", "printed an unrecognized report"),
+    (_report({"id": "bump", "reason": ""}), "malformed method entry"),
+    (_report({"id": "bump", "reason": 3}), "malformed method entry"),
+    (_report({"id": "", "reason": None}), "malformed method entry"),
+    (_report({"id": 7, "reason": None}), "malformed method entry"),
+    (_report({"id": "bump"}), "malformed method entry"),
+    (_report({"id": "bump", "reason": None, "available": True}),
      "malformed method entry"),
-    (_report({"id": "bump", "available": True, "reason": "why"}),
-     "malformed method entry"),
-    (_report({"id": "bump", "available": False, "reason": ""}),
-     "malformed method entry"),
-    (_report({"id": 7, "available": True, "reason": None}),
+    (_report({"id": "bump", "reason": None}, {"id": "bump", "reason": "x"}),
      "malformed method entry"),
     (_report("bump"), "malformed method entry"),
 ])
@@ -2734,16 +2744,22 @@ def test_an_availability_worker_that_cannot_start_is_an_error(tmp_path):
             str(tmp_path / "no-such-python"), str(tmp_path), ExportOptions())
 
 
-def test_refused_landings_resolve_each_die_as_the_worker_does():
+def test_each_die_takes_its_own_method_else_the_default():
+    assert resolve_die_methods(
+        ["U2", "U1", "U3"], {"U1": "pillar", "U3": ""}, "bump") == {
+            "U2": "bump", "U1": "pillar"}
+    assert resolve_die_methods(["U1"], {"U1": "bump"}, "") == {"U1": "bump"}
+    assert resolve_die_methods(["U1"], None, "") == {}
+
+
+def test_only_the_methods_the_report_refuses_block_a_landing():
     availability = {"pillar": None, "bump": "bump: no pad cell"}
-    assert orchestrator.refused_landings(
-        availability, ["U2", "U1", "U3", "U4"],
-        {"U1": "pillar", "U3": "", "U4": "unknown"}, "bump") == [
+    assert refused_landings(
+        availability, {"U2": "bump", "U1": "pillar", "U4": "unknown",
+                       "U0": "bump"}) == [
+            ("U0", "bump", "bump: no pad cell"),
             ("U2", "bump", "bump: no pad cell")]
-    assert orchestrator.refused_landings(
-        availability, ["U1"], {"U1": "bump"}, "") == [
-            ("U1", "bump", "bump: no pad cell")]
-    assert orchestrator.refused_landings(availability, ["U1"], {}, "") == []
+    assert refused_landings({}, {"U1": "bump"}) == []
 
 
 def _landing_fakes(monkeypatch):
@@ -2768,7 +2784,7 @@ def _landing_run(tmp_path, monkeypatch, answer, **options):
     def query(worker_py, plugin_dir, query_options):
         queries.append((worker_py, plugin_dir,
                         query_options.interconnect_pdk_root))
-        return answer, [worker_py, plugin_dir + "/connection_methods.py"]
+        return answer, "%s %s/connection_methods.py" % (worker_py, plugin_dir)
 
     monkeypatch.setattr(orchestrator, "query_connection_availability", query)
     run_options = _drc_options(tmp_path)
@@ -2846,13 +2862,13 @@ def test_the_cli_connection_flag_reaches_the_landing_refusal(
     monkeypatch.setattr(
         orchestrator, "query_connection_availability",
         lambda *_a, **_kw: ({"sbump_sac305": "sbump_sac305: no pad cell"},
-                            ["/worker/python", "connection_methods.py"]))
+                            "/worker/python connection_methods.py"))
     board = tmp_path / "board.kicad_pcb"
     board.touch()
     assert cli.main(["--board", str(board), "--output-dir",
                      str(tmp_path / "out"), "--connection",
                      "sbump_sac305"]) == 1
     out = capsys.readouterr().out
-    assert ("error:               Cannot draw the landing of U1 "
-            "(sbump_sac305): sbump_sac305: no pad cell") in out
+    assert ("Cannot draw the landing of U1 (sbump_sac305): "
+            "sbump_sac305: no pad cell") in out
     assert calls == []

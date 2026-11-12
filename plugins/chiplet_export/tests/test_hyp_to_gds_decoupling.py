@@ -678,13 +678,14 @@ def test_a_solder_bump_die_is_refused_before_the_gds(
     assert "cannot draw that landing" in err
 
 
-def test_the_methods_command_reports_what_the_pad_loop_refuses():
+def test_the_methods_command_agrees_with_the_worker_on_the_live_pdks():
     """connection_methods.py run as the dialog and run_export run it."""
     use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
     from chiplet_export.pipeline import orchestrator
-    availability, command = orchestrator.query_connection_availability(
+    availability, shown = orchestrator.query_connection_availability(
         sys.executable, str(PLUGIN_ROOT), orchestrator.ExportOptions())
-    assert command == [sys.executable, str(PLUGIN_ROOT / "connection_methods.py")]
+    assert shown.endswith("%s %s" % (sys.executable,
+                                     PLUGIN_ROOT / "connection_methods.py"))
     assert availability == h.connection_method_availability()
     assert {m for m, reason in availability.items() if reason} == {"sbump_sac305"}
     assert "ihp_sbump_anchor opens 9/36, 41/36, 99/36" in availability["sbump_sac305"]
@@ -699,6 +700,33 @@ def test_without_the_pad_cell_every_method_is_unavailable(monkeypatch):
     availability = h.connection_method_availability()
     assert availability
     assert all("needs bump_mirror" in reason for reason in availability.values())
+
+
+def test_a_method_whose_entry_is_unusable_is_refused_alone(monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    check = h._check_landing_anchor
+
+    def torn_entry(method, *args, **kwargs):
+        if method == "cupillar_opt2":
+            raise h.SourceRefused("cupillar_opt2: torn entry")
+        return check(method, *args, **kwargs)
+    monkeypatch.setattr(h, "_check_landing_anchor", torn_entry)
+    availability = h.connection_method_availability()
+    assert availability["cupillar_opt2"] == "cupillar_opt2: torn entry"
+    assert availability["cupillar_opt1"] is None
+
+
+def test_the_methods_command_prints_only_json_on_stdout(monkeypatch, capsys):
+    import connection_methods
+
+    def noisy():
+        print("a PDK module talking while it loads")
+        return {"cupillar_opt1": None}
+    monkeypatch.setattr(h, "connection_method_availability", noisy)
+    assert connection_methods.main([]) == 0
+    out = capsys.readouterr()
+    assert connection_methods.parse_report(out.out) == {"cupillar_opt1": None}
+    assert "talking" in out.err
 
 
 def test_an_unusable_method_list_is_a_typed_refusal(monkeypatch, capsys):

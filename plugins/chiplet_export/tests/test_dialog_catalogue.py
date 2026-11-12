@@ -241,9 +241,12 @@ def populate_controls(dialog, root="/selected/pdk"):
     dialog._catalogue_warning = ""
     dialog._catalogue_reported_warning = ""
     dialog._conn_availability = {}
+    # Already asked for this worker and these roots: no query unless a test
+    # changes one of them.
+    dialog._availability_key = ("/worker/python", "/interposer/pdk", root)
     dialog._availability_report = ""
     dialog._availability_reported = ""
-    dialog._landing_blocked = False
+    dialog._shown_state = ("", False)
     dialog._plugin_dir = "/plugin"
     dialog._interconnect_root_ctrl = Control(root)
     dialog._interposer_root_ctrl = Control("/interposer/pdk")
@@ -278,12 +281,11 @@ def dialog(dialog_module, monkeypatch):
                         lambda *args, **kwargs: ["", "original"])
     monkeypatch.setattr(dialog_module, "connection_method_specs",
                         lambda *args, **kwargs: {"original": {}})
-    monkeypatch.setattr(dialog_module, "query_connection_availability",
-                        lambda *args, **kwargs: ({"original": None}, QUERY))
+    # The availability query runs only where a test runs it (_answer_inline).
+    monkeypatch.setattr(dialog_module, "_in_background",
+                        lambda target, *args: None)
     return instance
 
-
-QUERY = ["/worker/python", "/plugin/connection_methods.py"]
 
 
 @pytest.mark.parametrize("failure_site", ["available_connection_types",
@@ -360,8 +362,8 @@ def constructor_source(dialog_module, monkeypatch, tmp_path):
                         lambda self: "controlled preview; no interpreter probe")
     monkeypatch.setattr(dialog_module, "_preflight_interconnect_manifest",
                         orchestrator._preflight_interconnect_manifest)
-    monkeypatch.setattr(dialog_module, "query_connection_availability",
-                        lambda *args, **kwargs: ({}, QUERY))
+    monkeypatch.setattr(dialog_module, "_in_background",
+                        lambda target, *args: None)
     return root
 
 
@@ -436,6 +438,11 @@ def test_real_constructor_with_control_doubles_starts_with_valid_catalogue(
     instance = dialog_module.ChipletExportDialog(None, board=None)
     assert_constructor_source_editable(instance, constructor_source)
     assert reads and all(path == manifest for path in reads)
+    # A changed interposer root or worker re-reads, and so asks the worker again.
+    assert (instance._interposer_root_ctrl._on_change
+            == instance._schedule_connection_refresh)
+    assert instance._schedule_connection_refresh in [
+        handler for _event, handler, _source in instance._worker_ctrl.bindings]
     assert instance._catalogue_error == ""
     assert instance._log_ctrl.GetValue() == ""
     assert instance._run_btn.IsEnabled() and instance._conn_ctrl.IsEnabled()
@@ -816,76 +823,158 @@ def test_dialog_identifies_the_input_named_by_the_pipeline(dialog, error_input, 
     assert dialog._status.value.startswith("Error: ")
 
 
-def _offer_an_undrawable_method(dialog, dialog_module, monkeypatch, queries):
+def _answer_inline(dialog_module, monkeypatch, answer):
+    """Run the availability query inline; ``answer`` is its result or raises.
+
+    Returns the queries made and ``deliver``, which hands the UI thread the
+    answers posted so far, as wx.CallAfter would once the dialog is idle.
+    """
+    queries, posted = [], []
+
+    def deliver():
+        while posted:
+            fn, args = posted.pop(0)
+            fn(*args)
+
     def query(worker, plugin_dir, options):
         queries.append((worker, plugin_dir, options.interposer_pdk_root,
                         options.interconnect_pdk_root))
-        return {"original": None, "bump": "bump: no pad cell"}, QUERY
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
+    monkeypatch.setattr(dialog_module, "query_connection_availability", query)
+    monkeypatch.setattr(dialog_module, "_in_background",
+                        lambda target, *args: target(*args))
+    monkeypatch.setattr(dialog_module.wx, "CallAfter",
+                        lambda fn, *args: posted.append((fn, args)),
+                        raising=False)
+    return queries, deliver
+
+
+BUMP = ({"original": None, "bump": "bump: no pad cell"},
+        "INTERCONNECT_PDK_ROOT=/resolved/pdk /worker/python "
+        "/plugin/connection_methods.py")
+
+
+def _offer_an_undrawable_method(dialog, dialog_module, monkeypatch):
+    queries, deliver = _answer_inline(dialog_module, monkeypatch, BUMP)
     monkeypatch.setattr(dialog_module, "available_connection_types",
                         lambda *args, **kwargs: ["", "original", "bump"])
     monkeypatch.setattr(dialog_module, "connection_method_specs",
                         lambda *args, **kwargs: {"original": {}, "bump": {}})
-    monkeypatch.setattr(dialog_module, "query_connection_availability", query)
     # The root the preflight resolved, not the text in the field.
     monkeypatch.setattr(dialog_module, "_preflight_interconnect_manifest",
                         lambda *args, **kwargs: InterconnectManifestSnapshot(
                             {"methods": {"original": {}, "bump": {}}},
                             root="/resolved/pdk"))
     assert dialog._refresh_connection_choices() is True
+    assert not any(label.endswith("(unavailable)")
+                   for label in dialog._conn_ctrl.choices)
+    deliver()
+    return queries, deliver
 
 
-def test_a_method_the_worker_refuses_is_marked_and_blocks_run(
+def test_a_method_the_worker_refuses_is_labelled_with_its_reason(
         dialog, dialog_module, monkeypatch):
-    queries = []
-    _offer_an_undrawable_method(dialog, dialog_module, monkeypatch, queries)
+    queries, _deliver = _offer_an_undrawable_method(
+        dialog, dialog_module, monkeypatch)
     # The worker, both roots and the plugin are the ones run_export uses.
     assert queries == [("/worker/python", "/plugin", "/interposer/pdk",
                         "/resolved/pdk")]
     assert dialog._conn_ctrl.choices[2].endswith("(unavailable)")
     assert not dialog._conn_ctrl.choices[1].endswith("(unavailable)")
-    assert dialog._run_btn.enabled
-    assert "$ /worker/python /plugin/connection_methods.py" in dialog._log_ctrl.value
+    # The per-die rows, filled before the answer came, are relabelled too.
+    assert dialog._die_conn_ctrls["U1"].choices[2].endswith("(unavailable)")
+    assert dialog._conn_choices[dialog._conn_ctrl.GetSelection()] == "original"
+    assert ("$ INTERCONNECT_PDK_ROOT=/resolved/pdk /worker/python "
+            "/plugin/connection_methods.py") in dialog._log_ctrl.value
     assert "Unavailable: bump: no pad cell" in dialog._log_ctrl.value
+    dialog._conn_ctrl.SetSelection(2)
+    dialog._on_conn_choice(None)
+    assert dialog._conn_detail.value == "Unavailable: bump: no pad cell"
 
+
+def test_run_stays_disabled_while_a_die_uses_an_undrawable_method(
+        dialog, dialog_module, monkeypatch):
+    _offer_an_undrawable_method(dialog, dialog_module, monkeypatch)
+    assert dialog._run_btn.enabled
     dialog._die_conn_ctrls["U1"].SetSelection(2)
     dialog._on_die_conn_selected("U1")
     assert not dialog._run_btn.enabled
-    assert dialog._status.value == "Blocked: U1 uses bump, which cannot be drawn"
+    assert "U1 uses bump" in dialog._status.value
     assert dialog._die_conn_ctrls["U1"].tooltip == "Unavailable: bump: no pad cell"
     dialog._set_running(False)
     assert not dialog._run_btn.enabled
-
-    def forbid(*args, **kwargs):
-        raise AssertionError("Run collected options for an undrawable method")
-    monkeypatch.setattr(dialog, "_collect_options", forbid)
-    dialog._on_run(None)
 
     # A die on the default follows the assembly-wide choice.
     dialog._die_conn_ctrls["U1"].SetSelection(0)
     dialog._on_die_conn_selected("U1")
     assert dialog._run_btn.enabled and dialog._status.value == "Idle"
     dialog._conn_ctrl.SetSelection(2)
-    dialog._on_conn_selected(object())
+    dialog._on_conn_choice(None)
     assert not dialog._run_btn.enabled
-    assert dialog._conn_detail.value == "Unavailable: bump: no pad cell"
     dialog._conn_ctrl.SetSelection(1)
-    dialog._on_conn_selected(object())
+    dialog._on_conn_choice(None)
     assert dialog._run_btn.enabled and dialog._status.value == "Idle"
+
+
+def test_each_worker_and_root_pair_is_asked_once(
+        dialog, dialog_module, monkeypatch):
+    queries, deliver = _offer_an_undrawable_method(
+        dialog, dialog_module, monkeypatch)
     log = dialog._log_ctrl.value
     assert dialog._refresh_connection_choices() is True
-    assert dialog._log_ctrl.value == log  # the same answer is not logged again
+    deliver()
+    assert len(queries) == 1 and dialog._log_ctrl.value == log
+    dialog._interposer_root_ctrl.value = "/other/interposer"
+    assert dialog._refresh_connection_choices() is True
+    deliver()
+    assert queries[-1][2] == "/other/interposer" and len(queries) == 2
+    # The new pair's answer is logged once, under the old one.
+    assert dialog._log_ctrl.value.startswith(log)
+    assert dialog._log_ctrl.value.count("Unavailable: bump: no pad cell") == 2
+
+
+def test_an_answer_for_an_older_pair_is_dropped(
+        dialog, dialog_module, monkeypatch):
+    _offer_an_undrawable_method(dialog, dialog_module, monkeypatch)
+    old_key = dialog._availability_key
+    dialog._availability_key = ("/new/worker", "", "")
+    dialog._conn_availability = {}
+    dialog._apply_availability(old_key, BUMP)
+    assert dialog._conn_availability == {}
+    dialog._closing = True
+    dialog._apply_availability(dialog._availability_key, BUMP)
+    assert dialog._conn_availability == {}
 
 
 def test_an_availability_query_that_fails_marks_nothing(
         dialog, dialog_module, monkeypatch):
-    def failed(*args, **kwargs):
-        raise dialog_module.ConnectionAvailabilityError("worker exited 1: boom")
-
-    monkeypatch.setattr(dialog_module, "query_connection_availability", failed)
+    _queries, deliver = _answer_inline(
+        dialog_module, monkeypatch,
+        dialog_module.ConnectionAvailabilityError("worker exited 1: boom"))
+    dialog._interposer_root_ctrl.value = "/other/interposer"
     assert dialog._refresh_connection_choices() is True
+    deliver()
     assert not any(label.endswith("(unavailable)")
                    for label in dialog._conn_ctrl.choices)
     assert dialog._run_btn.enabled
     assert ("WARNING: method availability unknown, checked again at Run: "
             "worker exited 1: boom") in dialog._log_ctrl.value
+
+
+def test_without_a_worker_nothing_is_asked(dialog, dialog_module, monkeypatch):
+    """No worker typed and none found: run_export resolves one at Run."""
+    queries, deliver = _answer_inline(dialog_module, monkeypatch, BUMP)
+    discovery = importlib.import_module(
+        dialog_module.__package__ + ".pipeline.discovery")
+    monkeypatch.setattr(discovery, "preview_worker_python",
+                        lambda *args, **kwargs: ("", "not found"))
+    dialog._worker_ctrl.value = ""
+    dialog._interposer_root_ctrl.value = "/other/interposer"
+    assert dialog._refresh_connection_choices() is True
+    deliver()
+    assert queries == []
+    assert dialog._run_btn.enabled
+

@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
+from ..connection_methods import refused_landings, resolve_die_methods
 from ..layer_map import PATH_VAR_MARKERS
 
 
@@ -1048,7 +1049,6 @@ def build_worker_env(options: ExportOptions,
 
 #: The worker command that reports which methods it can draw a landing for.
 CONNECTION_METHODS_SCRIPT = "connection_methods.py"
-CONNECTION_METHODS_FORMAT = "chiplet_export.connection_methods"
 CONNECTION_METHODS_TIMEOUT_SECONDS = 60
 
 
@@ -1059,23 +1059,28 @@ class ConnectionAvailabilityError(Exception):
 def query_connection_availability(worker_py: str, plugin_dir: str,
                                   options: ExportOptions,
                                   timeout: float = CONNECTION_METHODS_TIMEOUT_SECONDS
-                                  ) -> Tuple[Dict[str, Optional[str]], List[str]]:
+                                  ) -> Tuple[Dict[str, Optional[str]], str]:
     """Run the worker's connection_methods.py with the export's PDK roots.
 
-    Returns ``(availability, command)``: each manifest method id mapped to
-    None when the worker can draw its landing, else the reason it refuses,
-    and the command that was run. Raises ConnectionAvailabilityError when the
-    command fails or its report is malformed.
+    Returns ``(availability, shown)``: each manifest method id mapped to None
+    when the worker can draw its landing, else the reason it refuses, and the
+    command as a shell line, its root variables first. Raises
+    ConnectionAvailabilityError when the command fails or its report is
+    malformed.
     """
-    import json
+    import shlex
     import subprocess
+    from ..connection_methods import ReportError, parse_report
 
     command = [worker_py, str(Path(plugin_dir) / CONNECTION_METHODS_SCRIPT)]
-    shown = " ".join(command)
+    env = build_worker_env(options)
+    roots = ["%s=%s" % (name, (env or {}).get(name)) for name in (
+        "INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT") if (env or {}).get(name)]
+    shown = " ".join(shlex.quote(word) for word in roots + command)
     try:
-        proc = subprocess.run(command, env=build_worker_env(options),
-                              stdin=subprocess.DEVNULL, capture_output=True,
-                              text=True, timeout=timeout)
+        proc = subprocess.run(command, env=env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True,
+                              errors="replace", timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         raise ConnectionAvailabilityError("%s: %s" % (shown, exc)) from exc
     if proc.returncode != 0:
@@ -1083,45 +1088,10 @@ def query_connection_availability(worker_py: str, plugin_dir: str,
         raise ConnectionAvailabilityError("%s exited %d: %s" % (
             shown, proc.returncode, lines[-1] if lines else "no message"))
     try:
-        report = json.loads(proc.stdout)
-    except ValueError as exc:
+        return parse_report(proc.stdout), shown
+    except ReportError as exc:
         raise ConnectionAvailabilityError(
-            "%s printed no JSON report (%s)" % (shown, exc)) from exc
-    if not isinstance(report, dict):
-        report = {}
-    entries = report.get("methods")
-    if (report.get("format") != CONNECTION_METHODS_FORMAT
-            or report.get("version") != 1 or not isinstance(entries, list)):
-        raise ConnectionAvailabilityError(
-            "%s printed an unrecognized report" % shown)
-    availability = {}
-    for entry in entries:
-        valid = (isinstance(entry, dict) and isinstance(entry.get("id"), str)
-                 and isinstance(entry.get("available"), bool))
-        reason = entry.get("reason") if valid else None
-        if not valid or entry["available"] != (reason is None) or not (
-                reason is None or (isinstance(reason, str) and reason)):
-            raise ConnectionAvailabilityError(
-                "%s printed a malformed method entry: %r" % (shown, entry))
-        availability[entry["id"]] = reason
-    return availability, command
-
-
-def refused_landings(availability: Dict[str, Optional[str]],
-                     die_refs, die_connections: Dict[str, str],
-                     default_method: str) -> List[Tuple[str, str, str]]:
-    """``(ref, method, reason)`` for each die whose landing would be refused.
-
-    A die's method resolves as in the worker's pad loop: its own entry, else
-    the assembly-wide default. Ids the report does not name pass.
-    """
-    refused = []
-    for ref in sorted(die_refs):
-        method = (die_connections or {}).get(ref, default_method)
-        reason = availability.get(method) if method else None
-        if reason:
-            refused.append((ref, method, reason))
-    return refused
+            "%s printed %s" % (shown, exc)) from exc
 
 
 def build_adk_drc_argv(adk_runner_path: str,
@@ -2094,9 +2064,10 @@ def run_export(board, options, plugin_dir,
         # the intermediates are staged. Ask it first, with the same roots, for
         # the dies it would draw pads for; a pre-generated cupillar_gds is
         # merged as given and draws none.
-        landing_refs = [] if options.cupillar_gds else list(effective_pad_locs)
-        if any((effective_die_conns or {}).get(ref, options.connection_type)
-               for ref in landing_refs):
+        landing_methods = resolve_die_methods(
+            [] if options.cupillar_gds else effective_pad_locs,
+            effective_die_conns, options.connection_type)
+        if landing_methods:
             try:
                 availability, query = query_connection_availability(
                     worker_py, plugin_dir, dataclasses.replace(
@@ -2105,10 +2076,8 @@ def run_export(board, options, plugin_dir,
             except ConnectionAvailabilityError as exc:
                 return ExportResult(
                     error="Cannot check the connection methods: %s" % exc)
-            _log("$ " + " ".join(query))
-            refused = refused_landings(availability, landing_refs,
-                                       effective_die_conns,
-                                       options.connection_type)
+            _log("$ " + query)
+            refused = refused_landings(availability, landing_methods)
             if refused:
                 return ExportResult(error="Cannot draw the landing of %s" % (
                     "; ".join("%s (%s): %s" % entry for entry in refused)))

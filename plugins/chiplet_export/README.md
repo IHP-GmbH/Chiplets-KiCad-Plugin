@@ -374,7 +374,11 @@ written, and the message names `INTERPOSER_PDK_ROOT` and the key.
   `(unavailable)` here and in the per-die rows, its reason replaces the
   grey line, and Run stays disabled while a die uses it. The dialog asks
   the worker with `connection_methods.py`, the same command chiplet-export
-  runs before it stages anything, and logs the command it ran.
+  runs before it stages anything, and logs the command it ran. The query
+  runs in the background, again whenever the worker or a PDK root changes;
+  until it answers, or when it fails, nothing is marked and the export
+  makes the same check at Run. The dialog checks every die row, while the
+  export checks only the dies whose pins it draws.
 
   Each entry is labelled with the numbers the choice actually turns on —
   `cupillar_opt1 - 75um pitch, 44um dia` — and the grey line underneath

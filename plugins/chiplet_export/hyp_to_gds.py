@@ -28,8 +28,10 @@ from urllib.parse import quote
 
 try:
     from .carrier_profile import check_anchor_drawable, resolve_carrier_profile
+    from .connection_methods import resolve_die_methods
 except ImportError:  # Standalone worker script, outside the GUI package.
     from carrier_profile import check_anchor_drawable, resolve_carrier_profile
+    from connection_methods import resolve_die_methods
 
 try:
     from . import layer_map as _layer_map
@@ -5305,7 +5307,7 @@ def _connection_to_body_diameter(connection_type):
     return method.get("body_diameter_um")
 
 
-def _check_landing_anchor(connection_type, bm):
+def _check_landing_anchor(connection_type, bm, manifest=None):
     """Refuse a method whose landing the loaded pad cell cannot draw.
 
     The manifest's fab_anchors table names the UBM openings the method's
@@ -5313,13 +5315,14 @@ def _check_landing_anchor(connection_type, bm):
     CUPILLAR_FAB_LAYERS. A method that cannot be drawn is refused, not
     skipped: a GDS without its landings would look fabricable. Ids the
     manifest does not know are left to the body-geometry check. Raises
-    ValueError with the reason.
+    ValueError with the reason. ``manifest`` is read when not given.
     """
     im = _import_interconnect_manifest()
     if im is None:
         return
     try:
-        manifest = im.load_manifest()
+        if manifest is None:
+            manifest = im.load_manifest()
         method = im.get_method(connection_type, manifest)
     except (KeyError, FileNotFoundError):
         return  # unknown method, or a partial PDK install
@@ -5349,14 +5352,16 @@ def connection_method_availability():
 
     Runs _check_landing_anchor, the check the pad loop refuses on, for each
     method, so a list built from this offers only what an export can draw.
-    Empty when no interconnect PDK is found; an unusable manifest raises
-    SourceRefused.
+    A method whose own entry cannot be read is refused alone, as the pad loop
+    would refuse only a die that uses it. Empty when no interconnect PDK is
+    found; an unusable manifest raises SourceRefused.
     """
     im = _import_interconnect_manifest()
     if im is None:
         return {}
     try:
-        methods = im.list_methods()
+        manifest = im.load_manifest()
+        methods = im.list_methods(manifest)
     except FileNotFoundError:
         return {}
     except Exception as exc:
@@ -5365,8 +5370,8 @@ def connection_method_availability():
     availability = {}
     for method in methods:
         try:
-            _check_landing_anchor(method, bm)
-        except ValueError as exc:
+            _check_landing_anchor(method, bm, manifest)
+        except (ValueError, SourceRefused) as exc:
             availability[method] = str(exc)
         else:
             availability[method] = None
@@ -6379,12 +6384,8 @@ def convert_hyp_to_gds(
         # then the assembly-global --connection-type. A method whose landing
         # the pad cell cannot draw refuses the export; an id the manifest does
         # not know gets no pillars, loudly.
-        _die_conns = die_connections or {}
-        requested = {}
-        for dev_ref in pad_locations:
-            method = _die_conns.get(dev_ref, connection_type)
-            if method:
-                requested[dev_ref] = method
+        requested = resolve_die_methods(pad_locations, die_connections,
+                                        connection_type)
         connections_requested = bool(requested)
         bm = _import_bump_mirror() if requested else None
         device_methods = {}
