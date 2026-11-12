@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
+from ..connection_methods import refused_landings, resolve_die_methods
 from ..layer_map import PATH_VAR_MARKERS
 
 
@@ -1046,6 +1047,53 @@ def build_worker_env(options: ExportOptions,
     return env
 
 
+#: The worker command that reports which methods it can draw a landing for.
+CONNECTION_METHODS_SCRIPT = "connection_methods.py"
+CONNECTION_METHODS_TIMEOUT_SECONDS = 60
+
+
+class ConnectionAvailabilityError(Exception):
+    """The worker's method availability could not be read."""
+
+
+def query_connection_availability(worker_py: str, plugin_dir: str,
+                                  options: ExportOptions,
+                                  timeout: float = CONNECTION_METHODS_TIMEOUT_SECONDS
+                                  ) -> Tuple[Dict[str, Optional[str]], str]:
+    """Run the worker's connection_methods.py with the export's PDK roots.
+
+    Returns ``(availability, shown)``: each manifest method id mapped to None
+    when the worker can draw its landing, else the reason it refuses, and the
+    command as a shell line, its root variables first. Raises
+    ConnectionAvailabilityError when the command fails or its report is
+    malformed.
+    """
+    import shlex
+    import subprocess
+    from ..connection_methods import ReportError, parse_report
+
+    command = [worker_py, str(Path(plugin_dir) / CONNECTION_METHODS_SCRIPT)]
+    env = build_worker_env(options)
+    roots = ["%s=%s" % (name, (env or {}).get(name)) for name in (
+        "INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT") if (env or {}).get(name)]
+    shown = " ".join(shlex.quote(word) for word in roots + command)
+    try:
+        proc = subprocess.run(command, env=env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True,
+                              errors="replace", timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ConnectionAvailabilityError("%s: %s" % (shown, exc)) from exc
+    if proc.returncode != 0:
+        lines = proc.stderr.strip().splitlines()
+        raise ConnectionAvailabilityError("%s exited %d: %s" % (
+            shown, proc.returncode, lines[-1] if lines else "no message"))
+    try:
+        return parse_report(proc.stdout), shown
+    except ReportError as exc:
+        raise ConnectionAvailabilityError(
+            "%s printed %s" % (shown, exc)) from exc
+
+
 def build_adk_drc_argv(adk_runner_path: str,
                        gds_path: str,
                        interposer_adapter: str,
@@ -2011,6 +2059,31 @@ def run_export(board, options, plugin_dir,
             die_methods=effective_die_conns.values(),
             manifest=interconnect_manifest,
         )
+
+        # The worker refuses a die whose landing it cannot draw, but only after
+        # the intermediates are staged. Ask it first, with the same roots, for
+        # the dies it would draw pads for; a pre-generated cupillar_gds is
+        # merged as given and draws none.
+        landing_methods = resolve_die_methods(
+            [] if options.cupillar_gds else effective_pad_locs,
+            effective_die_conns, options.connection_type)
+        if landing_methods:
+            try:
+                availability, query = query_connection_availability(
+                    worker_py, plugin_dir, dataclasses.replace(
+                        options,
+                        interconnect_pdk_root=interconnect_manifest.root))
+            except ConnectionAvailabilityError as exc:
+                message = "Cannot check the connection methods: %s" % exc
+                _log(message)
+                return ExportResult(error=message)
+            _log("$ " + query)
+            refused = refused_landings(availability, landing_methods)
+            if refused:
+                message = "Cannot draw the landing of %s" % "; ".join(
+                    "%s (%s): %s" % entry for entry in refused)
+                _log(message)
+                return ExportResult(error=message)
 
         # All pre-worker validation passed: stage the intermediate into the
         # output dir now, as a sibling of the canonical .chiplet that hyp_to_gds

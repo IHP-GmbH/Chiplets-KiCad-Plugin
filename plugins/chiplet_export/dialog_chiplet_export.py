@@ -24,13 +24,16 @@ from .die_outline import (
 )
 from .pad_domains import PROPERTY as PAD_DOMAINS_PROPERTY, PadDomainError
 from .pipeline.orchestrator import (
-    ExportOptions, ExportResult, InterconnectSourceRefused, run_export,
-    available_connection_types,
+    ConnectionAvailabilityError, ExportOptions, ExportResult,
+    InterconnectSourceRefused, run_export, available_connection_types,
     connection_method_specs, describe_assembly_drc, describe_connection_method,
     discover_dependency_root, discover_interposer_lyp, format_connection_label,
     discover_interconnect_root, INTERCONNECT_ABSENCE_WARNING,
-    _preflight_interconnect_manifest, worker_reads_die_outlines,
+    _preflight_interconnect_manifest, query_connection_availability,
+    worker_reads_die_outlines,
 )
+from .connection_methods import refused_landings, resolve_die_methods
+from .pipeline.discovery import _is_executable
 
 
 EXPORT_REPORT_LABEL = "Interposer export report"
@@ -179,6 +182,15 @@ class ChipletExportDialog(wx.Dialog):
         self._catalogue_reported_error = ""
         self._catalogue_warning = ""
         self._catalogue_reported_warning = ""
+        # What the worker's connection_methods.py said for the (worker,
+        # interposer root, interconnect root) in _availability_key, and the
+        # log text of that answer; the log repeats it only when it changes.
+        self._conn_availability = {}
+        self._availability_key = None
+        self._availability_report = ""
+        self._availability_reported = ""
+        # The (blocker, warning) the status line last showed.
+        self._shown_state = ("", False)
         # Set when the dialog is closing so a late wx.CallAfter from the worker
         # thread no-ops instead of touching a window that is being destroyed.
         self._closing = False
@@ -283,7 +295,8 @@ class ChipletExportDialog(wx.Dialog):
                      0, wx.ALIGN_CENTER_VERTICAL)
         self._interposer_root_ctrl = _DirField(
             panel,
-            path=discover_dependency_root("INTERPOSER_PDK_ROOT", self._board))
+            path=discover_dependency_root("INTERPOSER_PDK_ROOT", self._board),
+            on_change=self._schedule_connection_refresh)
         self._interposer_root_ctrl.SetToolTip(
             "Interposer PDK checkout. Supplies the fab pad openings and the "
             "Cu-pillar placement tooling (bump_mirror). Resolved via "
@@ -350,7 +363,7 @@ class ChipletExportDialog(wx.Dialog):
         self._conn_ctrl = wx.Choice(panel, choices=self._conn_labels)
         if self._conn_choices:
             self._conn_ctrl.SetSelection(0)
-        self._conn_ctrl.Bind(wx.EVT_CHOICE, self._on_conn_selected)
+        self._conn_ctrl.Bind(wx.EVT_CHOICE, self._on_conn_choice)
         grid.Add(self._conn_ctrl, 1, wx.EXPAND)
 
         # The numbers behind the selected method: pitch and spacing are what
@@ -435,7 +448,7 @@ class ChipletExportDialog(wx.Dialog):
                               0, wx.ALIGN_CENTER_VERTICAL)
                 ctrl = wx.Choice(panel)
                 ctrl.Bind(wx.EVT_CHOICE,
-                          lambda _e, r=ref: self._refresh_die_tooltip(r))
+                          lambda _e, r=ref: self._on_die_conn_selected(r))
                 self._die_conn_ctrls[ref] = ctrl
                 self._set_die_choice_items(ref, board_conns.get(ref, ""))
                 conn_grid.Add(ctrl, 1, wx.EXPAND)
@@ -522,6 +535,8 @@ class ChipletExportDialog(wx.Dialog):
             "variable, then a probed python3 on PATH). Set it when this "
             "checkout has no .venv or the auto-detected one is incomplete.")
         self._worker_ctrl.SetToolTip(worker_tip)
+        # The worker answers which methods it can draw; a new one is asked.
+        self._worker_ctrl.Bind(wx.EVT_TEXT, self._schedule_connection_refresh)
         worker_browse = wx.Button(panel, label="Browse...",
                                   style=wx.BU_EXACTFIT)
         worker_browse.Bind(wx.EVT_BUTTON, self._on_browse_worker)
@@ -646,11 +661,6 @@ class ChipletExportDialog(wx.Dialog):
             snapshot = _preflight_interconnect_manifest(root, board=self._board)
             choices = available_connection_types(root, board=self._board)
             specs = connection_method_specs(root, board=self._board)
-            labels = [
-                "(none - keep each die's CONNECTION field)" if not method
-                else format_connection_label(method, specs.get(method))
-                for method in choices
-            ]
         except InterconnectSourceRefused as exc:
             # A refused source is not an absent PDK. Keep previous selections
             # for recovery, but never offer them as a valid replacement source.
@@ -662,12 +672,132 @@ class ChipletExportDialog(wx.Dialog):
                 "the resolved source can be read."
                 % (root or "the discovered interconnect PDK", exc))
             return False
-        self._conn_choices, self._conn_specs, self._conn_labels = choices, specs, labels
+        self._request_availability(snapshot.root)
+        self._conn_choices, self._conn_specs = choices, specs
+        self._conn_labels = self._catalogue_labels()
         self._catalogue_error = ""
         self._catalogue_warning = (
             INTERCONNECT_ABSENCE_WARNING
             if snapshot.manifest is None else "")
         return True
+
+    def _catalogue_labels(self):
+        """The assembly-wide choice labels, index-parallel to _conn_choices."""
+        return ["(none - keep each die's CONNECTION field)" if not method
+                else self._conn_label_for(method)
+                for method in self._conn_choices]
+
+    def _request_availability(self, interconnect_root):
+        """Ask the worker, off the UI thread, which methods it can draw.
+
+        The command and roots are the ones run_export uses; run_export asks
+        again at Run and its answer is the one that refuses. Each worker and
+        root pair is asked once; until its answer arrives nothing is marked.
+        """
+        worker = (self._worker_ctrl.GetValue().strip()
+                  if hasattr(self, "_worker_ctrl") else "")
+        if not worker:
+            # Discovery's last leg probes PATH, too slow for the UI thread;
+            # run_export resolves it and asks then.
+            from .pipeline.discovery import preview_worker_python
+            worker, _source = preview_worker_python(self._plugin_dir,
+                                                    board=self._board)
+        key = (worker, self._interposer_root_ctrl.GetPath() or "",
+               interconnect_root or "")
+        if key == self._availability_key:
+            return
+        self._availability_key = key
+        self._conn_availability = {}
+        self._availability_report = ""
+        # The field is read as typed: only a path that can run is asked.
+        if worker and _is_executable(Path(worker)):
+            _in_background(self._fetch_availability, key)
+
+    def _fetch_availability(self, key):
+        """Worker-thread half of _request_availability."""
+        worker, interposer_root, interconnect_root = key
+        try:
+            answer = query_connection_availability(
+                worker, self._plugin_dir, ExportOptions(
+                    interposer_pdk_root=interposer_root,
+                    interconnect_pdk_root=interconnect_root))
+        except ConnectionAvailabilityError as exc:
+            answer = exc
+        wx.CallAfter(self._apply_availability, key, answer)
+
+    def _apply_availability(self, key, answer):
+        """Mark the methods the worker refuses, on the UI thread."""
+        if self._closing or key != self._availability_key:
+            return  # closing, or a newer worker and root pair was asked
+        if isinstance(answer, ConnectionAvailabilityError):
+            self._availability_report = (
+                "WARNING: method availability unknown, checked again at "
+                "Run: %s" % answer)
+        else:
+            self._conn_availability, shown = answer
+            self._availability_report = "\n".join(
+                ["$ " + shown] + ["Unavailable: %s" % reason for reason
+                                  in self._conn_availability.values() if reason])
+        index = self._conn_ctrl.GetSelection()
+        self._conn_labels = self._catalogue_labels()
+        self._conn_ctrl.Set(self._conn_labels)
+        if index is not None and 0 <= index < len(self._conn_labels):
+            self._conn_ctrl.SetSelection(index)
+        self._on_conn_selected()
+        for ref in self._die_conn_ctrls:
+            self._set_die_choice_items(ref, self._die_conn_value(ref))
+        self._apply_catalogue_state()
+
+    def _selected_connections(self):
+        """(assembly-wide method, {ref: method} of the dies with their own)."""
+        index = self._conn_ctrl.GetSelection()
+        default = (self._conn_choices[index]
+                   if index is not None and 0 <= index < len(self._conn_choices)
+                   else "")
+        die_conns = {ref: self._die_conn_value(ref)
+                     for ref in self._die_conn_ctrls}
+        return default, {ref: m for ref, m in die_conns.items() if m}
+
+    def _landing_refusal(self):
+        """The dies whose method the worker cannot draw, as one line, or "".
+
+        Every die row is checked. run_export checks only the dies whose pins
+        it extracts, so a die without pads blocks Run here and would not be
+        refused there.
+        """
+        default, die_conns = self._selected_connections()
+        refused = refused_landings(self._conn_availability, resolve_die_methods(
+            list(self._die_conn_ctrls), die_conns, default))
+        return "; ".join("%s uses %s, which cannot be drawn" % (ref, method)
+                         for ref, method, _reason in refused)
+
+    def _run_blocker(self):
+        """Why Run is disabled, or "" when it is not."""
+        if self._catalogue_error:
+            return "interconnect PDK source cannot be used"
+        return self._landing_refusal()
+
+    def _sync_run_state(self, running=None):
+        """Set Run and the status line from the one blocker that applies.
+
+        The status changes only when the blocker or the absence warning does,
+        so a finished run's status stays until then.
+        """
+        if running is None:
+            running = (self._worker_thread is not None
+                       and self._worker_thread.is_alive())
+        blocker = self._run_blocker()
+        self._run_btn.Enable(not blocker and not running)
+        state = (blocker, bool(self._catalogue_warning))
+        if running or state == self._shown_state:
+            return
+        self._shown_state = state
+        if blocker:
+            self._set_status("Blocked: %s" % _short(blocker))
+        elif self._catalogue_warning:
+            self._set_status("Idle without interconnect PDK; see warning")
+        else:
+            self._set_status("Idle")
 
     def _apply_catalogue_state(self):
         """Present a refusal after construction or refresh, keeping root editable."""
@@ -675,31 +805,33 @@ class ChipletExportDialog(wx.Dialog):
         self._conn_ctrl.Enable(valid)
         for ctrl in self._die_conn_ctrls.values():
             ctrl.Enable(valid)
-        running = self._worker_thread is not None and self._worker_thread.is_alive()
-        self._run_btn.Enable(valid and not running)
         if not valid:
             self._conn_detail.SetLabel("Connection catalogue unavailable; see log.")
             self._conn_ctrl.SetToolTip(self._catalogue_error)
-            self._set_status("Blocked: interconnect PDK source cannot be used")
             if self._catalogue_reported_error != self._catalogue_error:
                 self._append_log(self._catalogue_error)
         elif self._catalogue_warning:
-            if not running:
-                self._set_status("Idle without interconnect PDK; see warning")
             if self._catalogue_reported_warning != self._catalogue_warning:
                 self._append_log("WARNING: " + self._catalogue_warning)
         elif self._catalogue_reported_error or self._catalogue_reported_warning:
             self._append_log("Interconnect catalogue loaded from the resolved source.")
-            if not running:
-                self._set_status("Idle")
         self._catalogue_reported_error = self._catalogue_error
         self._catalogue_reported_warning = (
             self._catalogue_warning if valid else "")
+        if valid and self._availability_report != self._availability_reported:
+            if self._availability_report:
+                self._append_log(self._availability_report)
+            self._availability_reported = self._availability_report
+        self._sync_run_state()
 
     def _conn_label_for(self, method_id):
-        """Display label for a method id (bare id when the manifest is mute)."""
-        return format_connection_label(method_id,
-                                       self._conn_specs.get(method_id))
+        """Display label for a method id (bare id when the manifest is mute),
+        marked when the worker cannot draw its landing."""
+        label = format_connection_label(method_id,
+                                        self._conn_specs.get(method_id))
+        if self._conn_availability.get(method_id):
+            label += " (unavailable)"
+        return label
 
     def _conn_detail_for(self, method_id):
         """Spec-sheet line for a method id, for the detail text and tooltips."""
@@ -708,6 +840,9 @@ class ChipletExportDialog(wx.Dialog):
         if not method_id:
             return ("No assembly-wide default: each die keeps the method in "
                     "its own CONNECTION field.")
+        reason = self._conn_availability.get(method_id)
+        if reason:
+            return "Unavailable: %s" % reason
         return describe_connection_method(method_id,
                                           self._conn_specs.get(method_id))
 
@@ -724,6 +859,14 @@ class ChipletExportDialog(wx.Dialog):
         detail = self._conn_detail_for(method)
         self._conn_detail.SetLabel(detail)
         self._conn_ctrl.SetToolTip(detail)
+
+    def _on_conn_choice(self, _event):
+        self._on_conn_selected()
+        self._sync_run_state()
+
+    def _on_die_conn_selected(self, ref):
+        self._refresh_die_tooltip(ref)
+        self._sync_run_state()
 
     def _refresh_die_tooltip(self, ref):
         """Put the selected method's spec sheet on one die row's tooltip."""
@@ -956,14 +1099,7 @@ class ChipletExportDialog(wx.Dialog):
         return True
 
     def _collect_options(self):
-        idx = self._conn_ctrl.GetSelection()
-        if idx is None or idx < 0:
-            conn = ""
-        else:
-            conn = self._conn_choices[idx]
-        die_conns = {ref: self._die_conn_value(ref)
-                     for ref in self._die_conn_ctrls}
-        die_conns = {ref: m for ref, m in die_conns.items() if m}
+        conn, die_conns = self._selected_connections()
         from .writers.chiplet_writer import parse_thickness_um
         die_thicks = {ref: parse_thickness_um(self._die_thickness_text(ref))
                       for ref in self._die_thick_ctrls}
@@ -1018,7 +1154,6 @@ class ChipletExportDialog(wx.Dialog):
         # An override that is not runnable must fail here, with a message,
         # rather than deep in the subprocess launch as a raw OSError.
         if options.worker_python_override:
-            from .pipeline.discovery import _is_executable
             if not _is_executable(Path(options.worker_python_override)):
                 wx.MessageBox(
                     "Worker Python is not an executable file:\n%s\n\nClear "
@@ -1234,10 +1369,12 @@ class ChipletExportDialog(wx.Dialog):
         self._status.SetLabel(text)
 
     def _set_running(self, running):
-        self._run_btn.Enable(not running and not self._catalogue_error)
         self._cancel_btn.Enable(running)
         if running:
+            self._run_btn.Enable(False)
             self._set_status("Running ...")
+        else:
+            self._sync_run_state(running=False)
 
 
 def _describe_die_outline_refusal(exc):
@@ -1247,6 +1384,11 @@ def _describe_die_outline_refusal(exc):
     screen on a board with many parts that are not dies."""
     return "Die outline layer refused:\n\n" + "\n\n".join(
         "%s: %s" % (", ".join(refs), cause) for refs, cause in exc.by_cause())
+
+
+def _in_background(target, *args):
+    """Run ``target(*args)`` on a daemon thread; the tests run it inline."""
+    threading.Thread(target=target, args=args, daemon=True).start()
 
 
 def _short(msg, limit=80):

@@ -45,7 +45,7 @@ python3 plugins/chiplet_export/chiplet_export_cli.py --board ... --output-dir ..
 | `--allow-drc-fail` | flag | off | Exit 0 instead of 3 when the files were written but the assembly DRC did not pass; the last line says which outcome it let through. |
 | `--interposer-adapter` | adapter id | the `.chiplet`'s `interposer.adapter`, else `intm4tm2` | The interposer adapter the assembly DRC runs with. An id, never a path. It does not change the `.chiplet`, whose adapter comes from the board's `INTERPOSER_ADAPTER` text variable. |
 | `--interconnect-adapter` | adapter id | the `.chiplet`'s `interconnect.adapter`; absent there, no interconnect axis | The interconnect adapter the assembly DRC runs with. An id, never a path. |
-| `--connection` | method id | none | The assembly-wide default connection stack, a method the interconnect PDK manifest declares (for example `cupillar_opt1`, `sbump_sac305`). A die's own `CONNECTION` field wins over it. A Cu-pillar stack generates the pillars from the die pads. Empty: each die keeps its own `CONNECTION`. |
+| `--connection` | method id | none | The assembly-wide default connection stack, a method the interconnect PDK manifest declares (for example `cupillar_opt1`). A die's own `CONNECTION` field wins over it. A Cu-pillar stack or a solder bump generates its landings from the die pads. A die whose method's landing the worker cannot draw, as `connection_methods.py` reports, is refused before the export stages anything. Empty: each die keeps its own `CONNECTION`. |
 | `--insert-metal-fill` | flag | off | Stamp metal density fill on the interposer GDS with the interposer PDK's fill engine (`fill_closure.fill_stack`). Without the `klayout` binary on `PATH` the fill is skipped with a message; a PDK without the engine fails the export (exit 1). |
 | `--fill-mode` | `single-pass` or `closure` | `single-pass` | `single-pass` stamps every metal once; `closure` iterates Metal4/Metal5 against the density deck until in band. Ignored without `--insert-metal-fill`. |
 | `--seal-ring` | flag | off | Place the interposer PDK's `sealring` PCell on the board outline, which must be one axis-aligned rectangle. Refused with exit 1 and nothing written when the outline cannot take it or drawn geometry crowds it. |
@@ -110,15 +110,15 @@ Under `--output-dir`:
 MANIFEST.md                              every product, present or absent
 layout/<board>_interposer.gds            interposer layout (the .chiplet references it)
 layout/<board>_interposer.boundaries.json
-layout/<board>_interposer.pillars.json   with a Cu-pillar stack
+layout/<board>_interposer.pillars.json   with a connection method
 layout/<board>_interposer.fill_coverage.json   with --insert-metal-fill
 layout/<board>_complete.gds              interposer plus dies
 layout/<board>_complete.boundaries.json
-layout/<board>_complete.pillars.json     with a Cu-pillar stack
+layout/<board>_complete.pillars.json     with a connection method
 layout/<board>_complete.ixn_methods.json when dies declare connection methods
 chiplets/<ref>/<file>.gds                a die GDS the .chiplet cannot reach as written
 reports/<board>_assembly_drc.lyrdb       when the assembly DRC ran
-reports/<board>_cupillar_drc.json        with a Cu-pillar stack
+reports/<board>_cupillar_drc.json        with a connection method
 reports/<board>_fill_density.json        with --insert-metal-fill
 logs/<YYYYmmdd_HHMMSS>_<board>.log       one per run
 ```

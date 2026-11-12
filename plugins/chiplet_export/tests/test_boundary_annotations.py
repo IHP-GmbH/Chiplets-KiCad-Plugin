@@ -87,6 +87,20 @@ def test_annotation_never_uses_exchange0(tmp_path):
         "annotation must not resurrect the 190/0 fab layer"
 
 
+@pytest.mark.parametrize("layer", ["235/0", "190/0", "9/35", "41/35", "99/36",
+                                   "41/36", "9/36", "134/0"])
+def test_a_viz_layer_on_a_fab_layer_is_refused(tmp_path, monkeypatch, capsys,
+                                              layer):
+    """Both landing pad cells' openings (Cu pillar :35, solder bump :36)
+    count as fabrication layers the annotation would clear."""
+    monkeypatch.setattr(sys, "argv", [
+        "hyp_to_gds.py", str(tmp_path / "absent.hyp"),
+        "-o", str(tmp_path / "out.gds"),
+        "--annotate-boundaries", "--boundary-viz-layer", layer])
+    assert _h.main() == 1
+    assert "collides with a fabrication layer" in capsys.readouterr().err
+
+
 def test_custom_viz_layer_is_honored(tmp_path):
     layout, _, _ = _write_with_records(
         tmp_path, "annot.gds", annotate_boundaries=True, boundary_viz_layer=(1234, 5))

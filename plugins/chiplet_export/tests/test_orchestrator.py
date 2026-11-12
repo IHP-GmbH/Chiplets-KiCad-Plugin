@@ -40,6 +40,8 @@ from chiplet_export.pipeline.orchestrator import (  # noqa: E402
     derive_interconnect_methods, write_ixn_methods_sidecar,
     _read_component_connections, _open_run_log,
 )
+from chiplet_export.connection_methods import (  # noqa: E402
+    refused_landings, resolve_die_methods)
 from chiplet_export.writers.connection_stacks import (  # noqa: E402
     InterconnectManifestSnapshot,
 )
@@ -2663,4 +2665,214 @@ def test_a_board_report_refusal_is_distinguished_before_output_creation(tmp_path
     assert result.error == 'IO pad carriers refused: report does not describe the board'
     assert result.error_input == 'export_report'
     assert not Path(options.output_dir).exists()
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Connection-method availability: the worker's connection_methods.py report
+# ---------------------------------------------------------------------------
+
+def _methods_command(tmp_path, body):
+    """A plugin dir whose connection_methods.py runs ``body``."""
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "connection_methods.py").write_text(
+        "import json, os, sys\n" + body, encoding="utf-8")
+    return str(plugin)
+
+
+def _report(*methods):
+    return "print(json.dumps(%r))\n" % {
+        "format": "chiplet_export.connection_methods", "version": 1,
+        "methods": list(methods)}
+
+
+def test_the_availability_query_reads_the_report_with_the_export_roots(tmp_path):
+    plugin = _methods_command(tmp_path, (
+        "env = os.environ\n"
+        "print(json.dumps({'format': 'chiplet_export.connection_methods',"
+        " 'version': 1, 'methods': ["
+        "{'id': 'pillar', 'reason': None},"
+        "{'id': 'bump', 'reason': '%s|%s' % ("
+        "env['INTERPOSER_PDK_ROOT'], env['INTERCONNECT_PDK_ROOT'])}]}))\n"))
+    availability, shown = orchestrator.query_connection_availability(
+        sys.executable, plugin, ExportOptions(
+            interposer_pdk_root="/interposer", interconnect_pdk_root="/ic"))
+    assert shown == "INTERPOSER_PDK_ROOT=/interposer INTERCONNECT_PDK_ROOT=/ic %s %s" % (
+        sys.executable, Path(plugin) / "connection_methods.py")
+    assert availability == {"pillar": None, "bump": "/interposer|/ic"}
+    assert list(availability) == ["pillar", "bump"]
+
+
+@pytest.mark.parametrize("body,message", [
+    ("sys.stderr.write('Error: torn manifest\\n'); sys.exit(5)\n",
+     "exited 5: Error: torn manifest"),
+    ("print('not json')\n", "printed no JSON report"),
+    # Bytes that are not UTF-8 still reach the error, not a decode traceback.
+    ("sys.stderr.buffer.write(b'\\xff torn\\n'); sys.exit(3)\n",
+     "exited 3: \ufffd torn"),
+    ("print('[]')\n", "printed an unrecognized report"),
+    ("print(json.dumps({'format': 'other', 'version': 1, 'methods': []}))\n",
+     "printed an unrecognized report"),
+    ("print(json.dumps({'format': 'chiplet_export.connection_methods',"
+     " 'version': True, 'methods': []}))\n", "printed an unrecognized report"),
+    ("print(json.dumps({'format': 'chiplet_export.connection_methods',"
+     " 'version': 2, 'methods': []}))\n", "printed an unrecognized report"),
+    (_report({"id": "bump", "reason": ""}), "malformed method entry"),
+    (_report({"id": "bump", "reason": 3}), "malformed method entry"),
+    (_report({"id": "", "reason": None}), "malformed method entry"),
+    (_report({"id": 7, "reason": None}), "malformed method entry"),
+    (_report({"id": "bump"}), "malformed method entry"),
+    (_report({"id": "bump", "reason": None, "available": True}),
+     "malformed method entry"),
+    (_report({"id": "bump", "reason": None}, {"id": "bump", "reason": "x"}),
+     "malformed method entry"),
+    (_report("bump"), "malformed method entry"),
+])
+def test_an_availability_report_that_cannot_be_trusted_is_an_error(
+        tmp_path, body, message):
+    plugin = _methods_command(tmp_path, body)
+    with pytest.raises(orchestrator.ConnectionAvailabilityError, match=message):
+        orchestrator.query_connection_availability(
+            sys.executable, plugin, ExportOptions())
+
+
+def test_an_availability_worker_that_cannot_start_is_an_error(tmp_path):
+    with pytest.raises(orchestrator.ConnectionAvailabilityError,
+                       match="no-such-python"):
+        orchestrator.query_connection_availability(
+            str(tmp_path / "no-such-python"), str(tmp_path), ExportOptions())
+
+
+def test_each_die_takes_its_own_method_else_the_default():
+    assert resolve_die_methods(
+        ["U2", "U1", "U3"], {"U1": "pillar", "U3": ""}, "bump") == {
+            "U2": "bump", "U1": "pillar"}
+    assert resolve_die_methods(["U1"], {"U1": "bump"}, "") == {"U1": "bump"}
+    assert resolve_die_methods(["U1"], None, "") == {}
+
+
+def test_only_the_methods_the_report_refuses_block_a_landing():
+    availability = {"pillar": None, "bump": "bump: no pad cell"}
+    assert refused_landings(
+        availability, {"U2": "bump", "U1": "pillar", "U4": "unknown",
+                       "U0": "bump"}) == [
+            ("U0", "bump", "bump: no pad cell"),
+            ("U2", "bump", "bump: no pad cell")]
+    assert refused_landings({}, {"U1": "bump"}) == []
+
+
+def _landing_fakes(monkeypatch):
+    """The run_export fakes, with die U1's pins extracted and a manifest."""
+    calls, _seams = _install_run_export_fakes(monkeypatch)
+    writer = sys.modules["chiplet_export.writers.chiplet_writer"]
+    writer.write_die_pin_lists = lambda *_a, **_kw: {"U1": "/pins/U1.json"}
+    snapshot = InterconnectManifestSnapshot(
+        {"schema_version": "1.0",
+         "methods": {"pillar": {}, "bump": {}}},
+        root="/selected/ic")
+    monkeypatch.setattr(orchestrator, "_load_interconnect_manifest",
+                        lambda *_a, **_kw: snapshot)
+    return calls
+
+
+def _landing_run(tmp_path, monkeypatch, answer, **options):
+    """run_export through _landing_fakes, the query recorded."""
+    calls = _landing_fakes(monkeypatch)
+    queries = []
+
+    def query(worker_py, plugin_dir, query_options):
+        queries.append((worker_py, plugin_dir,
+                        query_options.interconnect_pdk_root))
+        return answer, "%s %s/connection_methods.py" % (worker_py, plugin_dir)
+
+    monkeypatch.setattr(orchestrator, "query_connection_availability", query)
+    run_options = _drc_options(tmp_path)
+    for name, value in options.items():
+        setattr(run_options, name, value)
+    log = []
+    result = orchestrator.run_export(_RunExportBoard(), run_options,
+                                     "/plugin", on_log=log.append)
+    return result, calls, queries, log
+
+
+@pytest.mark.parametrize("options", [
+    {"connection_type": "bump"},
+    {"connection_type": "pillar", "die_connections": {"U1": "bump"}},
+])
+def test_run_export_refuses_an_undrawable_landing_before_staging(
+        tmp_path, monkeypatch, options):
+    result, calls, queries, log = _landing_run(
+        tmp_path, monkeypatch,
+        {"pillar": None, "bump": "bump: no pad cell"}, **options)
+    assert result.error == ("Cannot draw the landing of U1 (bump): "
+                            "bump: no pad cell")
+    assert result.error in log  # the run log says why it stopped
+    assert queries == [("/worker/python", "/plugin", "/selected/ic")]
+    assert "$ /worker/python /plugin/connection_methods.py" in log
+    assert calls == []
+    # Nothing staged: no .chiplet, no copied .hyp, only the empty layout dir.
+    assert [p.name for p in (tmp_path / "out").rglob("*") if p.is_file()] == []
+
+
+@pytest.mark.parametrize("options,asked", [
+    ({"connection_type": "pillar"}, True),
+    ({"connection_type": ""}, False),
+    # The worker merges a given cupillar_gds and draws no pads, even for
+    # pin lists passed alongside it.
+    ({"connection_type": "bump", "cupillar_gds": "/given/pillars.gds",
+      "pad_locations": {"U1": "/pins/U1.json"}}, False),
+])
+def test_run_export_asks_only_for_the_landings_it_draws(
+        tmp_path, monkeypatch, options, asked):
+    result, calls, queries, _log = _landing_run(
+        tmp_path, monkeypatch,
+        {"pillar": None, "bump": "bump: no pad cell"}, **options)
+    assert not result.error.startswith("Cannot draw")
+    assert bool(queries) is asked
+    assert calls  # the layout worker ran
+
+
+def test_run_export_refuses_when_availability_cannot_be_read(
+        tmp_path, monkeypatch):
+    calls = _landing_fakes(monkeypatch)
+
+    def failed(*_a, **_kw):
+        raise orchestrator.ConnectionAvailabilityError("worker exited 1: boom")
+
+    monkeypatch.setattr(orchestrator, "query_connection_availability", failed)
+    options = _drc_options(tmp_path)
+    options.connection_type = "pillar"
+    log = []
+    result = orchestrator.run_export(_RunExportBoard(), options, "/plugin",
+                                     on_log=log.append)
+    assert result.error == ("Cannot check the connection methods: "
+                            "worker exited 1: boom")
+    assert result.error in log
+    assert calls == []
+
+
+def test_the_cli_connection_flag_reaches_the_landing_refusal(
+        tmp_path, monkeypatch, capsys):
+    """chiplet-export --connection is free text; run_export refuses it."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_cli_landing_under_test", PLUGIN_ROOT / "chiplet_export_cli.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    calls = _landing_fakes(monkeypatch)
+    monkeypatch.setitem(sys.modules, "pcbnew", types.SimpleNamespace(
+        LoadBoard=lambda _path: _RunExportBoard()))
+    monkeypatch.setattr(
+        orchestrator, "query_connection_availability",
+        lambda *_a, **_kw: ({"bump": "bump: no pad cell"},
+                            "/worker/python connection_methods.py"))
+    board = tmp_path / "board.kicad_pcb"
+    board.touch()
+    assert cli.main(["--board", str(board), "--output-dir",
+                     str(tmp_path / "out"), "--connection",
+                     "bump"]) == 1
+    out = capsys.readouterr().out
+    assert ("Cannot draw the landing of U1 (bump): "
+            "bump: no pad cell") in out
     assert calls == []

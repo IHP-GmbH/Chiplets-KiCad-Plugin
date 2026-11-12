@@ -23,13 +23,15 @@ from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 from urllib.parse import quote
 
 try:
-    from .carrier_profile import resolve_carrier_profile
+    from .carrier_profile import check_anchor_drawable, resolve_carrier_profile
+    from .connection_methods import resolve_die_methods
 except ImportError:  # Standalone worker script, outside the GUI package.
-    from carrier_profile import resolve_carrier_profile
+    from carrier_profile import check_anchor_drawable, resolve_carrier_profile
+    from connection_methods import resolve_die_methods
 
 try:
     from . import layer_map as _layer_map
@@ -3002,15 +3004,25 @@ class GDSGenerator:
     # the Cu-pillar pads carry the :pillar datatype and are not excluded.
     NOTCH_HEAL_KEEPOUT = (41, 0)
 
-    # Cu-pillar pad layer definitions (layer_num, datatype). The TopMetal2
-    # entry is shared with the wire-bond I/O pad cell below. Cu-pillar cell
-    # generation itself lives in the interposer PDK's bump_mirror (fab pads)
-    # delegating 3D bodies to the interconnect PDK's bump3d_generator.
-    CUPILLAR_FAB_LAYERS = {
-        'TopMetal2':      (134, 0),
-        'Passiv:pillar':  (9, 35),
-        'dfpad:pillar':   (41, 35),
-        'Recog:pillar':   (99, 35),
+    # Landing pad layers (layer_num, datatype) per fab anchor: CuPillarPad
+    # opens the :pillar datatype, SolderBumpPad the :sbump one, both on
+    # TopMetal2, which the wire-bond I/O pad cell below shares. The pads
+    # themselves are drawn by the interposer PDK's bump_mirror (3D bodies by
+    # the interconnect PDK's bump3d_generator); this copy only keeps an
+    # annotation layer from aliasing them.
+    LANDING_FAB_LAYERS = {
+        'ihp_cupillar_anchor': {
+            'TopMetal2':      (134, 0),
+            'Passiv:pillar':  (9, 35),
+            'dfpad:pillar':   (41, 35),
+            'Recog:pillar':   (99, 35),
+        },
+        'ihp_sbump_anchor': {
+            'TopMetal2':      (134, 0),
+            'Passiv:sbump':   (9, 36),
+            'dfpad:sbump':    (41, 36),
+            'Recog:sbump':    (99, 36),
+        },
     }
 
     # Wire-bond pads use the drawing datatypes of the same families: a bond
@@ -5278,10 +5290,11 @@ def _import_interconnect_manifest():
 
 
 def _connection_to_body_diameter(connection_type):
-    """Cu-pillar body diameter (um) for a connection-stack id, or None.
+    """Body diameter (um) for a connection-stack id, or None.
 
-    Sourced from the interconnect PDK manifest (single source of truth). Solder
-    bumps (a 'Ball' body) and unknown/empty ids return None -> skip pillar gen.
+    Sourced from the interconnect PDK manifest (single source of truth): the
+    pillar, or the ball of a solder bump. Unknown/empty ids return None: no
+    body, so no landing and no flip-chip attachment.
     """
     if not connection_type:
         return None
@@ -5297,10 +5310,117 @@ def _connection_to_body_diameter(connection_type):
         return None  # unknown method, or a partial PDK install
     except Exception as exc:
         raise _manifest_refusal(exc, "body geometry for '%s'" % connection_type)
-    layers = method.get("connection_stack", {}).get("layers", [])
-    if any("Ball" in layer.get("name", "") for layer in layers):
-        return None
     return method.get("body_diameter_um")
+
+
+class LandingCell(NamedTuple):
+    """The pad cell bump_mirror draws one fab anchor's landings with."""
+    anchor: str
+    pcell: str               # the IntM4TM2 PCell
+    group_prefix: str        # of each die's group cell, as CUPILLARS_<ref>
+    openings: frozenset      # the (layer, datatype) UBM openings it draws
+    table_6_1: bool          # the body diameter picks the opening (Cu pillar)
+    generator_kwargs: dict   # what CuPillarGenerator takes to draw it
+
+
+def _landing_cell(connection_type, anchor, bm):
+    """The LandingCell bump_mirror has for fab anchor ``anchor``, or
+    ValueError when it has none."""
+    if hasattr(bm, "fab_anchor_openings"):
+        try:
+            pad = bm.fab_anchor(anchor)
+            openings = bm.fab_anchor_openings(anchor)
+        except ValueError as exc:
+            raise ValueError("%s: %s" % (connection_type, exc)) from exc
+        if not isinstance(openings, dict):
+            raise ValueError("%s: bump_mirror gives no opening table for fab "
+                             "anchor %s" % (connection_type, anchor))
+        return LandingCell(anchor, pad.pcell, pad.cell_prefix + "S_",
+                           frozenset(openings.values()), pad.table_6_1,
+                           {"fab_anchor_id": anchor})
+    # An interposer PDK from before its per-anchor pad cells draws CuPillarPad
+    # for every anchor: its openings are CUPILLAR_FAB_LAYERS less the
+    # TopMetal2 landing, so any other anchor is refused by them, and its
+    # generator takes no fab_anchor_id. Drop this branch once no supported
+    # interposer release predates fab_anchor_openings.
+    fab_layers = getattr(bm, "CUPILLAR_FAB_LAYERS", None)
+    if not isinstance(fab_layers, dict):
+        raise ValueError("%s: bump_mirror declares no pad-cell layer table "
+                         "(fab_anchor_openings or CUPILLAR_FAB_LAYERS)"
+                         % connection_type)
+    return LandingCell(anchor, "CuPillarPad", "CUPILLARS_",
+                       frozenset(pair for name, pair in fab_layers.items()
+                                 if name != "TopMetal2"), True, {})
+
+
+def _check_landing_anchor(connection_type, bm, manifest=None):
+    """Refuse a method whose landing bump_mirror's pad cells cannot draw.
+
+    The manifest's fab_anchors table names the UBM openings the method's
+    anchor needs; ``bm`` is bump_mirror, whose pad cell for that anchor
+    draws the openings fab_anchor_openings gives. A method that cannot be
+    drawn is refused, not skipped: a GDS without its landings would look
+    fabricable. Returns the method's LandingCell, or None for an id the
+    manifest does not know (left to the body-geometry check). Raises
+    ValueError with the reason. ``manifest`` is read when not given.
+    """
+    im = _import_interconnect_manifest()
+    if im is None:
+        return None
+    try:
+        if manifest is None:
+            manifest = im.load_manifest()
+        method = im.get_method(connection_type, manifest)
+    except (KeyError, FileNotFoundError):
+        return None  # unknown method, or a partial PDK install
+    except Exception as exc:
+        raise _manifest_refusal(exc, "the fab anchor of '%s'" % connection_type)
+    if bm is None:
+        raise ValueError(
+            "%s needs bump_mirror, which is unavailable. Set "
+            "INTERPOSER_PDK_ROOT to the interposer PDK checkout "
+            "(libs.tech/klayout/python/bump_mirror.py) and retry. Refusing to "
+            "emit a complete GDS without its landings." % connection_type)
+    if not isinstance(method, dict):
+        raise ValueError("%s: the manifest entry is not an object" % connection_type)
+    anchor = method.get("fab_anchor")
+    if not isinstance(anchor, str) or not anchor:
+        raise ValueError("%s: fab_anchor must be a nonempty string" % connection_type)
+    cell = _landing_cell(connection_type, anchor, bm)
+    check_anchor_drawable(connection_type, anchor, manifest.get("fab_anchors"),
+                          cell.openings)
+    return cell
+
+
+def connection_method_availability():
+    """Every manifest method id, mapped to None or the reason it is refused.
+
+    Runs _check_landing_anchor, the check the pad loop refuses on, for each
+    method, so a list built from this offers only what an export can draw.
+    A method whose own entry cannot be read is refused alone, as the pad loop
+    would refuse only a die that uses it. Empty when no interconnect PDK is
+    found; an unusable manifest raises SourceRefused.
+    """
+    im = _import_interconnect_manifest()
+    if im is None:
+        return {}
+    try:
+        manifest = im.load_manifest()
+        methods = im.list_methods(manifest)
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        raise _manifest_refusal(exc, "the method list")
+    bm = _import_bump_mirror() if methods else None
+    availability = {}
+    for method in methods:
+        try:
+            _check_landing_anchor(method, bm, manifest)
+        except (ValueError, SourceRefused) as exc:
+            availability[method] = str(exc)
+        else:
+            availability[method] = None
+    return availability
 
 
 def _connection_to_adapter(connection_type):
@@ -5517,14 +5637,98 @@ def _import_bump_mirror():
 
 @_intm4tm2_scope()
 def _add_device_pillars(bm, pillar_gen, ref: str, bumps,
-                        body_diameter_um: float) -> int:
-    """Draw one device's Cu pillars with bump_mirror, whose pad geometry is
-    the IntM4TM2 CuPillarPad PCell. Returns the number of pillars placed."""
+                        body_diameter_um: float,
+                        pcell: str = "CuPillarPad") -> int:
+    """Draw one device's landings with bump_mirror, whose pad geometry is
+    the IntM4TM2 PCell ``pcell`` the generator was built for. Returns the
+    number of pads placed."""
     ensure_lib = getattr(bm, '_ensure_pcell_lib', None)
     if ensure_lib is not None:
         ensure_lib()
-    _check_intm4tm2_cni('CuPillarPad')
+    _check_intm4tm2_cni(pcell)
     return pillar_gen.add_device_bumps(ref, bumps, body_diameter_um)
+
+
+def _method_landing(bm, im, method, cell):
+    """(generator, DrcParams, body diameter) that draw ``method``'s landings
+    with pad cell ``cell``; ValueError when the manifest profile cannot be
+    drawn. ``im`` is the interconnect manifest module, and the method's
+    body diameter is known to resolve."""
+    diameter = _connection_to_body_diameter(method)
+    table = bm.CUPILLAR_TABLE_6_1 if cell.table_6_1 else {}
+    # A method's declared pitch_rules are authoritative over the
+    # body-diameter table lookup. from_body_diameter maps an IHP Table 6.1
+    # body diameter (35/44/49/54) to that row's pitch/spacing and returns the
+    # Option-2 defaults (pitch 80 / spacing 40) for any other diameter -- so
+    # a vendor fine-pitch method (vendorx, body 40 um) was checked against
+    # 80/40 instead of its real manifest spec. That let auto-resolve spread
+    # vendorx's native 70 um bumps toward 80 (landing ~72 nm short -> a
+    # phantom cu-pillar DRC error) while the assembly DRC, which reads the
+    # manifest, passed the same geometry at the real 50 um pitch. Honor the
+    # manifest's pitch_rules when the method declares them; keep the
+    # body-diameter fab geometry (diameter, enclosure). In-table methods
+    # declare the same numbers, so this is a no-op for them.
+    #
+    # For a Cu pillar outside the table take the Option-2 fallback fields
+    # directly rather than via from_body_diameter(), so its "using Option 2
+    # defaults" stderr warning does not fire -- that message is misleading
+    # once the manifest pitch_rules below supersede those defaults. An
+    # accurate note is emitted afterwards. A pad cell outside Table 6.1
+    # (SolderBumpPad) starts from its own rule set (Padb) instead.
+    in_table = table.get(diameter) is not None
+    if in_table:
+        params = bm.DrcParams.from_body_diameter(diameter)
+    elif cell.table_6_1:
+        params = bm.DrcParams()
+    else:
+        params = bm.DrcParams.load(fab_anchor_id=cell.anchor)
+    try:
+        opening, enclosure = resolve_carrier_profile(
+            method, im.fab_params(method), diameter, table)
+    except KeyError as exc:
+        raise ValueError(str(exc)) from exc
+    try:
+        pitch_rules = im.pitch_rules(method)
+    except KeyError:
+        pitch_rules = {}
+    overrode = False
+    if pitch_rules.get("IXN_pitch") is not None:
+        params.min_pitch_um = pitch_rules["IXN_pitch"]
+        overrode = True
+    if pitch_rules.get("IXN_spacing") is not None:
+        params.min_spacing_um = pitch_rules["IXN_spacing"]
+        overrode = True
+    # The pad size the pre-DRC reasons about has to be the pad size that gets
+    # drawn, and the drawn one comes from fab_params (the generator below is
+    # handed the same number). Without this, an out-of-table method kept the
+    # Option-2 fallback of 40 um while drawing a 35 um opening, and
+    # auto_resolve, which targets max(pitch, diameter + spacing), pushed for
+    # 55 um where the method asks for 50. In-table methods declare the
+    # table's own opening, so this is a no-op for them.
+    params.diameter_um = opening
+    params.min_enclosure_um = enclosure
+    if cell.table_6_1 and not in_table:
+        if overrode:
+            print(f"  Note: {method} body diameter {diameter} um is outside "
+                  f"IHP Table 6.1; using its manifest pitch/spacing "
+                  f"({params.min_pitch_um}/{params.min_spacing_um} um).")
+        else:
+            print(f"  Warning: {method} body diameter {diameter} um is "
+                  f"outside IHP Table 6.1 and declares no pitch_rules; using "
+                  f"Option 2 defaults ({params.min_pitch_um}/"
+                  f"{params.min_spacing_um} um).", file=sys.stderr)
+    # The 3D body layers (e.g. a vendor's 510/511 vs IHP's 500/501) and the
+    # fab pad geometry travel with the method, not with the assembly.
+    bodies = im.layers_3d(method)
+    generator = bm.CuPillarGenerator(
+        enclosure_um=params.min_enclosure_um, bodies=bodies,
+        passiv_opening_um=opening, **cell.generator_kwargs)
+    print(f"\nGenerating {cell.pcell} landings (connection={method}, "
+          f"body diameter={diameter} um, pitch {params.min_pitch_um} um / "
+          f"spacing {params.min_spacing_um} um) with DRC validation...")
+    print("  3D bodies: " + ", ".join(
+        f"{name} ({lnum}/{ldt})" for name, lnum, ldt in bodies))
+    return generator, params, diameter
 
 
 FILL_ENGINE_SUBPATH = ("libs.tech", "klayout", "python", "fill_closure.py")
@@ -5950,8 +6154,8 @@ def convert_hyp_to_gds(
         chiplet_file_path: Path to .chiplet file to update with interposer GDS path
         tech_json_path: Path to interposer_tech_default.json for PDK via parameters
         pad_locations: Dict mapping device ref to pin_list JSON path; the
-                       cu-pillar generator places DRC-validated pillars at
-                       these pads (an alternative to a pre-generated
+                       landing generator places DRC-validated pads of each
+                       die's method at these pads (an alternative to a pre-generated
                        cupillar_gds_path)
         connection_type: Connection stack ID for chiplet file update (e.g. "cupillar_opt1")
         cupillar_gds_path: Path to pre-generated cu-pillar GDS (from bump_mirror.py)
@@ -6306,36 +6510,31 @@ def convert_hyp_to_gds(
                 print(f"  Merged cu-pillar cell: {src_cell.name}")
     elif pad_locations and parser.devices:
         # Resolve each device's connection method: per-die override first,
-        # then the assembly-global --connection-type. A method without body
-        # geometry in the interconnect manifest gets no pillars, loudly.
-        _die_conns = die_connections or {}
+        # then the assembly-global --connection-type. A method whose landing
+        # the pad cell cannot draw refuses the export; an id the manifest does
+        # not know gets no pillars, loudly.
+        requested = resolve_die_methods(pad_locations, die_connections,
+                                        connection_type)
+        connections_requested = bool(requested)
+        bm = _import_bump_mirror() if requested else None
         device_methods = {}
-        connections_requested = False
-        for dev_ref in pad_locations:
-            method = _die_conns.get(dev_ref, connection_type)
-            if not method:
-                continue
-            connections_requested = True
-            if _connection_to_body_diameter(method) is None:
+        method_cells = {}
+        for dev_ref, method in requested.items():
+            try:
+                cell = _check_landing_anchor(method, bm)
+            except ValueError as exc:
+                print(f"ERROR: Cannot draw the landing of {dev_ref}: {exc}",
+                      file=sys.stderr)
+                return False
+            if cell is None or _connection_to_body_diameter(method) is None:
                 print(f"  Warning: connection '{method}' on {dev_ref} has "
                       f"no body geometry in the interconnect manifest; "
-                      f"skipping its pillars", file=sys.stderr)
+                      f"skipping its landings", file=sys.stderr)
                 continue
             device_methods[dev_ref] = method
+            method_cells[method] = cell
+        # Every method in use passed _check_landing_anchor, so bm is loaded.
         methods_in_use = sorted(set(device_methods.values()))
-        bm = _import_bump_mirror() if methods_in_use else None
-        if methods_in_use and bm is None:
-            # A connection stack was requested: a GDS without its pillars
-            # would look fabricable while missing the attachment structures,
-            # and no downstream DRC can flag absent geometry. Fail loud.
-            print(
-                "ERROR: Cu-pillar generation requested (connection=%s) but "
-                "bump_mirror is unavailable. Set INTERPOSER_PDK_ROOT to the "
-                "interposer PDK checkout (libs.tech/klayout/python/"
-                "bump_mirror.py) and retry. Refusing to emit a complete GDS "
-                "without its pillars." % ", ".join(methods_in_use),
-                file=sys.stderr)
-            return False
         if connections_requested:
             # The bump path was entered (connections requested alongside pad
             # locations): guarantee a pillar manifest even when no method
@@ -6352,88 +6551,13 @@ def convert_hyp_to_gds(
             im = _import_interconnect_manifest()
             per_method = {}
             for m in methods_in_use:
-                m_diameter = _connection_to_body_diameter(m)
-                # A method's declared pitch_rules are authoritative over the
-                # body-diameter table lookup. from_body_diameter maps an IHP
-                # Table 6.1 body diameter (35/44/49/54) to that row's
-                # pitch/spacing and returns the Option-2 defaults (pitch 80 /
-                # spacing 40) for any other diameter -- so a vendor fine-pitch
-                # method (vendorx, body 40 um) or a solder bump (body 80 um) was
-                # checked against 80/40 instead of its real manifest spec. That
-                # let auto-resolve spread vendorx's native 70 um bumps toward 80
-                # (landing ~72 nm short -> a phantom cu-pillar DRC error) while
-                # the assembly DRC, which reads the manifest, passed the same
-                # geometry at the real 50 um pitch. Honor the manifest's
-                # pitch_rules when the method declares them; keep the
-                # body-diameter fab geometry (diameter, enclosure). In-table
-                # methods declare the same numbers, so this is a no-op for them.
-                #
-                # For an out-of-table diameter take the Option-2 fallback fields
-                # directly rather than via from_body_diameter(), so its "using
-                # Option 2 defaults" stderr warning does not fire -- that message
-                # is misleading once the manifest pitch_rules below supersede
-                # those defaults. An accurate note is emitted afterwards.
-                m_in_table = bm.CUPILLAR_TABLE_6_1.get(m_diameter) is not None
-                m_params = (bm.DrcParams.from_body_diameter(m_diameter)
-                            if m_in_table else bm.DrcParams())
                 try:
-                    m_fab = im.fab_params(m)
-                    m_opening, m_enclosure = resolve_carrier_profile(
-                        m, m_fab, m_diameter, bm.CUPILLAR_TABLE_6_1)
-                except (KeyError, ValueError) as exc:
+                    per_method[m] = _method_landing(bm, im, m, method_cells[m])
+                except ValueError as exc:
                     print(f"ERROR: Cannot draw carrier landing for {m}: "
                           f"{exc}", file=sys.stderr)
                     return False
-                try:
-                    m_pr = im.pitch_rules(m)
-                except KeyError:
-                    m_pr = {}
-                m_overrode = False
-                if m_pr.get("IXN_pitch") is not None:
-                    m_params.min_pitch_um = m_pr["IXN_pitch"]
-                    m_overrode = True
-                if m_pr.get("IXN_spacing") is not None:
-                    m_params.min_spacing_um = m_pr["IXN_spacing"]
-                    m_overrode = True
-                # The pad size the pre-DRC reasons about has to be the pad size
-                # that gets drawn, and the drawn one comes from fab_params
-                # (CuPillarGenerator below is handed the same number). Without
-                # this, an out-of-table method kept the Option-2 fallback of 40
-                # um while drawing a 35 um opening, and auto_resolve, which
-                # targets max(pitch, diameter + spacing), pushed for 55 um where
-                # the method asks for 50. In-table methods declare the table's
-                # own opening, so this is a no-op for them.
-                m_params.diameter_um = m_opening
-                m_params.min_enclosure_um = m_enclosure
-                if not m_in_table:
-                    if m_overrode:
-                        print(f"  Note: {m} body diameter {m_diameter} um is "
-                              f"outside IHP Table 6.1; using its manifest "
-                              f"pitch/spacing ({m_params.min_pitch_um}/"
-                              f"{m_params.min_spacing_um} um).")
-                    else:
-                        print(f"  Warning: {m} body diameter {m_diameter} um is "
-                              f"outside IHP Table 6.1 and declares no "
-                              f"pitch_rules; using Option 2 defaults "
-                              f"({m_params.min_pitch_um}/"
-                              f"{m_params.min_spacing_um} um).",
-                              file=sys.stderr)
-                m_bodies = im.layers_3d(m)
-                # Fab pad geometry travels with the method too (m_fab above):
-                # diameters outside the IHP Table 6.1 (vendor methods) draw
-                # their manifest-declared passivation opening.
-                print(f"\nGenerating Cu-pillars (connection={m}, "
-                      f"body diameter={m_diameter} um, "
-                      f"pitch {m_params.min_pitch_um} um / spacing "
-                      f"{m_params.min_spacing_um} um) with DRC validation...")
-                print("  3D bodies: " + ", ".join(
-                    f"{name} ({lnum}/{ldt})" for name, lnum, ldt in m_bodies))
-                per_method[m] = (
-                    bm.CuPillarGenerator(
-                        enclosure_um=m_params.min_enclosure_um,
-                        bodies=m_bodies,
-                        passiv_opening_um=m_opening),
-                    m_params, m_diameter)
+                m_params = per_method[m][1]
                 # The numbers this method's bumps are placed and auto-resolved
                 # against travel with the drawn pads, in the pillar manifest.
                 generator.record_interconnect_rules(
@@ -6480,13 +6604,14 @@ def convert_hyp_to_gds(
                 print(f"  {dev_ref}: {s['error']} error(s), "
                       f"{s['warning']} warning(s) across {s['total']} checks")
                 if not report.passed:
-                    print(f"  Warning: {dev_ref} has residual Cu-pillar DRC "
+                    print(f"  Warning: {dev_ref} has residual landing DRC "
                           f"violations (continuing per policy).")
                 dev_report = report.to_dict()
                 dev_report["connection"] = method
                 device_reports[dev_ref] = dev_report
                 total_pillars += _add_device_pillars(
-                    bm, pillar_gen, dev_ref, resolved, body_diameter)
+                    bm, pillar_gen, dev_ref, resolved, body_diameter,
+                    method_cells[method].pcell)
                 # Record the as-drawn centers for the pillar manifest: the
                 # exact positions add_device_bumps just placed (resolved is
                 # index-aligned with the pre-resolve bumps list; the 0.01 um
@@ -6512,24 +6637,26 @@ def convert_hyp_to_gds(
                         record["auto_resolve_shift_um"] = round(shift, 6)
                     pillar_records.append(record)
                 generator.record_pillars(pillar_records)
-            # Merge generated CUPILLARS_<ref> cells into the interposer top.
-            # Each device lives in exactly one method's generator.
+            # Merge the generated group cells (CUPILLARS_<ref>, SBUMPS_<ref>:
+            # the pad cell's prefix) into the interposer top. Each device
+            # lives in exactly one method's generator.
             merged = 0
             for m in methods_in_use:
                 m_layout = per_method[m][0].layout
+                group_prefix = method_cells[m].group_prefix
                 # Iterate valid cells only: a generator that instantiates a
                 # PCell and prunes the leftover proxy (as the IntM4TM2
                 # CuPillarPad generator does) leaves freed slots in the cell
                 # index space, so range(cells()) + cell(ci) would raise
                 # "Not a valid cell index". each_cell() skips the gaps.
                 for src in m_layout.each_cell():
-                    if src.name.startswith("CUPILLARS_"):
+                    if src.name.startswith(group_prefix):
                         new_cell = generator.layout.create_cell(src.name)
                         new_cell.copy_tree(src)
                         generator.top_cell.insert(
                             db.DCellInstArray(new_cell, db.DTrans()))
                         merged += 1
-            print(f"Total Cu-pillar pads placed: {total_pillars} "
+            print(f"Total landing pads placed: {total_pillars} "
                   f"({merged} device group(s))")
 
             # Persist a complete DRC report next to the interposer GDS so
@@ -6738,11 +6865,10 @@ def convert_hyp_to_gds(
         print(f"\nGenerating complete GDS with chiplets...")
 
         # Determine flip-chip dies. Primary signal: a die attached by a
-        # body-bearing (cu-pillar) connection method -- resolved from the
-        # in-scope per-die map, or the assembly default for dies without one --
-        # so orientation does not depend on the .chiplet sidecar (which is
-        # absent when --update-chiplet-file is not passed). Solder-bump-only
-        # dies still need the sidecar; the normal emit_chiplet path carries it.
+        # body-bearing connection method (a pillar or a solder bump) --
+        # resolved from the in-scope per-die map, or the assembly default for
+        # dies without one -- so orientation does not depend on the .chiplet
+        # sidecar (which is absent when --update-chiplet-file is not passed).
         flip_chip_refs = set()
         for device in parser.devices:
             method = (die_connections or {}).get(device.ref) or connection_type
@@ -6918,8 +7044,9 @@ Examples:
         "--pad-locations",
         type=str,
         metavar="REF=FILE[,REF=FILE,...]",
-        help="Pin list JSON files per device; the cu-pillar generator places "
-             "DRC-validated pillars at these pads (an alternative to a "
+        help="Pin list JSON files per device; the landing generator places "
+             "DRC-validated pads of the die's connection method (Cu pillar or "
+             "solder bump) at these pads (an alternative to a "
              "pre-generated --cupillar-gds). "
              "E.g. U1=pins_interposer.json,U2=pins_diffamp.json"
     )
@@ -6940,9 +7067,10 @@ Examples:
         # printed: docs/reference/ publishes this --help, so it must read the
         # same on any host.
         help="Connection stack type for chiplet file: a method id the "
-             "interconnect PDK manifest lists (e.g., cupillar_opt1, "
-             "sbump_sac305). Injects connection_stacks section and sets "
-             "connection on die components."
+             "interconnect PDK manifest lists (e.g., cupillar_opt1). Injects "
+             "connection_stacks section and sets connection on die "
+             "components. A die whose landing the pad cell cannot draw is "
+             "refused; connection_methods.py lists which methods those are."
     )
     parser.add_argument(
         "--die-connections",
@@ -7196,12 +7324,13 @@ Examples:
 
     # Refuse an annotation layer that collides with a fabrication layer: the
     # painter clear()s the layer first, so aliasing prBoundary (235/0; 189/0
-    # kept for pre-migration GDS), the exchange0 (190/0), or a cu-pillar fab
+    # kept for pre-migration GDS), the exchange0 (190/0), or a landing-pad fab
     # layer would silently wipe real geometry (and break the "never aliases a
     # fab layer" contract).
     if args.annotate_boundaries:
-        _fab_layers = set(GDSGenerator.CUPILLAR_FAB_LAYERS.values()) | {
-            (235, 0), (189, 0), (190, 0)}
+        _fab_layers = {pair
+                       for layers in GDSGenerator.LANDING_FAB_LAYERS.values()
+                       for pair in layers.values()} | {(235, 0), (189, 0), (190, 0)}
         if boundary_viz_layer in _fab_layers:
             print(f"Error: --boundary-viz-layer {boundary_viz_layer[0]}/"
                   f"{boundary_viz_layer[1]} collides with a fabrication layer; "

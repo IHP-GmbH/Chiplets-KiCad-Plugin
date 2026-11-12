@@ -113,8 +113,11 @@ def decode_domains(text, reference, method):
     _sha(attachment.get("manifest_sha256"), "interconnect.manifest_sha256")
     if not method or attachment.get("method") != method:
         raise PadDomainError("Carrier interconnect method differs from CONNECTION")
-    if attachment.get("fab_anchor") != "ihp_cupillar_anchor":
-        raise PadDomainError("Unsupported fabrication anchor; this adapter supports ihp_cupillar_anchor")
+    # Which anchors can be drawn is the worker's check, against the manifest's
+    # fab_anchors table and the pad cell it loads; here the anchor is held to
+    # the selected manifest method (_check_method_source).
+    if not isinstance(attachment.get("fab_anchor"), str) or not attachment["fab_anchor"]:
+        raise PadDomainError("interconnect.fab_anchor must be a nonempty string")
     for key in ("body_diameter_um", "passiv_opening_um", "tm2_enclosure_um"):
         _number(attachment.get(key), "interconnect." + key, positive=True)
     diameter = _number(carrier.get("diameter_um"), "carrier.diameter_um", True)
@@ -122,8 +125,8 @@ def decode_domains(text, reference, method):
     if not math.isfinite(expected) or not math.isclose(diameter, expected, rel_tol=0, abs_tol=1e-9):
         raise PadDomainError("Carrier diameter differs from the explicit fabrication profile")
     layer = carrier.get("kicad_layer")
-    # The existing IHP CuPillarPad fabrication adapter draws TopMetal2. This is
-    # a declared supported profile, not a generic process/layer translation.
+    # TopMetal2 is the only landing this profile accepts. It is a declared
+    # supported profile, not a generic process/layer translation.
     if (carrier.get("shape") != "circle" or carrier.get("layer") != "TopMetal2"
             or not isinstance(layer, str)
             or re.fullmatch(r"(?:F|B|In[1-9][0-9]*)\.Cu", layer) is None):
