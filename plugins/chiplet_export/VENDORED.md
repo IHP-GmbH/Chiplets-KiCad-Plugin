@@ -1,10 +1,11 @@
 # Vendored copies
 
 Files in this plugin that are another repository's bytes, copied in. Each entry names
-the upstream commit and the sha256 of the copy, and each is gated by a test, so a local
+the upstream revision (a commit, or a release tag where the upstream is not public) and
+the sha256 of the copy, and each is gated by a test, so a local
 edit fails the suite instead of drifting quietly into a second, diverging original.
 
-Re-vendor with a plain copy of the upstream file. The same commit updates the commit and
+Re-vendor with a plain copy of the upstream file. The same commit updates the revision and
 sha256 in the copy's SOURCE file, which the gates read the pin from, and in its entry here.
 For the reader it also updates the release in its entry and in the heading of its standing
 rules, any rule the new copy changed, and its table of moves.
@@ -110,7 +111,7 @@ decide, which is the whole reason the fixture is consumed here instead of transc
 ## interposer-pnr
 
 **`vendor/round_trip_names.py`**
-from `src/interposer_pnr/round_trip_names.py` at commit `54caf81`,
+from `src/interposer_pnr/round_trip_names.py` at release `v2026.11.1`,
 sha256 `e7a11170121cc17dcbdefa6ffb0efdf5319c6474950ce2751bcb2ce34e6d1060`.
 interposer-pnr's reader of an export report's net names and its rules for reading a
 board's carriers against a report (`read_board_carriers`: each carrier's io_pad id, and
