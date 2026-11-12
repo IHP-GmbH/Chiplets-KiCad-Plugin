@@ -895,7 +895,12 @@ landing only when the UBM openings that anchor declares in the manifest's
 `fab_anchors` table are the ones the interposer PDK's pad cell draws. Today
 that cell is CuPillarPad, so `ihp_cupillar_anchor` methods export and an
 `ihp_sbump_anchor` method (`sbump_sac305`) is refused before the GDS is
-written, marked board or not, instead of losing its landings. The HYP
+written instead of losing its landings, whenever the worker draws the pads
+from pin locations. A pre-generated `--cupillar-gds` is merged as given; for
+marked boards the preflight refuses that override. For every method the
+landing diameter is `passiv_opening_um + 2 * tm2_enclosure_um` from the
+manifest. A solder bump's `body_diameter_um` is the ball, a 3D body only, and
+neither number is derived from the other. The HYP
 writer deliberately exports the **carrier** padstack geometry; the die pin-list
 writer instead retains original die dimensions and physical indices. Its known
 geometry fields are normalized to nm in footprint-local GDS Y-up coordinates,

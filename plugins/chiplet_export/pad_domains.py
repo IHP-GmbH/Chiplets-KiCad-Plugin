@@ -125,8 +125,8 @@ def decode_domains(text, reference, method):
     if not math.isfinite(expected) or not math.isclose(diameter, expected, rel_tol=0, abs_tol=1e-9):
         raise PadDomainError("Carrier diameter differs from the explicit fabrication profile")
     layer = carrier.get("kicad_layer")
-    # Both IHP anchors land on TopMetal2, the interposer's attachment surface.
-    # This is a declared supported profile, not a generic layer translation.
+    # TopMetal2 is the only landing this profile accepts. It is a declared
+    # supported profile, not a generic process/layer translation.
     if (carrier.get("shape") != "circle" or carrier.get("layer") != "TopMetal2"
             or not isinstance(layer, str)
             or re.fullmatch(r"(?:F|B|In[1-9][0-9]*)\.Cu", layer) is None):

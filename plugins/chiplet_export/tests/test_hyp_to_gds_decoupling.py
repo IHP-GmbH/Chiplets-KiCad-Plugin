@@ -10,6 +10,7 @@ literals exactly, while the vendor demo method becomes selectable.
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -621,13 +622,33 @@ def test_single_method_export_unchanged_by_die_connections_param(
     "cupillar_opt1", "cupillar_opt2", "cupillar_opt3", "vendorx_microbump"])
 def test_pillar_anchored_methods_are_drawable(method):
     use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
-    assert h._undrawable_anchor(method) is None
+    h._check_landing_anchor(method, h._import_bump_mirror())
 
 
-def test_an_anchor_check_without_bump_mirror_refuses(monkeypatch):
+@pytest.mark.parametrize("bm,reason", [
+    (None, "needs bump_mirror"),
+    (SimpleNamespace(), "no pad-cell layer table"),
+])
+def test_an_anchor_check_without_the_pad_cell_table_refuses(bm, reason):
     use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
-    monkeypatch.setattr(h, "_import_bump_mirror", lambda: None)
-    assert "needs bump_mirror" in h._undrawable_anchor("cupillar_opt1")
+    with pytest.raises(ValueError, match=reason):
+        h._check_landing_anchor("cupillar_opt1", bm)
+
+
+def test_an_unknown_method_is_left_to_the_body_check():
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    h._check_landing_anchor("bogus", None)
+
+
+def test_an_unreadable_manifest_is_a_typed_refusal(monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    im = h._import_interconnect_manifest()
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("torn")
+    monkeypatch.setattr(im, "load_manifest", unreadable)
+    with pytest.raises(h.SourceRefused, match="fab anchor of 'cupillar_opt1'"):
+        h._check_landing_anchor("cupillar_opt1", h._import_bump_mirror())
 
 
 @pytest.mark.parametrize("global_method,per_die", [

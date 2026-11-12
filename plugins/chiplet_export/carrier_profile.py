@@ -65,6 +65,7 @@ def check_anchor_drawable(method, anchor, fab_anchors, drawn_openings):
         raise ValueError("%s: the manifest declares no UBM layers for fab anchor %s"
                          % (method, anchor))
     declared = set()
+    # The schema's pattern, checked here: load_manifest gates only the version.
     for spec in layers.values():
         match = re.fullmatch(r"([0-9]+)/([0-9]+)", spec) if isinstance(spec, str) else None
         if match is None:

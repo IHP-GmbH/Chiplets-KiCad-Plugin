@@ -5281,7 +5281,9 @@ def _connection_to_body_diameter(connection_type):
     """Cu-pillar body diameter (um) for a connection-stack id, or None.
 
     Sourced from the interconnect PDK manifest (single source of truth). Solder
-    bumps (a 'Ball' body) and unknown/empty ids return None -> skip pillar gen.
+    bumps (a 'Ball' body) and unknown/empty ids return None: no pillar body.
+    The pad loop refuses a solder bump earlier, by its anchor; flip-chip
+    detection still reads this.
     """
     if not connection_type:
         return None
@@ -5303,39 +5305,43 @@ def _connection_to_body_diameter(connection_type):
     return method.get("body_diameter_um")
 
 
-def _undrawable_anchor(connection_type):
-    """Why the pad generator cannot draw this method's landing, or None.
+def _check_landing_anchor(connection_type, bm):
+    """Refuse a method whose landing the loaded pad cell cannot draw.
 
     The manifest's fab_anchors table names the UBM openings the method's
-    anchor needs; bump_mirror's CuPillarPad cell names the ones it draws
-    (every fabrication layer but the TopMetal2 landing). A method whose anchor
-    needs other openings is refused here, not skipped below: a GDS without
-    its landings would look fabricable. Unknown ids are left to the
-    body-geometry check, as before.
+    anchor needs; ``bm`` is bump_mirror, whose CuPillarPad cell draws
+    CUPILLAR_FAB_LAYERS. A method that cannot be drawn is refused, not
+    skipped: a GDS without its landings would look fabricable. Ids the
+    manifest does not know are left to the body-geometry check. Raises
+    ValueError with the reason.
     """
     im = _import_interconnect_manifest()
     if im is None:
-        return None
+        return
     try:
         manifest = im.load_manifest()
         method = im.get_method(connection_type, manifest)
     except (KeyError, FileNotFoundError):
-        return None  # unknown method, or a partial PDK install
+        return  # unknown method, or a partial PDK install
     except Exception as exc:
         raise _manifest_refusal(exc, "the fab anchor of '%s'" % connection_type)
-    bm = _import_bump_mirror()
     if bm is None:
-        return ("%s needs bump_mirror to check its fab anchor, and it is "
-                "unavailable; set INTERPOSER_PDK_ROOT to the interposer PDK "
-                "checkout" % connection_type)
-    drawn = {pair for name, pair in bm.CUPILLAR_FAB_LAYERS.items()
-             if name != "TopMetal2"}
-    try:
-        check_anchor_drawable(connection_type, method.get("fab_anchor"),
-                              manifest.get("fab_anchors"), drawn)
-    except ValueError as exc:
-        return str(exc)
-    return None
+        raise ValueError(
+            "%s needs bump_mirror, which is unavailable. Set "
+            "INTERPOSER_PDK_ROOT to the interposer PDK checkout "
+            "(libs.tech/klayout/python/bump_mirror.py) and retry. Refusing to "
+            "emit a complete GDS without its landings." % connection_type)
+    # bump_mirror has one pad cell; its openings are its fabrication layers
+    # less the TopMetal2 landing. A per-anchor table there replaces this.
+    fab_layers = getattr(bm, "CUPILLAR_FAB_LAYERS", None)
+    if not isinstance(fab_layers, dict):
+        raise ValueError("%s: bump_mirror declares no pad-cell layer table "
+                         "(CUPILLAR_FAB_LAYERS)" % connection_type)
+    if not isinstance(method, dict):
+        raise ValueError("%s: the manifest entry is not an object" % connection_type)
+    drawn = {pair for name, pair in fab_layers.items() if name != "TopMetal2"}
+    check_anchor_drawable(connection_type, method.get("fab_anchor"),
+                          manifest.get("fab_anchors"), drawn)
 
 
 def _connection_to_adapter(connection_type):
@@ -6341,20 +6347,24 @@ def convert_hyp_to_gds(
                 print(f"  Merged cu-pillar cell: {src_cell.name}")
     elif pad_locations and parser.devices:
         # Resolve each device's connection method: per-die override first,
-        # then the assembly-global --connection-type. A method without body
-        # geometry in the interconnect manifest gets no pillars, loudly.
+        # then the assembly-global --connection-type. A method whose landing
+        # the pad cell cannot draw refuses the export; an id the manifest does
+        # not know gets no pillars, loudly.
         _die_conns = die_connections or {}
-        device_methods = {}
-        connections_requested = False
+        requested = {}
         for dev_ref in pad_locations:
             method = _die_conns.get(dev_ref, connection_type)
-            if not method:
-                continue
-            connections_requested = True
-            undrawable = _undrawable_anchor(method)
-            if undrawable:
-                print(f"ERROR: Cannot draw the landing of {dev_ref}: "
-                      f"{undrawable}", file=sys.stderr)
+            if method:
+                requested[dev_ref] = method
+        connections_requested = bool(requested)
+        bm = _import_bump_mirror() if requested else None
+        device_methods = {}
+        for dev_ref, method in requested.items():
+            try:
+                _check_landing_anchor(method, bm)
+            except ValueError as exc:
+                print(f"ERROR: Cannot draw the landing of {dev_ref}: {exc}",
+                      file=sys.stderr)
                 return False
             if _connection_to_body_diameter(method) is None:
                 print(f"  Warning: connection '{method}' on {dev_ref} has "
@@ -6362,20 +6372,8 @@ def convert_hyp_to_gds(
                       f"skipping its pillars", file=sys.stderr)
                 continue
             device_methods[dev_ref] = method
+        # Every method in use passed _check_landing_anchor, so bm is loaded.
         methods_in_use = sorted(set(device_methods.values()))
-        bm = _import_bump_mirror() if methods_in_use else None
-        if methods_in_use and bm is None:
-            # A connection stack was requested: a GDS without its pillars
-            # would look fabricable while missing the attachment structures,
-            # and no downstream DRC can flag absent geometry. Fail loud.
-            print(
-                "ERROR: Cu-pillar generation requested (connection=%s) but "
-                "bump_mirror is unavailable. Set INTERPOSER_PDK_ROOT to the "
-                "interposer PDK checkout (libs.tech/klayout/python/"
-                "bump_mirror.py) and retry. Refusing to emit a complete GDS "
-                "without its pillars." % ", ".join(methods_in_use),
-                file=sys.stderr)
-            return False
         if connections_requested:
             # The bump path was entered (connections requested alongside pad
             # locations): guarantee a pillar manifest even when no method
