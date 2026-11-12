@@ -888,9 +888,14 @@ is then passed to the worker. Check the board's copper layer names and selected
 LYP when this check fails; changing a KiCad layer's name does not change its
 internal layer identifier. Unmarked exports retain the existing layer policy.
 
-The supported fabrication profile is presently `ihp_cupillar_anchor`, circular
-TopMetal2 landings, mapped to the canonical KiCad copper layer recorded by the
-producer. This does not claim arbitrary fabrication-anchor support. The HYP
+The supported fabrication profile is circular TopMetal2 landings, mapped to
+the canonical KiCad copper layer recorded by the producer. The record's anchor
+must be the selected manifest method's `fab_anchor`, and the worker draws a
+landing only when the UBM openings that anchor declares in the manifest's
+`fab_anchors` table are the ones the interposer PDK's pad cell draws. Today
+that cell is CuPillarPad, so `ihp_cupillar_anchor` methods export and an
+`ihp_sbump_anchor` method (`sbump_sac305`) is refused before the GDS is
+written, marked board or not, instead of losing its landings. The HYP
 writer deliberately exports the **carrier** padstack geometry; the die pin-list
 writer instead retains original die dimensions and physical indices. Its known
 geometry fields are normalized to nm in footprint-local GDS Y-up coordinates,

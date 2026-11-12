@@ -617,6 +617,46 @@ def test_single_method_export_unchanged_by_die_connections_param(
         assert not ({(510, 35), (511, 35)} & layers)
 
 
+@pytest.mark.parametrize("method", [
+    "cupillar_opt1", "cupillar_opt2", "cupillar_opt3", "vendorx_microbump"])
+def test_pillar_anchored_methods_are_drawable(method):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    assert h._undrawable_anchor(method) is None
+
+
+def test_an_anchor_check_without_bump_mirror_refuses(monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    monkeypatch.setattr(h, "_import_bump_mirror", lambda: None)
+    assert "needs bump_mirror" in h._undrawable_anchor("cupillar_opt1")
+
+
+@pytest.mark.parametrize("global_method,per_die", [
+    ("sbump_sac305", {}),
+    ("cupillar_opt1", {"U2": "sbump_sac305"}),
+])
+def test_a_solder_bump_die_is_refused_before_the_gds(
+        tmp_path, capsys, global_method, per_die):
+    """No pad cell draws the solder-bump openings yet. The die is refused,
+    with or without carrier metadata, instead of exported without landings."""
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    hyp = tmp_path / "sbump.hyp"
+    hyp.write_text(MIXED_HYP)
+    out = tmp_path / "sbump_interposer.gds"
+    ok = h.convert_hyp_to_gds(
+        hyp_path=str(hyp), output_path=str(out),
+        lyp_path=h._find_default_lyp(),
+        pad_locations={"U1": _write_pin_list(tmp_path, "U1"),
+                       "U2": _write_pin_list(tmp_path, "U2")},
+        connection_type=global_method, die_connections=per_die,
+    )
+    assert ok is False
+    assert not out.exists()
+    err = capsys.readouterr().err
+    assert "Cannot draw the landing of" in err
+    assert "ihp_sbump_anchor opens 9/36, 41/36, 99/36" in err
+    assert "cannot draw that landing" in err
+
+
 # ---------------------------------------------------------------------------
 # Board outline -> prBoundary 235/0 (interposer extent = Edge.Cuts, not copper)
 # ---------------------------------------------------------------------------

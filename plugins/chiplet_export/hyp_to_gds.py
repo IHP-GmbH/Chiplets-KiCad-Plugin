@@ -27,9 +27,9 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote
 
 try:
-    from .carrier_profile import resolve_carrier_profile
+    from .carrier_profile import check_anchor_drawable, resolve_carrier_profile
 except ImportError:  # Standalone worker script, outside the GUI package.
-    from carrier_profile import resolve_carrier_profile
+    from carrier_profile import check_anchor_drawable, resolve_carrier_profile
 
 try:
     from . import layer_map as _layer_map
@@ -5303,6 +5303,41 @@ def _connection_to_body_diameter(connection_type):
     return method.get("body_diameter_um")
 
 
+def _undrawable_anchor(connection_type):
+    """Why the pad generator cannot draw this method's landing, or None.
+
+    The manifest's fab_anchors table names the UBM openings the method's
+    anchor needs; bump_mirror's CuPillarPad cell names the ones it draws
+    (every fabrication layer but the TopMetal2 landing). A method whose anchor
+    needs other openings is refused here, not skipped below: a GDS without
+    its landings would look fabricable. Unknown ids are left to the
+    body-geometry check, as before.
+    """
+    im = _import_interconnect_manifest()
+    if im is None:
+        return None
+    try:
+        manifest = im.load_manifest()
+        method = im.get_method(connection_type, manifest)
+    except (KeyError, FileNotFoundError):
+        return None  # unknown method, or a partial PDK install
+    except Exception as exc:
+        raise _manifest_refusal(exc, "the fab anchor of '%s'" % connection_type)
+    bm = _import_bump_mirror()
+    if bm is None:
+        return ("%s needs bump_mirror to check its fab anchor, and it is "
+                "unavailable; set INTERPOSER_PDK_ROOT to the interposer PDK "
+                "checkout" % connection_type)
+    drawn = {pair for name, pair in bm.CUPILLAR_FAB_LAYERS.items()
+             if name != "TopMetal2"}
+    try:
+        check_anchor_drawable(connection_type, method.get("fab_anchor"),
+                              manifest.get("fab_anchors"), drawn)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
 def _connection_to_adapter(connection_type):
     """Interconnect adapter id for a connection-stack id, or None.
 
@@ -6316,6 +6351,11 @@ def convert_hyp_to_gds(
             if not method:
                 continue
             connections_requested = True
+            undrawable = _undrawable_anchor(method)
+            if undrawable:
+                print(f"ERROR: Cannot draw the landing of {dev_ref}: "
+                      f"{undrawable}", file=sys.stderr)
+                return False
             if _connection_to_body_diameter(method) is None:
                 print(f"  Warning: connection '{method}' on {dev_ref} has "
                       f"no body geometry in the interconnect manifest; "
