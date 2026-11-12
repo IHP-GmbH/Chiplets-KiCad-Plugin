@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Validate manifest geometry against the existing CuPillarPad adapter.
+"""Validate manifest geometry against the interposer's landing pad cells.
 
 The interconnect manifest owns the opening, the metal enclosure and, through
-its fab_anchors table, the UBM opening layers an anchor needs. The PDK
-adapter currently overrides the opening for table-known body diameters; a
-profile it cannot faithfully draw must be refused, not silently substituted.
+its fab_anchors table, the UBM opening layers an anchor needs. The Cu-pillar
+pad cell overrides the opening for Table 6.1 body diameters; a profile a pad
+cell cannot faithfully draw must be refused, not silently substituted.
 This module has no KLayout or pcbnew dependency.
 """
 
@@ -27,7 +27,8 @@ def _positive_number(value, label):
 def resolve_carrier_profile(method, fab_params, body_diameter_um, pdk_table):
     """Return explicit (opening, enclosure) in um, or refuse an unsafe profile.
 
-    ``pdk_table`` is the loaded generator's own table, not a copied PDK rule.
+    ``pdk_table`` is the loaded generator's own table, not a copied PDK rule,
+    and empty for a pad cell whose opening always comes from the method.
     No table/default value substitutes for a missing manifest parameter.
     """
     if not isinstance(fab_params, dict):

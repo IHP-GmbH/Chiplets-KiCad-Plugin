@@ -2769,7 +2769,7 @@ def _landing_fakes(monkeypatch):
     writer.write_die_pin_lists = lambda *_a, **_kw: {"U1": "/pins/U1.json"}
     snapshot = InterconnectManifestSnapshot(
         {"schema_version": "1.0",
-         "methods": {"pillar": {}, "bump": {}, "sbump_sac305": {}}},
+         "methods": {"pillar": {}, "bump": {}}},
         root="/selected/ic")
     monkeypatch.setattr(orchestrator, "_load_interconnect_manifest",
                         lambda *_a, **_kw: snapshot)
@@ -2865,14 +2865,14 @@ def test_the_cli_connection_flag_reaches_the_landing_refusal(
         LoadBoard=lambda _path: _RunExportBoard()))
     monkeypatch.setattr(
         orchestrator, "query_connection_availability",
-        lambda *_a, **_kw: ({"sbump_sac305": "sbump_sac305: no pad cell"},
+        lambda *_a, **_kw: ({"bump": "bump: no pad cell"},
                             "/worker/python connection_methods.py"))
     board = tmp_path / "board.kicad_pcb"
     board.touch()
     assert cli.main(["--board", str(board), "--output-dir",
                      str(tmp_path / "out"), "--connection",
-                     "sbump_sac305"]) == 1
+                     "bump"]) == 1
     out = capsys.readouterr().out
-    assert ("Cannot draw the landing of U1 (sbump_sac305): "
-            "sbump_sac305: no pad cell") in out
+    assert ("Cannot draw the landing of U1 (bump): "
+            "bump: no pad cell") in out
     assert calls == []

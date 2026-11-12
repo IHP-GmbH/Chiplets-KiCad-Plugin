@@ -92,7 +92,8 @@ def _build_parser():
     parser.add_argument(
         "--connection", default="",
         help="Connection stack (e.g. cupillar_opt1/2/3). A cupillar stack "
-             "auto-generates pillars from the die pads. A method whose "
+             "or a solder bump auto-generates its landings from the die pads. "
+             "A method whose "
              "landing the worker cannot draw (connection_methods.py) is "
              "refused before the export stages anything.",
     )

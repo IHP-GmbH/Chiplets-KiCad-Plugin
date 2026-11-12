@@ -53,14 +53,18 @@ ANCHORS = {
     "partial": {"layers": {"passiv": "9/35", "dfpad": "41/35"}},
 }
 PILLAR_OPENINGS = {(9, 35), (41, 35), (99, 35)}
+BUMP_OPENINGS = {(9, 36), (41, 36), (99, 36)}
 
 
-def test_an_anchor_whose_openings_the_generator_draws_passes():
-    check_anchor_drawable("attachment", "pillar", ANCHORS, PILLAR_OPENINGS)
+@pytest.mark.parametrize("anchor,drawn", [
+    ("pillar", PILLAR_OPENINGS), ("bump", BUMP_OPENINGS)])
+def test_an_anchor_whose_openings_the_generator_draws_passes(anchor, drawn):
+    check_anchor_drawable("attachment", anchor, ANCHORS, drawn)
 
 
 @pytest.mark.parametrize("anchor,drawn", [
     ("bump", PILLAR_OPENINGS),
+    ("pillar", BUMP_OPENINGS),
     ("partial", PILLAR_OPENINGS),
     ("pillar", PILLAR_OPENINGS | {(9, 36)}),
     ("pillar", set()),

@@ -43,10 +43,11 @@ options:
   --update-chiplet-file CHIPLET_FILE
                         Update .chiplet file with interposer GDS path
   --pad-locations REF=FILE[,REF=FILE,...]
-                        Pin list JSON files per device; the cu-pillar
-                        generator places DRC-validated pillars at these pads
-                        (an alternative to a pre-generated --cupillar-gds).
-                        E.g. U1=pins_interposer.json,U2=pins_diffamp.json
+                        Pin list JSON files per device; the landing generator
+                        places DRC-validated pads of the die's connection
+                        method (Cu pillar or solder bump) at these pads (an
+                        alternative to a pre-generated --cupillar-gds). E.g.
+                        U1=pins_interposer.json,U2=pins_diffamp.json
   --cupillar-gds FILE   Pre-generated cu-pillar GDS file (from bump_mirror.py)
                         to merge into the interposer layout
   --connection-type TYPE

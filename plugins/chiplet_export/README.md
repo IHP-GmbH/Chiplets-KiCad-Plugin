@@ -404,8 +404,9 @@ written, and the message names `INTERPOSER_PDK_ROOT` and the key.
   rendered in the interposer GDS and injected under the interposer
   component. An explicit sidecar JSON from `kicad_pcb_to_iopads.py` can be
   supplied through the headless `ExportOptions.io_pads_json`.
-- *Cu-pillars*: auto-generated from each flip-chip die's footprint pads when
-  the die's connection is a cu-pillar stack. A pre-generated cu-pillar GDS,
+- *Landings*: auto-generated from each flip-chip die's footprint pads when
+  the die has a connection method: Cu-pillar pads for a cu-pillar stack,
+  solder-bump pads for a solder bump. A pre-generated cu-pillar GDS,
   typically from `bump_mirror.py`, can be supplied through the headless
   `ExportOptions.cupillar_gds`.
 - *Integrated MIM capacitors*: auto-extracted from the board's `cap_cmim`
@@ -691,11 +692,11 @@ Edge.Cuts outline)"**
 The Hyperlynx writer needs a closed board outline to derive units and
 bounding box. Add an Edge.Cuts polygon enclosing the design and retry.
 
-**Cu-pillars missing in the chiplet-studio Detailed render**
+**Cu-pillars or solder bumps missing in the chiplet-studio Detailed render**
 
-Cu-pillars are generated only when a die's connection is a cu-pillar stack
-(set via the per-die *Connection* row or the assembly-wide *Connection
-stack*). Confirm the die has a cu-pillar method selected, then re-run. A
+Landings are generated only when a die has a connection method (set via the
+per-die *Connection* row or the assembly-wide *Connection stack*). Confirm
+the die has a method selected, then re-run. A
 pre-generated cu-pillar GDS can instead be supplied through the headless
 `ExportOptions.cupillar_gds`.
 
@@ -902,10 +903,14 @@ The supported fabrication profile is circular TopMetal2 landings, mapped to
 the canonical KiCad copper layer recorded by the producer. The record's anchor
 must be the selected manifest method's `fab_anchor`, and the worker draws a
 landing only when the UBM openings that anchor declares in the manifest's
-`fab_anchors` table are the ones the interposer PDK's pad cell draws. Today
-that cell is CuPillarPad, so `ihp_cupillar_anchor` methods export and an
-`ihp_sbump_anchor` method (`sbump_sac305`) is refused before the GDS is
-written instead of losing its landings, whenever the worker draws the pads
+`fab_anchors` table are the ones the interposer PDK's pad cell for that
+anchor draws (bump_mirror's `fab_anchor_openings`): CuPillarPad for
+`ihp_cupillar_anchor`, SolderBumpPad for `ihp_sbump_anchor`. Each die's pads
+are placed in a group cell named by that pad cell (`CUPILLARS_<ref>`,
+`SBUMPS_<ref>`) and checked against its own rule set (Padc, Padb). An
+interposer PDK older than the solder-bump pad cell draws CuPillarPad only, so
+there an `ihp_sbump_anchor` method (`sbump_sac305`) is refused before the GDS
+is written instead of losing its landings, whenever the worker draws the pads
 from pin locations. `connection_methods.py` runs that check for every method
 and prints the result as JSON; the dialog and chiplet-export use it to refuse
 such a die before the export stages anything. A pre-generated `--cupillar-gds` is merged as given; for
