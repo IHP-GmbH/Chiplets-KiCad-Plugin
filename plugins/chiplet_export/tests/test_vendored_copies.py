@@ -88,11 +88,11 @@ def _vendored_md():
 
 
 def vendored_md_entry(copy, upstream):
-    """The commit and sha256 VENDORED.md's entry for ``copy`` states: its
-    header lines, not a mention anywhere in the file, which the history below
-    each entry would satisfy with an older pin."""
+    """The revision (commit or release) and sha256 VENDORED.md's entry for
+    ``copy`` states: its header lines, not a mention anywhere in the file,
+    which the history below each entry would satisfy with an older pin."""
     text = _vendored_md()
-    found = re.search(r"\*\*`%s`\*\*\nfrom `%s` at commit `([0-9a-f]+)`,\nsha256 `([0-9a-f]{64})`,"
+    found = re.search(r"\*\*`%s`\*\*\nfrom `%s` at (?:commit|release) `([^`]+)`,\nsha256 `([0-9a-f]{64})`[,.]"
                       % (re.escape(copy), re.escape(upstream)), text)
     assert found, "VENDORED.md has no entry for %s from %s" % (copy, upstream)
     return found.groups()
@@ -160,7 +160,10 @@ def test_the_reader_source_file_names_the_reader_alone():
 
 #: interposer-pnr's round_trip reader, pinned in its own SOURCE file (the
 #: format gds_to_kicad's copy of this file uses): line one names the
-#: commit and upstream path, line two the sha256 of the copy.
+#: revision and upstream path, line two the sha256 of the copy. The sha256 is
+#: the copy's identity. interposer-pnr is not public, so the revision is a
+#: release tag, a locator a reader can ask for; one of its commit ids would
+#: name nothing they can see.
 NAMES_SOURCE = os.path.join(PLUGIN_ROOT, "vendor", "round_trip_names.SOURCE")
 NAMES_PATH = os.path.join(PLUGIN_ROOT, "vendor", "round_trip_names.py")
 
@@ -168,23 +171,23 @@ NAMES_PATH = os.path.join(PLUGIN_ROOT, "vendor", "round_trip_names.py")
 def _names_pin():
     with open(NAMES_SOURCE, "r", encoding="utf-8") as fh:
         head, digest = fh.read().splitlines()
-    marker, repo, commit, upstream = head.split()
+    marker, repo, release, upstream = head.split()
     sha256, name = digest.split()
     assert (marker, repo, name) == ("#", "interposer-pnr", "round_trip_names.py")
-    return commit, upstream, sha256
+    assert re.fullmatch(r"v\d{4}\.\d+(\.\d+)?", release), (
+        "%s names %r; interposer-pnr is pinned by release tag" % (NAMES_SOURCE, release))
+    return release, upstream, sha256
 
 
 def test_the_round_trip_reader_copy_is_its_pinned_bytes():
     """The copy is the bytes SOURCE pins, and VENDORED.md states the same pin."""
-    commit, upstream, sha256 = _names_pin()
+    release, upstream, sha256 = _names_pin()
     with open(NAMES_PATH, "rb") as fh:
         assert _sha256(fh.read()) == sha256, (
             "vendor/round_trip_names.py was edited in place. It is a copy of "
-            "interposer-pnr %s:%s; change it upstream and re-vendor." % (commit, upstream))
-    with open(os.path.join(PLUGIN_ROOT, "VENDORED.md"), "r", encoding="utf-8") as fh:
-        text = fh.read()
-    for fact in (upstream, commit[:7], sha256):
-        assert fact in text, "VENDORED.md does not mention %r" % fact
+            "interposer-pnr %s:%s; change it upstream and re-vendor." % (release, upstream))
+    assert vendored_md_entry("vendor/round_trip_names.py", upstream) == (
+        release, sha256), "VENDORED.md states another pin than %s" % NAMES_SOURCE
 
 
 _VERSION_RE = re.compile(r'^__version__\s*=\s*["\']([^"\']+)["\']', re.M)
