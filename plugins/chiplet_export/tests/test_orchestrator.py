@@ -2807,6 +2807,7 @@ def test_run_export_refuses_an_undrawable_landing_before_staging(
         {"pillar": None, "bump": "bump: no pad cell"}, **options)
     assert result.error == ("Cannot draw the landing of U1 (bump): "
                             "bump: no pad cell")
+    assert result.error in log  # the run log says why it stopped
     assert queries == [("/worker/python", "/plugin", "/selected/ic")]
     assert "$ /worker/python /plugin/connection_methods.py" in log
     assert calls == []
@@ -2842,9 +2843,12 @@ def test_run_export_refuses_when_availability_cannot_be_read(
     monkeypatch.setattr(orchestrator, "query_connection_availability", failed)
     options = _drc_options(tmp_path)
     options.connection_type = "pillar"
-    result = orchestrator.run_export(_RunExportBoard(), options, "/plugin")
+    log = []
+    result = orchestrator.run_export(_RunExportBoard(), options, "/plugin",
+                                     on_log=log.append)
     assert result.error == ("Cannot check the connection methods: "
                             "worker exited 1: boom")
+    assert result.error in log
     assert calls == []
 
 

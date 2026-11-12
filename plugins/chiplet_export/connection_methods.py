@@ -74,10 +74,10 @@ def parse_report(text):
         raise ReportError("an unrecognized report")
     availability = {}
     for entry in entries:
-        method = entry.get("id") if isinstance(entry, dict) else None
-        reason = entry.get("reason") if isinstance(entry, dict) else None
-        if (not isinstance(method, str) or not method
-                or method in availability or set(entry) != {"id", "reason"}
+        if not isinstance(entry, dict) or set(entry) != {"id", "reason"}:
+            raise ReportError("a malformed method entry: %r" % (entry,))
+        method, reason = entry["id"], entry["reason"]
+        if (not isinstance(method, str) or not method or method in availability
                 or not (reason is None or (isinstance(reason, str) and reason))):
             raise ReportError("a malformed method entry: %r" % (entry,))
         availability[method] = reason

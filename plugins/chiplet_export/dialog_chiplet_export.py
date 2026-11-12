@@ -33,6 +33,7 @@ from .pipeline.orchestrator import (
     worker_reads_die_outlines,
 )
 from .connection_methods import refused_landings, resolve_die_methods
+from .pipeline.discovery import _is_executable
 
 
 EXPORT_REPORT_LABEL = "Interposer export report"
@@ -708,7 +709,8 @@ class ChipletExportDialog(wx.Dialog):
         self._availability_key = key
         self._conn_availability = {}
         self._availability_report = ""
-        if worker:
+        # The field is read as typed: only a path that can run is asked.
+        if worker and _is_executable(Path(worker)):
             _in_background(self._fetch_availability, key)
 
     def _fetch_availability(self, key):
@@ -765,7 +767,7 @@ class ChipletExportDialog(wx.Dialog):
         """
         default, die_conns = self._selected_connections()
         refused = refused_landings(self._conn_availability, resolve_die_methods(
-            self._die_conn_ctrls, die_conns, default))
+            list(self._die_conn_ctrls), die_conns, default))
         return "; ".join("%s uses %s, which cannot be drawn" % (ref, method)
                          for ref, method, _reason in refused)
 
@@ -1152,7 +1154,6 @@ class ChipletExportDialog(wx.Dialog):
         # An override that is not runnable must fail here, with a message,
         # rather than deep in the subprocess launch as a raw OSError.
         if options.worker_python_override:
-            from .pipeline.discovery import _is_executable
             if not _is_executable(Path(options.worker_python_override)):
                 wx.MessageBox(
                     "Worker Python is not an executable file:\n%s\n\nClear "

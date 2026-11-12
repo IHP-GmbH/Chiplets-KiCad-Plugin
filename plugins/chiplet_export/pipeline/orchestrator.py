@@ -2074,13 +2074,16 @@ def run_export(board, options, plugin_dir,
                         options,
                         interconnect_pdk_root=interconnect_manifest.root))
             except ConnectionAvailabilityError as exc:
-                return ExportResult(
-                    error="Cannot check the connection methods: %s" % exc)
+                message = "Cannot check the connection methods: %s" % exc
+                _log(message)
+                return ExportResult(error=message)
             _log("$ " + query)
             refused = refused_landings(availability, landing_methods)
             if refused:
-                return ExportResult(error="Cannot draw the landing of %s" % (
-                    "; ".join("%s (%s): %s" % entry for entry in refused)))
+                message = "Cannot draw the landing of %s" % "; ".join(
+                    "%s (%s): %s" % entry for entry in refused)
+                _log(message)
+                return ExportResult(error=message)
 
         # All pre-worker validation passed: stage the intermediate into the
         # output dir now, as a sibling of the canonical .chiplet that hyp_to_gds

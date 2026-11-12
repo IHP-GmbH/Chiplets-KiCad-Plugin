@@ -846,6 +846,8 @@ def _answer_inline(dialog_module, monkeypatch, answer):
     monkeypatch.setattr(dialog_module, "query_connection_availability", query)
     monkeypatch.setattr(dialog_module, "_in_background",
                         lambda target, *args: target(*args))
+    monkeypatch.setattr(dialog_module, "_is_executable",
+                        lambda path: str(path) == "/worker/python")
     monkeypatch.setattr(dialog_module.wx, "CallAfter",
                         lambda fn, *args: posted.append((fn, args)),
                         raising=False)
@@ -977,4 +979,15 @@ def test_without_a_worker_nothing_is_asked(dialog, dialog_module, monkeypatch):
     deliver()
     assert queries == []
     assert dialog._run_btn.enabled
+
+
+def test_a_worker_path_that_cannot_run_is_not_asked(
+        dialog, dialog_module, monkeypatch):
+    """The field is read while typed; a partial path is never launched."""
+    queries, deliver = _answer_inline(dialog_module, monkeypatch, BUMP)
+    dialog._worker_ctrl.value = "/worker/pyt"
+    dialog._interposer_root_ctrl.value = "/other/interposer"
+    assert dialog._refresh_connection_choices() is True
+    deliver()
+    assert queries == []
 
