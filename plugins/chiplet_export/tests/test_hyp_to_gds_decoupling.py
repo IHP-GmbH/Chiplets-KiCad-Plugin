@@ -61,8 +61,8 @@ def test_body_diameter_ihp_identical():
     assert h._connection_to_body_diameter("cupillar_opt1") == 44
     assert h._connection_to_body_diameter("cupillar_opt2") == 49
     assert h._connection_to_body_diameter("cupillar_opt3") == 54
-    # Solder bump -> no single pillar body -> None (skip pillar gen).
-    assert h._connection_to_body_diameter("sbump_sac305") is None
+    # A solder bump's body is its ball.
+    assert h._connection_to_body_diameter("sbump_sac305") == 80
     assert h._connection_to_body_diameter("") is None
     assert h._connection_to_body_diameter("bogus") is None
 
@@ -627,8 +627,9 @@ def _per_anchor_pads(bm):
     "cupillar_opt1", "cupillar_opt2", "cupillar_opt3", "vendorx_microbump"])
 def test_pillar_anchored_methods_are_drawable(method):
     use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
-    assert h._check_landing_anchor(
-        method, h._import_bump_mirror()) == "ihp_cupillar_anchor"
+    cell = h._check_landing_anchor(method, h._import_bump_mirror())
+    assert (cell.anchor, cell.pcell, cell.group_prefix, cell.table_6_1) == (
+        "ihp_cupillar_anchor", "CuPillarPad", "CUPILLARS_", True)
 
 
 def test_a_solder_bump_is_drawable_where_its_pad_cell_exists():
@@ -636,7 +637,19 @@ def test_a_solder_bump_is_drawable_where_its_pad_cell_exists():
     bm = h._import_bump_mirror()
     if not _per_anchor_pads(bm):
         pytest.skip("this interposer PDK has no SolderBumpPad")
-    assert h._check_landing_anchor("sbump_sac305", bm) == "ihp_sbump_anchor"
+    cell = h._check_landing_anchor("sbump_sac305", bm)
+    assert (cell.anchor, cell.pcell, cell.group_prefix, cell.table_6_1,
+            cell.generator_kwargs) == (
+        "ihp_sbump_anchor", "SolderBumpPad", "SBUMPS_", False,
+        {"fab_anchor_id": "ihp_sbump_anchor"})
+
+
+def test_a_pre_anchor_bump_mirror_draws_cupillarpad_without_the_new_keyword():
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    cell = h._check_landing_anchor("cupillar_opt1", CUPILLAR_ONLY_BM)
+    assert cell == h.LandingCell(
+        "ihp_cupillar_anchor", "CuPillarPad", "CUPILLARS_",
+        frozenset({(9, 35), (41, 35), (99, 35)}), True, {})
 
 
 # A bump_mirror before per-anchor pad cells: CuPillarPad only.
@@ -646,12 +659,18 @@ CUPILLAR_ONLY_BM = SimpleNamespace(CUPILLAR_FAB_LAYERS={
 
 
 def _per_anchor_bm(openings):
-    """A bump_mirror whose fab_anchor_openings answers from ``openings``."""
-    def fab_anchor_openings(anchor):
+    """A bump_mirror with a pad cell for each anchor of ``openings``."""
+    def fab_anchor(anchor):
         if anchor not in openings:
             raise ValueError("no interposer pad for fab anchor %r" % anchor)
+        return SimpleNamespace(pcell="Pad_" + anchor, cell_prefix="PAD",
+                               table_6_1=False)
+
+    def fab_anchor_openings(anchor):
+        fab_anchor(anchor)
         return openings[anchor]
-    return SimpleNamespace(fab_anchor_openings=fab_anchor_openings)
+    return SimpleNamespace(fab_anchor=fab_anchor,
+                           fab_anchor_openings=fab_anchor_openings)
 
 
 @pytest.mark.parametrize("bm,method,reason", [
@@ -692,8 +711,8 @@ def test_the_anchor_check_asks_the_pad_cell_of_the_methods_own_anchor():
                                 "recog": (99, 35)},
         "ihp_sbump_anchor": {"passiv": (9, 36), "dfpad": (41, 36),
                              "recog": (99, 36)}})
-    assert h._check_landing_anchor("sbump_sac305", bm) == "ihp_sbump_anchor"
-    assert h._check_landing_anchor("cupillar_opt1", bm) == "ihp_cupillar_anchor"
+    assert h._check_landing_anchor("sbump_sac305", bm).pcell == "Pad_ihp_sbump_anchor"
+    assert h._check_landing_anchor("cupillar_opt1", bm).pcell == "Pad_ihp_cupillar_anchor"
 
 
 @pytest.mark.parametrize("bm,reason", [
@@ -759,13 +778,17 @@ PILLAR_OPENINGS = {(9, 35), (41, 35), (99, 35)}
     ("cupillar_opt1", {"U2": "sbump_sac305"}),
 ])
 def test_a_solder_bump_die_lands_on_the_solder_bump_pad(
-        tmp_path, capsys, global_method, per_die):
+        tmp_path, capsys, monkeypatch, global_method, per_die):
     """With the SolderBumpPad cell the export draws the solder-bump openings
     under each sbump die, in its own SBUMPS_<ref> group, and keeps the
     Cu-pillar openings for a cupillar die in the same GDS."""
     use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
     if not _per_anchor_pads(h._import_bump_mirror()):
         pytest.skip("this interposer PDK has no SolderBumpPad")
+    checked = []
+    check = h._check_intm4tm2_cni
+    monkeypatch.setattr(h, "_check_intm4tm2_cni",
+                        lambda pcell, *a: checked.append(pcell) or check(pcell, *a))
     hyp = tmp_path / "sbump.hyp"
     hyp.write_text(MIXED_HYP)
     out = tmp_path / "sbump_interposer.gds"
@@ -777,6 +800,9 @@ def test_a_solder_bump_die_lands_on_the_solder_bump_pad(
         connection_type=global_method, die_connections=per_die,
     )
     assert ok is True
+    # Each pad cell is checked to come from the IntM4TM2 library in use.
+    assert "SolderBumpPad" in checked
+    assert ("CuPillarPad" in checked) == bool(per_die)
     u2 = _cell_layers(str(out), "SBUMPS_U2")
     assert SBUMP_OPENINGS | {(134, 0)} <= u2
     assert not (PILLAR_OPENINGS & u2)
@@ -799,19 +825,25 @@ def test_a_solder_bump_die_lands_on_the_solder_bump_pad(
     assert "Table 6.1" not in printed.out + printed.err
 
 
-@pytest.mark.parametrize("anchor,pcell", [
-    (SimpleNamespace(pcell="SolderBumpPad", cell_prefix="SBUMP"), "SolderBumpPad"),
-    (None, "CuPillarPad"),
-])
-def test_the_pad_cell_check_names_the_generators_own_pcell(
-        monkeypatch, anchor, pcell):
-    seen = []
-    monkeypatch.setattr(h, "_check_intm4tm2_cni",
-                        lambda name, *_a: seen.append(name))
-    gen = SimpleNamespace(anchor=anchor,
-                          add_device_bumps=lambda ref, bumps, body: 3)
-    assert h._add_device_pillars(SimpleNamespace(), gen, "U1", [], 80.0) == 3
-    assert seen == [pcell]
+def test_a_method_without_fab_params_refuses_the_export(
+        tmp_path, capsys, monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    im = h._import_interconnect_manifest()
+
+    def no_fab_params(method, *args, **kwargs):
+        raise KeyError("%s declares no fab_params" % method)
+    monkeypatch.setattr(im, "fab_params", no_fab_params)
+    hyp = tmp_path / "nofab.hyp"
+    hyp.write_text(MIXED_HYP)
+    out = tmp_path / "nofab_interposer.gds"
+    ok = h.convert_hyp_to_gds(
+        hyp_path=str(hyp), output_path=str(out),
+        lyp_path=h._find_default_lyp(),
+        pad_locations={"U1": _write_pin_list(tmp_path, "U1")},
+        connection_type="cupillar_opt1")
+    assert ok is False
+    assert ("Cannot draw carrier landing for cupillar_opt1: "
+            "'cupillar_opt1 declares no fab_params'") in capsys.readouterr().err
 
 
 def test_the_methods_command_agrees_with_the_worker_on_the_live_pdks():
