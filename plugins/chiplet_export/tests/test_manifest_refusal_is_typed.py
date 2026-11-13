@@ -37,7 +37,7 @@ class RaisingReader:
     def __init__(self, exc):
         self._exc = exc
 
-    def get_method(self, mid):
+    def get_method(self, mid, manifest=None):
         raise self._exc
 
 

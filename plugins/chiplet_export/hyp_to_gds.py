@@ -5289,12 +5289,13 @@ def _import_interconnect_manifest():
     return None
 
 
-def _connection_to_body_diameter(connection_type):
+def _connection_to_body_diameter(connection_type, manifest=None):
     """Body diameter (um) for a connection-stack id, or None.
 
     Sourced from the interconnect PDK manifest (single source of truth): the
     pillar, or the ball of a solder bump. Unknown/empty ids return None: no
-    body, so no landing and no flip-chip attachment.
+    body, so no landing and no flip-chip attachment. ``manifest`` is read
+    when not given.
     """
     if not connection_type:
         return None
@@ -5302,7 +5303,7 @@ def _connection_to_body_diameter(connection_type):
     if im is None:
         return None
     try:
-        method = im.get_method(connection_type)
+        method = im.get_method(connection_type, manifest)
     except (KeyError, FileNotFoundError):
         # KeyError IS the "unknown method" signal here, unlike at the
         # technology-block site: this looks a method up BY ID, so the reader
@@ -5407,6 +5408,21 @@ def _check_landing_anchor(connection_type, bm, manifest=None):
     return cell
 
 
+def _landings_manifest(what):
+    """The interconnect manifest a run of landing checks shares, read once,
+    or None without an interconnect PDK or manifest (each check then finds
+    the same). An unusable one is SourceRefused naming ``what``."""
+    im = _import_interconnect_manifest()
+    if im is None:
+        return None
+    try:
+        return im.load_manifest()
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        raise _manifest_refusal(exc, what)
+
+
 def connection_method_availability():
     """Every manifest method id, mapped to None or the reason it is refused.
 
@@ -5416,14 +5432,11 @@ def connection_method_availability():
     would refuse only a die that uses it. Empty when no interconnect PDK is
     found; an unusable manifest raises SourceRefused.
     """
-    im = _import_interconnect_manifest()
-    if im is None:
+    manifest = _landings_manifest("the method list")
+    if manifest is None:
         return {}
     try:
-        manifest = im.load_manifest()
-        methods = im.list_methods(manifest)
-    except FileNotFoundError:
-        return {}
+        methods = _import_interconnect_manifest().list_methods(manifest)
     except Exception as exc:
         raise _manifest_refusal(exc, "the method list")
     bm = _import_bump_mirror() if methods else None
@@ -5663,12 +5676,13 @@ def _add_device_pillars(bm, pillar_gen, ref: str, bumps,
     return pillar_gen.add_device_bumps(ref, bumps, body_diameter_um)
 
 
-def _method_landing(bm, im, method, cell):
+def _method_landing(bm, im, method, cell, manifest):
     """(generator, DrcParams, body diameter) that draw ``method``'s landings
     with pad cell ``cell``; ValueError when the manifest profile cannot be
-    drawn. ``im`` is the interconnect manifest module, and the method's
-    body diameter is known to resolve."""
-    diameter = _connection_to_body_diameter(method)
+    drawn. ``im`` is the interconnect manifest module and ``manifest`` the
+    read the landing checks used; the method's body diameter is known to
+    resolve in it."""
+    diameter = _connection_to_body_diameter(method, manifest)
     table = bm.CUPILLAR_TABLE_6_1 if cell.table_6_1 else {}
     # A method's declared pitch_rules are authoritative over the
     # body-diameter table lookup. from_body_diameter maps an IHP Table 6.1
@@ -5698,11 +5712,11 @@ def _method_landing(bm, im, method, cell):
         params = bm.DrcParams.load(fab_anchor_id=cell.anchor)
     try:
         opening, enclosure = resolve_carrier_profile(
-            method, im.fab_params(method), diameter, table)
+            method, im.fab_params(method, manifest), diameter, table)
     except KeyError as exc:
         raise ValueError(str(exc)) from exc
     try:
-        pitch_rules = im.pitch_rules(method)
+        pitch_rules = im.pitch_rules(method, manifest)
     except KeyError:
         pitch_rules = {}
     overrode = False
@@ -5733,7 +5747,7 @@ def _method_landing(bm, im, method, cell):
                   f"{params.min_spacing_um} um).", file=sys.stderr)
     # The 3D body layers (e.g. a vendor's 510/511 vs IHP's 500/501) and the
     # fab pad geometry travel with the method, not with the assembly.
-    bodies = im.layers_3d(method)
+    bodies = im.layers_3d(method, manifest)
     generator = bm.CuPillarGenerator(
         enclosure_um=params.min_enclosure_um, bodies=bodies,
         passiv_opening_um=opening, **cell.generator_kwargs)
@@ -6531,22 +6545,30 @@ def convert_hyp_to_gds(
                                         connection_type)
         connections_requested = bool(requested)
         bm = _import_bump_mirror() if requested else None
+        manifest = (_landings_manifest("the fab anchors of %s" % ", ".join(
+            sorted(set(requested.values())))) if requested else None)
         device_methods = {}
+        # Each method is checked once, against one read of the manifest:
+        # its LandingCell, or None when it has no body geometry.
         method_cells = {}
         for dev_ref, method in requested.items():
-            try:
-                cell = _check_landing_anchor(method, bm)
-            except ValueError as exc:
-                print(f"ERROR: Cannot draw the landing of {dev_ref}: {exc}",
-                      file=sys.stderr)
-                return False
-            if cell is None or _connection_to_body_diameter(method) is None:
+            if method not in method_cells:
+                try:
+                    cell = _check_landing_anchor(method, bm, manifest)
+                except ValueError as exc:
+                    print(f"ERROR: Cannot draw the landing of {dev_ref}: "
+                          f"{exc}", file=sys.stderr)
+                    return False
+                if (cell is not None and _connection_to_body_diameter(
+                        method, manifest) is None):
+                    cell = None
+                method_cells[method] = cell
+            if method_cells[method] is None:
                 print(f"  Warning: connection '{method}' on {dev_ref} has "
                       f"no body geometry in the interconnect manifest; "
                       f"skipping its landings", file=sys.stderr)
                 continue
             device_methods[dev_ref] = method
-            method_cells[method] = cell
         # Every method in use passed _check_landing_anchor, so bm is loaded.
         methods_in_use = sorted(set(device_methods.values()))
         if connections_requested:
@@ -6560,13 +6582,14 @@ def convert_hyp_to_gds(
             # One generator + parameter set per method: the 3D body layers
             # (e.g. a vendor's 510/511 vs IHP's 500/501) and the fab
             # parameters travel with the method, not with the assembly.
-            # _connection_to_body_diameter above already proved the manifest
-            # resolves for every method in use.
+            # The checks above already proved the manifest they read
+            # resolves for every method in use; the landings use that read.
             im = _import_interconnect_manifest()
             per_method = {}
             for m in methods_in_use:
                 try:
-                    per_method[m] = _method_landing(bm, im, m, method_cells[m])
+                    per_method[m] = _method_landing(bm, im, m, method_cells[m],
+                                                    manifest)
                 except ValueError as exc:
                     print(f"ERROR: Cannot draw carrier landing for {m}: "
                           f"{exc}", file=sys.stderr)

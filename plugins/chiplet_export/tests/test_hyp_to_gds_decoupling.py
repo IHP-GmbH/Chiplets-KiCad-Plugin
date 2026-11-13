@@ -741,6 +741,75 @@ def test_an_unreadable_manifest_is_a_typed_refusal(monkeypatch):
         h._check_landing_anchor("cupillar_opt1", h._import_bump_mirror())
 
 
+def test_an_unreadable_manifest_refuses_the_method_list(monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    im = h._import_interconnect_manifest()
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("torn")
+    monkeypatch.setattr(im, "load_manifest", unreadable)
+    with pytest.raises(h.SourceRefused, match="the method list could not"):
+        h.connection_method_availability()
+
+
+def test_the_body_diameter_comes_from_the_manifest_given():
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    import copy
+    manifest = copy.deepcopy(h._import_interconnect_manifest().load_manifest())
+    manifest["methods"]["cupillar_opt1"]["body_diameter_um"] = 123.0
+    assert h._connection_to_body_diameter("cupillar_opt1", manifest) == 123.0
+    assert h._connection_to_body_diameter("cupillar_opt1") != 123.0
+
+
+def _landing_reads(tmp_path, monkeypatch, refs):
+    """(landing checks, manifest reads) of one cupillar_opt1 export with pad
+    locations for ``refs``."""
+    im = h._import_interconnect_manifest()
+    loaded, checks, landings = [], [], []
+    load, check = im.load_manifest, h._check_landing_anchor
+    landing = h._method_landing
+
+    def counted_load(*args, **kwargs):
+        loaded.append(load(*args, **kwargs))
+        return loaded[-1]
+
+    def recorded_check(method, bm, manifest=None):
+        checks.append((method, manifest))
+        return check(method, bm, manifest)
+
+    def recorded_landing(bm, im, method, cell, manifest):
+        landings.append(manifest)
+        return landing(bm, im, method, cell, manifest)
+    out = tmp_path / ("%d.gds" % len(refs))
+    hyp = tmp_path / "pillar.hyp"
+    hyp.write_text(MIXED_HYP)
+    with monkeypatch.context() as patch:
+        patch.setattr(im, "load_manifest", counted_load)
+        patch.setattr(h, "_check_landing_anchor", recorded_check)
+        patch.setattr(h, "_method_landing", recorded_landing)
+        assert h.convert_hyp_to_gds(
+            hyp_path=str(hyp), output_path=str(out),
+            lyp_path=h._find_default_lyp(),
+            pad_locations={ref: _write_pin_list(tmp_path, ref)
+                           for ref in refs},
+            connection_type="cupillar_opt1") is True
+    for method, manifest in checks:
+        assert any(manifest is read for read in loaded), method
+    # The landings are drawn from the read the checks used.
+    assert landings and all(manifest is checks[0][1] for manifest in landings)
+    return [method for method, _ in checks], len(loaded)
+
+
+def test_an_export_checks_each_method_once_on_one_manifest(
+        tmp_path, monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    one_checks, one_reads = _landing_reads(tmp_path, monkeypatch, ["U1"])
+    two_checks, two_reads = _landing_reads(tmp_path, monkeypatch, ["U1", "U2"])
+    assert one_checks == two_checks == ["cupillar_opt1"]
+    # A second die on the same method reads the manifest no more often.
+    assert two_reads == one_reads
+
+
 PILLAR_TABLE = {"passiv": (9, 35), "dfpad": (41, 35), "recog": (99, 35)}
 
 
@@ -908,6 +977,21 @@ def test_a_landing_names_its_pad_cell():
     with pytest.raises(TypeError):
         h._add_device_pillars(SimpleNamespace(), Generator(), "U1",
                               [], 44.0, "SolderBumpPad")
+
+
+def test_the_landing_is_drawn_from_the_manifest_the_checks_read(monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    im, bm = h._import_interconnect_manifest(), h._import_bump_mirror()
+    manifest = im.load_manifest()
+    cell = h._check_landing_anchor("cupillar_opt1", bm, manifest)
+
+    def reread(*args, **kwargs):
+        raise AssertionError("the landing read the manifest again")
+    monkeypatch.setattr(im, "load_manifest", reread)
+    _generator, _params, diameter = h._method_landing(
+        bm, im, "cupillar_opt1", cell, manifest)
+    assert diameter == (
+        manifest["methods"]["cupillar_opt1"]["body_diameter_um"])
 
 
 def test_a_method_without_fab_params_refuses_the_export(
