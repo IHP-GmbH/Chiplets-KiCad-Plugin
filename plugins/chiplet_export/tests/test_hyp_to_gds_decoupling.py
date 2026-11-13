@@ -741,6 +741,76 @@ def test_an_unreadable_manifest_is_a_typed_refusal(monkeypatch):
         h._check_landing_anchor("cupillar_opt1", h._import_bump_mirror())
 
 
+PILLAR_TABLE = {"passiv": (9, 35), "dfpad": (41, 35), "recog": (99, 35)}
+
+
+def _broken_bm(fab_anchor=None, openings=None):
+    """A bump_mirror whose fab anchor API answers wrongly."""
+    def default_anchor(anchor):
+        return SimpleNamespace(pcell="CuPillarPad", cell_prefix="CUPILLAR",
+                               table_6_1=True)
+    return SimpleNamespace(
+        fab_anchor=fab_anchor or default_anchor,
+        fab_anchor_openings=openings or (lambda anchor: dict(PILLAR_TABLE)))
+
+
+def _raise(exc):
+    def raiser(*args):
+        raise exc
+    return raiser
+
+
+# The pad cell of an interposer between its per-anchor openings and its
+# per-anchor cell names: a FabAnchor without cell_prefix or table_6_1.
+NAMELESS_PAD_BM = _broken_bm(
+    fab_anchor=lambda anchor: SimpleNamespace(pcell="CuPillarPad", rules="Padc",
+                                              layers={}))
+
+
+@pytest.mark.parametrize("bm,kind", [
+    (NAMELESS_PAD_BM, "AttributeError"),
+    (_broken_bm(fab_anchor=_raise(KeyError("ihp_cupillar_anchor"))), "KeyError"),
+    (_broken_bm(openings=_raise(TypeError("takes 0 arguments"))), "TypeError"),
+    (_broken_bm(openings=lambda a: {"passiv": [9, 35]}), "TypeError"),
+])
+def test_a_bump_mirror_that_answers_wrongly_is_a_typed_refusal(bm, kind):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    with pytest.raises(h.SourceRefused, match="fab anchor API is unusable \\(%s"
+                       % kind) as refused:
+        h._check_landing_anchor("cupillar_opt1", bm)
+    assert refused.value.exit_code == h.EXIT_SOURCE_UNREACHABLE
+
+
+def test_a_bump_mirror_that_answers_wrongly_refuses_every_method(
+        monkeypatch, capsys):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    import connection_methods
+    monkeypatch.setattr(h, "_import_bump_mirror", lambda: NAMELESS_PAD_BM)
+    availability = h.connection_method_availability()
+    assert availability
+    assert all("cell_prefix" in reason for reason in availability.values())
+    assert connection_methods.main([]) == 0
+    reported = connection_methods.parse_report(capsys.readouterr().out)
+    assert reported == availability
+
+
+def test_an_export_on_a_bump_mirror_that_answers_wrongly_is_refused(
+        tmp_path, monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    monkeypatch.setattr(h, "_import_bump_mirror", lambda: NAMELESS_PAD_BM)
+    hyp = tmp_path / "pillar.hyp"
+    hyp.write_text(MIXED_HYP)
+    out = tmp_path / "pillar_interposer.gds"
+    with pytest.raises(h.SourceRefused, match="cell_prefix"):
+        h.convert_hyp_to_gds(
+            hyp_path=str(hyp), output_path=str(out),
+            lyp_path=h._find_default_lyp(),
+            pad_locations={"U1": _write_pin_list(tmp_path, "U1"),
+                           "U2": _write_pin_list(tmp_path, "U2")},
+            connection_type="cupillar_opt1")
+    assert not out.exists()
+
+
 @pytest.mark.parametrize("global_method,per_die", [
     ("sbump_sac305", {}),
     ("cupillar_opt1", {"U2": "sbump_sac305"}),

@@ -5323,21 +5323,36 @@ class LandingCell(NamedTuple):
     generator_kwargs: dict   # what CuPillarGenerator takes to draw it
 
 
+def _bump_mirror_refusal(connection_type, bm, exc):
+    """SourceRefused for a bump_mirror whose fab anchor API answers with
+    something other than a pad cell or a ValueError."""
+    return SourceRefused(
+        "%s: bump_mirror at %s is present but its fab anchor API is unusable "
+        "(%s: %s)" % (connection_type, getattr(bm, "__file__", None),
+                      type(exc).__name__, exc))
+
+
 def _landing_cell(connection_type, anchor, bm):
     """The LandingCell bump_mirror has for fab anchor ``anchor``, or
-    ValueError when it has none."""
+    ValueError when it has none. Any other failure of bump_mirror's answer
+    is SourceRefused: the interposer checkout, not the method, is broken."""
     if hasattr(bm, "fab_anchor_openings"):
         try:
             pad = bm.fab_anchor(anchor)
             openings = bm.fab_anchor_openings(anchor)
         except ValueError as exc:
             raise ValueError("%s: %s" % (connection_type, exc)) from exc
+        except Exception as exc:
+            raise _bump_mirror_refusal(connection_type, bm, exc) from exc
         if not isinstance(openings, dict):
             raise ValueError("%s: bump_mirror gives no opening table for fab "
                              "anchor %s" % (connection_type, anchor))
-        return LandingCell(anchor, pad.pcell, pad.cell_prefix + "S_",
-                           frozenset(openings.values()), pad.table_6_1,
-                           {"fab_anchor_id": anchor})
+        try:
+            return LandingCell(anchor, pad.pcell, pad.cell_prefix + "S_",
+                               frozenset(openings.values()), pad.table_6_1,
+                               {"fab_anchor_id": anchor})
+        except Exception as exc:
+            raise _bump_mirror_refusal(connection_type, bm, exc) from exc
     # An interposer PDK from before its per-anchor pad cells draws CuPillarPad
     # for every anchor: its openings are CUPILLAR_FAB_LAYERS less the
     # TopMetal2 landing, so any other anchor is refused by them, and its
