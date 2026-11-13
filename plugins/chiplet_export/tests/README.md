@@ -221,6 +221,9 @@ erased), exempt and non-die rows say what they are, a board the column cannot
 read keeps its rows and says so, and Run turns an empty or malformed row, or a
 preflight refusal, into one message box with no field write-back and no
 export, or writes the rows back after the CONNECTION and thickness fields.
+The worker's method availability is asked once per worker and root pair, a
+stale answer is dropped, and each answer is logged once, held while the
+catalogue is refused.
 These tests execute the real dialog methods with a narrowly scoped wx import
 shim; they do not construct native widgets or validate sizers. Other logic is
 covered indirectly by the pure

@@ -232,7 +232,7 @@ def dialog_module(monkeypatch):
     return module
 
 
-def populate_controls(dialog, root="/selected/pdk"):
+def populate_controls(dialog, module, root="/selected/pdk"):
     dialog._board = None
     dialog._closing = False
     dialog._worker_thread = None
@@ -240,12 +240,10 @@ def populate_controls(dialog, root="/selected/pdk"):
     dialog._catalogue_reported_error = ""
     dialog._catalogue_warning = ""
     dialog._catalogue_reported_warning = ""
-    dialog._conn_availability = {}
     # Already asked for this worker and these roots: no query unless a test
     # changes one of them.
-    dialog._availability_key = ("/worker/python", "/interposer/pdk", root)
-    dialog._availability_report = ""
-    dialog._availability_reported = ""
+    dialog._availability = module._MethodAvailability()
+    dialog._availability.key = ("/worker/python", "/interposer/pdk", root)
     dialog._shown_state = ("", False)
     dialog._plugin_dir = "/plugin"
     dialog._interconnect_root_ctrl = Control(root)
@@ -271,7 +269,7 @@ def populate_controls(dialog, root="/selected/pdk"):
 @pytest.fixture
 def dialog(dialog_module, monkeypatch):
     instance = object.__new__(dialog_module.ChipletExportDialog)
-    populate_controls(instance)
+    populate_controls(instance, dialog_module)
     # Isolate the two catalogue-read failure sites unless a test opts into the
     # actual shared preflight below.
     monkeypatch.setattr(dialog_module, "_preflight_interconnect_manifest",
@@ -938,17 +936,70 @@ def test_each_worker_and_root_pair_is_asked_once(
     assert dialog._log_ctrl.value.count("Unavailable: bump: no pad cell") == 2
 
 
+def test_an_answer_that_arrives_while_the_catalogue_is_refused_waits(
+        dialog, dialog_module, monkeypatch):
+    _queries, deliver = _offer_an_undrawable_method(
+        dialog, dialog_module, monkeypatch)
+    dialog._interposer_root_ctrl.value = "/other/interposer"
+    assert dialog._refresh_connection_choices() is True
+    dialog._catalogue_error = "source could not be read"
+    deliver()
+    assert dialog._log_ctrl.value.count("Unavailable: bump: no pad cell") == 1
+    dialog._catalogue_error = ""
+    dialog._apply_catalogue_state()
+    assert dialog._log_ctrl.value.count("Unavailable: bump: no pad cell") == 2
+    dialog._apply_catalogue_state()
+    assert dialog._log_ctrl.value.count("Unavailable: bump: no pad cell") == 2
+
+
 def test_an_answer_for_an_older_pair_is_dropped(
         dialog, dialog_module, monkeypatch):
     _offer_an_undrawable_method(dialog, dialog_module, monkeypatch)
-    old_key = dialog._availability_key
-    dialog._availability_key = ("/new/worker", "", "")
-    dialog._conn_availability = {}
+    old_key = dialog._availability.key
+    dialog._availability.ask(("/new/worker", "", ""))
     dialog._apply_availability(old_key, BUMP)
-    assert dialog._conn_availability == {}
+    assert dialog._availability.reasons == {}
     dialog._closing = True
-    dialog._apply_availability(dialog._availability_key, BUMP)
-    assert dialog._conn_availability == {}
+    dialog._apply_availability(dialog._availability.key, BUMP)
+    assert dialog._availability.reasons == {}
+
+
+def test_each_pairs_availability_is_logged_once(dialog_module):
+    """Identical text under a new pair is logged again; a stale answer is
+    dropped; a pending answer waits until it is logged."""
+    availability = dialog_module._MethodAvailability()
+    first, second = ("/w", "/a", "/c"), ("/w", "/b", "/c")
+    assert availability.ask(first)
+    assert availability.take(first, BUMP)
+    assert "Unavailable: bump: no pad cell" in availability.unlogged()
+    assert availability.unlogged() == ""
+    assert not availability.ask(first)
+    assert availability.ask(second)
+    assert availability.reasons == {} and availability.unlogged() == ""
+    assert not availability.take(first, BUMP)
+    assert availability.take(second, BUMP)
+    assert availability.reason("bump") == "bump: no pad cell"
+    assert availability.reason("pillar") is None
+    assert "Unavailable: bump: no pad cell" in availability.unlogged()
+    # An answer not yet logged when another pair is asked is never logged.
+    assert availability.take(second, BUMP) is False  # already answered
+    assert availability.ask(first)
+    assert availability.unlogged() == ""
+    # Asked again while its first query runs: only one answer is taken.
+    assert availability.ask(second) and availability.ask(first)
+    assert availability.take(first, BUMP)
+    assert not availability.take(first, BUMP)
+    assert availability.unlogged().count("Unavailable") == 1
+
+
+def test_an_unknown_availability_marks_nothing_and_warns(dialog_module):
+    availability = dialog_module._MethodAvailability()
+    availability.ask(("/w", "", ""))
+    availability.take(("/w", "", ""),
+                      dialog_module.ConnectionAvailabilityError("boom"))
+    assert availability.reasons == {}
+    assert availability.unlogged() == (
+        "WARNING: method availability unknown, checked again at Run: boom")
 
 
 def test_an_availability_query_that_fails_marks_nothing(
