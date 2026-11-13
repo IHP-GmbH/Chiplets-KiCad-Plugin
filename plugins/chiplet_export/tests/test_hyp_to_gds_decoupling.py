@@ -962,6 +962,8 @@ def test_a_solder_bump_die_lands_on_the_solder_bump_pad(
     assert drc["summary"]["passed"] is True
     printed = capsys.readouterr()
     assert "Table 6.1" not in printed.out + printed.err
+    # The report holds every method's landings, not just the Cu pillar's.
+    assert "Landing DRC report:" in printed.out
 
 
 def test_a_landing_names_its_pad_cell():

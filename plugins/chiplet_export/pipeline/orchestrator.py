@@ -1179,7 +1179,7 @@ def _reject_delimiter_chars(mapping: Dict[str, str], what: str,
 
 # The GDS layouts and their derived sidecars (the .boundaries.json the worker
 # writes next to each GDS, the .ixn_methods.json the assembly DRC reads, and the
-# cu-pillar DRC json the worker drops next to the interposer GDS) live in a
+# landing DRC json the worker drops next to the interposer GDS) live in a
 # `layout/` subdir of the output directory. The .chiplet stays at the output-dir
 # root and references the interposer GDS by a `layout/<file>` relative path:
 # hyp_to_gds --update-chiplet-file emits it automatically via relative_to(), and
@@ -2344,11 +2344,11 @@ def run_export(board, options, plugin_dir,
                 _log("Warning: could not record .chiplet content digest: %s"
                      % exc)
 
-        # The worker writes <board>_cupillar_drc.json next to the interposer
-        # GDS (now under layout/) when a cupillar stack drives pillar
-        # generation. Surface it only if it was actually produced this run,
-        # and tuck it under reports/ so the output-dir root keeps just the
-        # .chiplet and the MANIFEST.
+        # The worker writes <board>_cupillar_drc.json, the landing DRC of
+        # every connection method, next to the interposer GDS (now under
+        # layout/) when it draws landings. Surface it only if it was actually
+        # produced this run, and tuck it under reports/ so the output-dir root
+        # keeps just the .chiplet and the MANIFEST.
         drc_report = ""
         cupillar_flat = layout_path(options.output_dir,
                                     "%s_cupillar_drc.json" % board_name)
@@ -2361,7 +2361,7 @@ def run_export(board, options, plugin_dir,
                 shutil.move(cupillar_flat, cupillar_dst)
                 drc_report = cupillar_dst
             except OSError as exc:
-                _log("Warning: could not move cu-pillar DRC into reports/: %s"
+                _log("Warning: could not move landing DRC into reports/: %s"
                      % exc)
                 drc_report = cupillar_flat
 

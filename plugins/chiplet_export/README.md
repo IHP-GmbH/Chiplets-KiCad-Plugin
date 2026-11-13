@@ -189,9 +189,10 @@ Machine-readable sidecars land next to each generated GDS:
   including runs that place zero bumps (empty `pillars` array). The x/y
   values are authoritative for manifest-level checks; the GDS remains
   the fabrication ground truth.
-- `<board>_cupillar_drc.json`: the complete Cu-pillar DRC report
-  (per-method parameters, per-device results), so warn-and-continue
-  violations survive past the dialog log.
+- `<board>_cupillar_drc.json`: the complete landing DRC report for every
+  connection method in the run, Cu pillar and solder bump alike (the file
+  name is historical): per-method parameters, per-device results, so
+  warn-and-continue violations survive past the dialog log.
 
 Readers of both manifests exact-match the `version` string; producer and
 readers are bumped together.

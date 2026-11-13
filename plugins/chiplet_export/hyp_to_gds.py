@@ -6730,7 +6730,7 @@ def convert_hyp_to_gds(
                 try:
                     with open(str(drc_path), "w") as f:
                         json.dump(doc, f, indent=2)
-                    print(f"Cu-pillar DRC report: {drc_path}")
+                    print(f"Landing DRC report: {drc_path}")
                 except OSError as e:
                     print(f"Warning: could not write DRC report: {e}",
                           file=sys.stderr)

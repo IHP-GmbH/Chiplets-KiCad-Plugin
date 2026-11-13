@@ -1303,7 +1303,7 @@ class ChipletExportDialog(wx.Dialog):
             for label, path in (("chiplet", result.chiplet_path),
                                 ("interposer GDS", result.interposer_gds_path),
                                 ("complete GDS", result.complete_gds_path),
-                                ("cu-pillar DRC report", result.cupillar_drc_path),
+                                ("landing DRC report", result.cupillar_drc_path),
                                 ("Hyperlynx (.hyp)", result.hyp_path)):
                 if path:
                     self._append_log("Wrote %s: %s" % (label, path))
