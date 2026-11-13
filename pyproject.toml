@@ -78,10 +78,6 @@ declared-skips = [
     {reason = "explicit native allocation required", nodeid = "plugins/chiplet_export/tests/test_existing_carrier_composition.py::NativeComposition", tiers = ["T0", "T2"]},
     {reason = "CHIPLET_DRIVER_PIN_LIST unset", nodeid = "plugins/chiplet_export/tests/test_pad_domains.py::test_real_saved_driver_pin_list_remains_accepted", tiers = ["T0", "T2"]},
     {reason = "CHIPLET_BOARD_SAVE_INPUT unset", nodeid = "plugins/chiplet_export/tests/test_board_save.py::test_a_board_the_flow_wrote_keeps_its_root_keys", tiers = ["T2"]},
-    # An interposer PDK from before the per-anchor pad cells has no SolderBumpPad;
-    # a solder-bump landing is refused there instead. Drop once the pinned
-    # interposer has fab_anchor_openings.
-    {reason = "this interposer PDK has no SolderBumpPad", nodeid = "plugins/chiplet_export/tests/test_hyp_to_gds_decoupling.py::test_a_solder_bump_", tiers = ["host", "T2"]},
     # Parametrized cases another case already covers; they run nowhere.
     {reason = "also a splitter refusal", nodeid = "plugins/chiplet_export/tests/test_top_level_block_grammar.py", tiers = ["T0", "T2"]},
 ]
