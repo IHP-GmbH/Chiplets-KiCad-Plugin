@@ -14,6 +14,8 @@ import os
 import shutil
 import stat
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -2744,6 +2746,35 @@ def test_an_availability_worker_that_cannot_start_is_an_error(tmp_path):
             str(tmp_path / "no-such-python"), str(tmp_path), ExportOptions())
 
 
+_SLEEPER = "import time; time.sleep(30)\n"
+
+
+def test_the_availability_query_stops_on_cancel(tmp_path):
+    plugin = _methods_command(tmp_path, _SLEEPER)
+    event = threading.Event()
+    timer = threading.Timer(0.2, event.set)
+    timer.start()
+    start = time.monotonic()
+    try:
+        with pytest.raises(orchestrator.ConnectionAvailabilityError,
+                           match="connection_methods.py: cancelled$"):
+            orchestrator.query_connection_availability(
+                sys.executable, plugin, ExportOptions(), cancel_event=event)
+    finally:
+        timer.cancel()
+    assert time.monotonic() - start < 10
+
+
+def test_the_availability_query_is_bounded(tmp_path):
+    plugin = _methods_command(tmp_path, _SLEEPER)
+    start = time.monotonic()
+    with pytest.raises(orchestrator.ConnectionAvailabilityError,
+                       match="timed out after 0.3 s$"):
+        orchestrator.query_connection_availability(
+            sys.executable, plugin, ExportOptions(), timeout=0.3)
+    assert time.monotonic() - start < 10
+
+
 def test_each_die_takes_its_own_method_else_the_default():
     assert resolve_die_methods(
         ["U2", "U1", "U3"], {"U1": "pillar", "U3": ""}, "bump") == {
@@ -2781,7 +2812,7 @@ def _landing_run(tmp_path, monkeypatch, answer, **options):
     calls = _landing_fakes(monkeypatch)
     queries = []
 
-    def query(worker_py, plugin_dir, query_options):
+    def query(worker_py, plugin_dir, query_options, **_kw):
         queries.append((worker_py, plugin_dir,
                         query_options.interconnect_pdk_root))
         return answer, "%s %s/connection_methods.py" % (worker_py, plugin_dir)
@@ -2850,6 +2881,32 @@ def test_run_export_refuses_when_availability_cannot_be_read(
                             "worker exited 1: boom")
     assert result.error in log
     assert calls == []
+
+
+@pytest.mark.parametrize("answer", [
+    None, {"pillar": None}, {"pillar": "pillar: no pad cell"}])
+def test_a_cancel_during_the_availability_check_stages_nothing(
+        tmp_path, monkeypatch, answer):
+    """Cancel pressed while the worker is asked: the run ends cancelled,
+    whether the query is cut short or answers first, even with a refusal,
+    and before staging."""
+    calls = _landing_fakes(monkeypatch)
+
+    def query(worker_py, plugin_dir, query_options, *, cancel_event):
+        cancel_event.set()
+        if answer is None:
+            raise orchestrator.ConnectionAvailabilityError("cmd: cancelled")
+        return answer, "cmd"
+
+    monkeypatch.setattr(orchestrator, "query_connection_availability", query)
+    options = _drc_options(tmp_path)
+    options.connection_type = "pillar"
+    result = orchestrator.run_export(_RunExportBoard(), options, "/plugin",
+                                     cancel_event=threading.Event())
+    assert result.cancelled is True
+    assert result.error == ""
+    assert calls == []
+    assert [p.name for p in (tmp_path / "out").rglob("*") if p.is_file()] == []
 
 
 def test_the_cli_connection_flag_reaches_the_landing_refusal(

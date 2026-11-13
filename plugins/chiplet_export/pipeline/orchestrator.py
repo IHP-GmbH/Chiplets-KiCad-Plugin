@@ -1058,19 +1058,21 @@ class ConnectionAvailabilityError(Exception):
 
 def query_connection_availability(worker_py: str, plugin_dir: str,
                                   options: ExportOptions,
-                                  timeout: float = CONNECTION_METHODS_TIMEOUT_SECONDS
+                                  timeout: float = CONNECTION_METHODS_TIMEOUT_SECONDS,
+                                  cancel_event=None
                                   ) -> Tuple[Dict[str, Optional[str]], str]:
     """Run the worker's connection_methods.py with the export's PDK roots.
 
     Returns ``(availability, shown)``: each manifest method id mapped to None
     when the worker can draw its landing, else the reason it refuses, and the
     command as a shell line, its root variables first. Raises
-    ConnectionAvailabilityError when the command fails or its report is
-    malformed.
+    ConnectionAvailabilityError when the command fails, times out, is
+    cancelled through ``cancel_event``, or its report is malformed.
     """
     import shlex
     import subprocess
     from ..connection_methods import ReportError, parse_report
+    from .runner import run_async
 
     command = [worker_py, str(Path(plugin_dir) / CONNECTION_METHODS_SCRIPT)]
     env = build_worker_env(options)
@@ -1078,17 +1080,21 @@ def query_connection_availability(worker_py: str, plugin_dir: str,
         "INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT") if (env or {}).get(name)]
     shown = " ".join(shlex.quote(word) for word in roots + command)
     try:
-        proc = subprocess.run(command, env=env, stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True,
-                              errors="replace", timeout=timeout)
+        run = run_async(command, env=env, cancel_event=cancel_event,
+                        timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         raise ConnectionAvailabilityError("%s: %s" % (shown, exc)) from exc
-    if proc.returncode != 0:
-        lines = proc.stderr.strip().splitlines()
+    if run.cancelled:
+        raise ConnectionAvailabilityError("%s: cancelled" % shown)
+    if run.timed_out:
+        raise ConnectionAvailabilityError(
+            "%s timed out after %g s" % (shown, timeout))
+    if run.exit_code != 0:
+        lines = run.stderr.strip().splitlines()
         raise ConnectionAvailabilityError("%s exited %d: %s" % (
-            shown, proc.returncode, lines[-1] if lines else "no message"))
+            shown, run.exit_code, lines[-1] if lines else "no message"))
     try:
-        return parse_report(proc.stdout), shown
+        return parse_report(run.stdout), shown
     except ReportError as exc:
         raise ConnectionAvailabilityError(
             "%s printed %s" % (shown, exc)) from exc
@@ -1179,7 +1185,7 @@ def _reject_delimiter_chars(mapping: Dict[str, str], what: str,
 
 # The GDS layouts and their derived sidecars (the .boundaries.json the worker
 # writes next to each GDS, the .ixn_methods.json the assembly DRC reads, and the
-# cu-pillar DRC json the worker drops next to the interposer GDS) live in a
+# landing DRC json the worker drops next to the interposer GDS) live in a
 # `layout/` subdir of the output directory. The .chiplet stays at the output-dir
 # root and references the interposer GDS by a `layout/<file>` relative path:
 # hyp_to_gds --update-chiplet-file emits it automatically via relative_to(), and
@@ -2067,23 +2073,33 @@ def run_export(board, options, plugin_dir,
         landing_methods = resolve_die_methods(
             [] if options.cupillar_gds else effective_pad_locs,
             effective_die_conns, options.connection_type)
+        refused = []
         if landing_methods:
             try:
                 availability, query = query_connection_availability(
                     worker_py, plugin_dir, dataclasses.replace(
                         options,
-                        interconnect_pdk_root=interconnect_manifest.root))
+                        interconnect_pdk_root=interconnect_manifest.root),
+                    cancel_event=cancel_event)
             except ConnectionAvailabilityError as exc:
+                if cancel_event is not None and cancel_event.is_set():
+                    _log("Cancelled during the connection methods check.")
+                    return ExportResult(cancelled=True)
                 message = "Cannot check the connection methods: %s" % exc
                 _log(message)
                 return ExportResult(error=message)
             _log("$ " + query)
             refused = refused_landings(availability, landing_methods)
-            if refused:
-                message = "Cannot draw the landing of %s" % "; ".join(
-                    "%s (%s): %s" % entry for entry in refused)
-                _log(message)
-                return ExportResult(error=message)
+        # A Cancel during the checks above stops here, before anything is
+        # staged in the output dir, and before a refusal it would mislabel.
+        if cancel_event is not None and cancel_event.is_set():
+            _log("Cancelled before the worker started.")
+            return ExportResult(cancelled=True)
+        if refused:
+            message = "Cannot draw the landing of %s" % "; ".join(
+                "%s (%s): %s" % entry for entry in refused)
+            _log(message)
+            return ExportResult(error=message)
 
         # All pre-worker validation passed: stage the intermediate into the
         # output dir now, as a sibling of the canonical .chiplet that hyp_to_gds
@@ -2344,11 +2360,11 @@ def run_export(board, options, plugin_dir,
                 _log("Warning: could not record .chiplet content digest: %s"
                      % exc)
 
-        # The worker writes <board>_cupillar_drc.json next to the interposer
-        # GDS (now under layout/) when a cupillar stack drives pillar
-        # generation. Surface it only if it was actually produced this run,
-        # and tuck it under reports/ so the output-dir root keeps just the
-        # .chiplet and the MANIFEST.
+        # The worker writes <board>_cupillar_drc.json, the landing DRC of
+        # every connection method, next to the interposer GDS (now under
+        # layout/) when it draws landings. Surface it only if it was actually
+        # produced this run, and tuck it under reports/ so the output-dir root
+        # keeps just the .chiplet and the MANIFEST.
         drc_report = ""
         cupillar_flat = layout_path(options.output_dir,
                                     "%s_cupillar_drc.json" % board_name)
@@ -2361,7 +2377,7 @@ def run_export(board, options, plugin_dir,
                 shutil.move(cupillar_flat, cupillar_dst)
                 drc_report = cupillar_dst
             except OSError as exc:
-                _log("Warning: could not move cu-pillar DRC into reports/: %s"
+                _log("Warning: could not move landing DRC into reports/: %s"
                      % exc)
                 drc_report = cupillar_flat
 

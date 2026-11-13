@@ -161,6 +161,55 @@ def _muted(parent, text="", shrinkable=False):
     return label
 
 
+class _MethodAvailability:
+    """What the worker's connection_methods.py said for one (worker,
+    interposer root, interconnect root) key, and its log text until logged.
+
+    A new key starts with nothing marked, and its answer is logged once even
+    when the text matches the answer for the key before it. A key asked
+    again while its first query runs takes the first answer only.
+    """
+
+    def __init__(self):
+        self.key = None
+        self.reasons = {}
+        self._unlogged = ""
+        self._answered = False
+
+    def ask(self, key):
+        """Start over for ``key``; False when it is the key already asked."""
+        if key == self.key:
+            return False
+        self.key, self.reasons, self._unlogged = key, {}, ""
+        self._answered = False
+        return True
+
+    def take(self, key, answer):
+        """Record the answer, a (reasons, shown) pair or the
+        ConnectionAvailabilityError; False when ``key`` is no longer asked."""
+        if key != self.key or self._answered:
+            return False
+        self._answered = True
+        if isinstance(answer, ConnectionAvailabilityError):
+            self._unlogged = ("WARNING: method availability unknown, checked "
+                              "again at Run: %s" % answer)
+        else:
+            self.reasons, shown = answer
+            self._unlogged = "\n".join(
+                ["$ " + shown] + ["Unavailable: %s" % reason for reason
+                                  in self.reasons.values() if reason])
+        return True
+
+    def reason(self, method_id):
+        """Why the worker refuses ``method_id``, or None."""
+        return self.reasons.get(method_id)
+
+    def unlogged(self):
+        """The answer's log text the first time, "" after that."""
+        text, self._unlogged = self._unlogged, ""
+        return text
+
+
 class ChipletExportDialog(wx.Dialog):
     """Single-button chiplet export dialog."""
 
@@ -182,13 +231,9 @@ class ChipletExportDialog(wx.Dialog):
         self._catalogue_reported_error = ""
         self._catalogue_warning = ""
         self._catalogue_reported_warning = ""
-        # What the worker's connection_methods.py said for the (worker,
-        # interposer root, interconnect root) in _availability_key, and the
-        # log text of that answer; the log repeats it only when it changes.
-        self._conn_availability = {}
-        self._availability_key = None
-        self._availability_report = ""
-        self._availability_reported = ""
+        # What the worker's connection_methods.py said for the current
+        # worker and roots.
+        self._availability = _MethodAvailability()
         # The (blocker, warning) the status line last showed.
         self._shown_state = ("", False)
         # Set when the dialog is closing so a late wx.CallAfter from the worker
@@ -704,11 +749,8 @@ class ChipletExportDialog(wx.Dialog):
                                                     board=self._board)
         key = (worker, self._interposer_root_ctrl.GetPath() or "",
                interconnect_root or "")
-        if key == self._availability_key:
+        if not self._availability.ask(key):
             return
-        self._availability_key = key
-        self._conn_availability = {}
-        self._availability_report = ""
         # The field is read as typed: only a path that can run is asked.
         if worker and _is_executable(Path(worker)):
             _in_background(self._fetch_availability, key)
@@ -727,17 +769,8 @@ class ChipletExportDialog(wx.Dialog):
 
     def _apply_availability(self, key, answer):
         """Mark the methods the worker refuses, on the UI thread."""
-        if self._closing or key != self._availability_key:
+        if self._closing or not self._availability.take(key, answer):
             return  # closing, or a newer worker and root pair was asked
-        if isinstance(answer, ConnectionAvailabilityError):
-            self._availability_report = (
-                "WARNING: method availability unknown, checked again at "
-                "Run: %s" % answer)
-        else:
-            self._conn_availability, shown = answer
-            self._availability_report = "\n".join(
-                ["$ " + shown] + ["Unavailable: %s" % reason for reason
-                                  in self._conn_availability.values() if reason])
         index = self._conn_ctrl.GetSelection()
         self._conn_labels = self._catalogue_labels()
         self._conn_ctrl.Set(self._conn_labels)
@@ -766,7 +799,7 @@ class ChipletExportDialog(wx.Dialog):
         refused there.
         """
         default, die_conns = self._selected_connections()
-        refused = refused_landings(self._conn_availability, resolve_die_methods(
+        refused = refused_landings(self._availability.reasons, resolve_die_methods(
             list(self._die_conn_ctrls), die_conns, default))
         return "; ".join("%s uses %s, which cannot be drawn" % (ref, method)
                          for ref, method, _reason in refused)
@@ -818,10 +851,11 @@ class ChipletExportDialog(wx.Dialog):
         self._catalogue_reported_error = self._catalogue_error
         self._catalogue_reported_warning = (
             self._catalogue_warning if valid else "")
-        if valid and self._availability_report != self._availability_reported:
-            if self._availability_report:
-                self._append_log(self._availability_report)
-            self._availability_reported = self._availability_report
+        # While the catalogue is refused the answer waits, and is logged
+        # once it recovers.
+        report = self._availability.unlogged() if valid else ""
+        if report:
+            self._append_log(report)
         self._sync_run_state()
 
     def _conn_label_for(self, method_id):
@@ -829,7 +863,7 @@ class ChipletExportDialog(wx.Dialog):
         marked when the worker cannot draw its landing."""
         label = format_connection_label(method_id,
                                         self._conn_specs.get(method_id))
-        if self._conn_availability.get(method_id):
+        if self._availability.reason(method_id):
             label += " (unavailable)"
         return label
 
@@ -840,7 +874,7 @@ class ChipletExportDialog(wx.Dialog):
         if not method_id:
             return ("No assembly-wide default: each die keeps the method in "
                     "its own CONNECTION field.")
-        reason = self._conn_availability.get(method_id)
+        reason = self._availability.reason(method_id)
         if reason:
             return "Unavailable: %s" % reason
         return describe_connection_method(method_id,
@@ -1303,7 +1337,7 @@ class ChipletExportDialog(wx.Dialog):
             for label, path in (("chiplet", result.chiplet_path),
                                 ("interposer GDS", result.interposer_gds_path),
                                 ("complete GDS", result.complete_gds_path),
-                                ("cu-pillar DRC report", result.cupillar_drc_path),
+                                ("landing DRC report", result.cupillar_drc_path),
                                 ("Hyperlynx (.hyp)", result.hyp_path)):
                 if path:
                     self._append_log("Wrote %s: %s" % (label, path))
