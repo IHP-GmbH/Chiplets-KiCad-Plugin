@@ -895,6 +895,21 @@ def test_a_solder_bump_die_lands_on_the_solder_bump_pad(
     assert "Table 6.1" not in printed.out + printed.err
 
 
+def test_a_landing_names_its_pad_cell():
+    """No default pad cell: a call that does not name it would check the
+    Cu-pillar cell's cni while the generator draws another anchor's."""
+    class Generator:
+        def add_device_bumps(self, *args):
+            raise AssertionError("drew without a pad cell")
+
+    with pytest.raises(TypeError, match="pcell"):
+        h._add_device_pillars(SimpleNamespace(), Generator(), "U1",
+                              [], 44.0)
+    with pytest.raises(TypeError):
+        h._add_device_pillars(SimpleNamespace(), Generator(), "U1",
+                              [], 44.0, "SolderBumpPad")
+
+
 def test_a_method_without_fab_params_refuses_the_export(
         tmp_path, capsys, monkeypatch):
     use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")

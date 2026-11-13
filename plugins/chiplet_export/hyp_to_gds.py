@@ -5652,8 +5652,7 @@ def _import_bump_mirror():
 
 @_intm4tm2_scope()
 def _add_device_pillars(bm, pillar_gen, ref: str, bumps,
-                        body_diameter_um: float,
-                        pcell: str = "CuPillarPad") -> int:
+                        body_diameter_um: float, *, pcell: str) -> int:
     """Draw one device's landings with bump_mirror, whose pad geometry is
     the IntM4TM2 PCell ``pcell`` the generator was built for. Returns the
     number of pads placed."""
@@ -6626,7 +6625,7 @@ def convert_hyp_to_gds(
                 device_reports[dev_ref] = dev_report
                 total_pillars += _add_device_pillars(
                     bm, pillar_gen, dev_ref, resolved, body_diameter,
-                    method_cells[method].pcell)
+                    pcell=method_cells[method].pcell)
                 # Record the as-drawn centers for the pillar manifest: the
                 # exact positions add_device_bumps just placed (resolved is
                 # index-aligned with the pre-resolve bumps list; the 0.01 um
