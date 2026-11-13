@@ -4,9 +4,10 @@ Asynchronous subprocess runner for the chiplet export pipeline.
 
 Wraps ``subprocess.Popen`` with two reader threads so stdout and
 stderr stream line-by-line into caller-provided callbacks. The runner
-honours a ``threading.Event`` for cancel: when set, the process gets
-SIGTERM, and if it has not exited after a brief grace period it gets
-SIGKILL.
+honours a ``threading.Event`` for cancel, and an optional timeout: when
+either fires, the process gets SIGTERM, and if it has not exited after a
+brief grace period it gets SIGKILL. The child's stdin is /dev/null; no
+pipeline command reads it.
 
 Pure stdlib; importable on any Python with no KiCad or wx dependency,
 so the test suite runs with stock pytest.
@@ -35,6 +36,7 @@ class RunResult:
     stdout: str = ""
     stderr: str = ""
     cancelled: bool = False
+    timed_out: bool = False
 
 
 def _pump(stream, sink, line_queue):
@@ -96,7 +98,7 @@ def _terminate(proc):
 
 
 def run_async(cmd, on_stdout=None, on_stderr=None, cancel_event=None,
-              env=None, cwd=None):
+              env=None, cwd=None, timeout=None):
     """Spawn `cmd`, streaming stdout/stderr until completion or cancel.
 
     Args:
@@ -108,13 +110,17 @@ def run_async(cmd, on_stdout=None, on_stderr=None, cancel_event=None,
             run, the process is terminated.
         env: Optional environment dict passed to ``Popen``.
         cwd: Optional working directory for the subprocess.
+        timeout: Optional seconds. A process still running after that
+            long is terminated.
 
     Returns:
         ``RunResult`` with exit code, captured streams, and whether
-        cancellation triggered termination.
+        cancellation or the timeout triggered termination.
     """
+    deadline = None if timeout is None else time.monotonic() + timeout
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
@@ -146,12 +152,17 @@ def run_async(cmd, on_stdout=None, on_stderr=None, cancel_event=None,
 
     # Block in the kernel on proc.wait (cancel-responsive via the short
     # timeout) instead of spinning on a sleep poll.
-    cancelled = False
+    cancelled = timed_out = False
     try:
         while True:
             if (cancel_event is not None and cancel_event.is_set()
                     and proc.poll() is None):
                 cancelled = True
+                _terminate(proc)
+                break
+            if (deadline is not None and time.monotonic() >= deadline
+                    and proc.poll() is None):
+                timed_out = True
                 _terminate(proc)
                 break
             try:
@@ -182,4 +193,5 @@ def run_async(cmd, on_stdout=None, on_stderr=None, cancel_event=None,
         stdout="".join(stdout_lines),
         stderr="".join(stderr_lines),
         cancelled=cancelled,
+        timed_out=timed_out,
     )
