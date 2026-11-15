@@ -201,7 +201,7 @@ def main() -> int:
             f"X centroid mismatch: |dx| = {abs(dx):.3f} um > "
             f"tolerance {args.centroid_tolerance_um:.3f} um. Probable cause: "
             f"systematic X offset between die placement and cu-pillar "
-            f"placement (check kicad_pcb_to_iopads.py center_x_dbu output "
+            f"placement (check the io pad manifest's x_um values "
             f"or bump_mirror compute_bump_locations math).")
 
     if failures:

@@ -26,10 +26,10 @@ options:
   -o OUTPUT, --output OUTPUT
                         Output GDS file path (default: <input>.gds)
   -l LYP, --lyp LYP     KLayout LYP layer properties file (default: the
-                        interposer PDK's canonical intm4tm2.lyp via env/walk
-                        discovery; the .lyp belongs to the PDK, so set
-                        INTERPOSER_PDK_ROOT or pass this explicitly when no
-                        checkout resolves)
+                        layer_properties.lyp the interposer PDK's technology
+                        package names, via env/walk discovery; the .lyp
+                        belongs to the PDK, so set INTERPOSER_PDK_ROOT or pass
+                        this explicitly when no checkout resolves)
   -c CELL, --cell CELL  Top-level cell name (default: INTERPOSER)
   --tech-json JSON_FILE
                         Path to interposer_tech_default.json for PDK via
@@ -85,14 +85,20 @@ options:
                         .chiplet and the placed cell bbox as boundary (e.g.
                         U3). Each is logged by name. Their GDS must still
                         exist and have one top cell.
-  --io-pads JSON_FILE   Sidecar JSON with external I/O pad locations in
-                        planner net names (never inverted here; produced by
-                        gds_to_kicad/io_pads/kicad_pcb_to_iopads.py). Each
-                        entry is rendered in the interposer GDS based on its
-                        io_class field (wire_bond now; flipped_bump and
-                        tsv_bump reserved). When combined with --update-
-                        chiplet-file, the placed pads are also injected under
-                        the interposer component.
+  --io-pads JSON_FILE   The io pad manifest of chiplet-spec's
+                        io_pads.schema.json, as the KiCad plugin export writes
+                        it: external I/O pad locations in planner net names
+                        (never inverted here). Its schema, version and frame
+                        are required: schema chiplet-io-pad-manifest, version
+                        1.x, frame board_absolute_ynegated_um. A file without
+                        them (a bare pad list), another frame
+                        (gds_bbox_corner_um is never converted), another major
+                        version, or an unreadable file exits 1 before anything
+                        is written. Each entry is rendered in the interposer
+                        GDS based on its io_class field (wire_bond now;
+                        flipped_bump and tsv_bump reserved). When combined
+                        with --update-chiplet-file, the placed pads are also
+                        injected under the interposer component.
   --cmim-devices JSON_FILE
                         Sidecar JSON with cap_cmim footprint parameters for
                         IntM4TM2 PCell placement.

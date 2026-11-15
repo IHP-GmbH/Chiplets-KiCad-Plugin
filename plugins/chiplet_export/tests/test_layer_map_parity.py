@@ -88,9 +88,14 @@ def test_lyp_selection_uses_old_worker_path_and_same_bytes(old_worker, tmp_path,
     lyp.write_bytes(REFERENCE_LYP.read_bytes())
     tooling = root / "libs.tech/klayout/python"
     tooling.mkdir()
+    # The old worker's marker; the shared reader does not look for it.
     (tooling / "bump_mirror.py").write_text("# discovery marker\n")
-    # The IntM4TM2 tree marker; the old worker did not look for it.
-    (root / "libs.tech/intm4tm2_stack.json").write_text("{}\n")
+    # The PDK's own technology package manifest, which names the sheet; the
+    # old worker did not look for it.
+    manifest = root / "libs.tech/adk/technology.json"
+    manifest.parent.mkdir()
+    manifest.write_bytes((FIXTURES / "intm4tm2_pdk/libs.tech/adk/technology.json")
+                         .read_bytes())
     worker = str(tmp_path / "chiplet_kicad_plugin/hyp_to_gds.py")
     old_worker.__file__ = worker
     if selection == "walk":
@@ -106,10 +111,10 @@ def test_lyp_selection_uses_old_worker_path_and_same_bytes(old_worker, tmp_path,
     old_path = old_worker._expand_path_vars(
         override if override is not None else old_worker._find_default_lyp())
     if selection == "invalid-env":
-        # The one departure: the old worker walked past a set root that is not
-        # an IntM4TM2 tree, and the shared reader refuses it.
+        # The one departure: the old worker walked past a set root that holds
+        # no technology package, and the shared reader refuses it.
         assert old_path == str(lyp)
-        with pytest.raises(shared.CarrierRootRefused):
+        with pytest.raises(shared.CarrierPackageRefused):
             shared.resolve_lyp_path(override, start=worker)
         return
     new_path = shared.resolve_lyp_path(override, start=worker)

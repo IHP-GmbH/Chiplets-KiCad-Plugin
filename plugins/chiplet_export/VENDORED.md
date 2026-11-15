@@ -108,6 +108,15 @@ evidence that the copy drifted. The fixture is an oracle: it is also compared ag
 checkout's working tree, so when the oracle moves upstream this repo goes red and has to
 decide, which is the whole reason the fixture is consumed here instead of transcribed.
 
+**Two rules in `layer_map.py`, copied, not a file**
+`_unportable` is chiplet-spec's `technology_package._unportable` and `_contract_version` its
+`_parse_contract_version` (`reference/python/chiplet_format_io`), at the pin
+`vendor/chiplet_format_io.SOURCE` names. They are copied rather than imported because
+`layer_map` loads in the KiCad process, which has neither the vendored reader's YAML nor
+jsonschema. Gated by `tests/test_carrier_package.py`, which runs both on a list of inputs
+against the checkout and requires the same answers; when the pin moves, the rules are copied
+again with it.
+
 ## interposer-pnr
 
 **`vendor/round_trip_names.py`**

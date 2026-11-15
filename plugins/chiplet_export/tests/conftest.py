@@ -16,6 +16,7 @@ which is the package name. Two shims make the absolute imports resolve:
    ``chiplet_export`` in ``sys.modules`` before any test module imports.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -37,23 +38,70 @@ if (_ROOT.name != "chiplet_export"
     sys.modules["chiplet_export"] = _pkg
 
 
-# An interposer PDK root holding only the stack descriptor, copied verbatim
-# from the PDK (fixtures/intm4tm2_pdk/README.md), so a test reads the mount
-# plane from a known file and never from the host's PDK.
+# An interposer PDK root holding only the technology package manifest and
+# the stack descriptor it names, both copied verbatim from the PDK
+# (fixtures/intm4tm2_pdk/README.md), so a test reads the mount plane from a
+# known file and never from the host's PDK.
 FIXTURE_PDK_ROOT = Path(__file__).resolve().parent / "fixtures" / "intm4tm2_pdk"
+PACKAGE_MANIFEST = FIXTURE_PDK_ROOT.joinpath("libs.tech", "adk", "technology.json")
 STACK_DESCRIPTOR = FIXTURE_PDK_ROOT / "libs.tech" / "intm4tm2_stack.json"
 
 
-def make_pdk_root(base, descriptor=STACK_DESCRIPTOR):
-    """An interposer PDK root holding ``descriptor`` as its stack descriptor,
-    the marker the discovery accepts it by, or none when it is None (a root
-    the discovery refuses as not an IntM4TM2 tree)."""
+def make_pdk_root(base, descriptor=STACK_DESCRIPTOR, manifest=PACKAGE_MANIFEST):
+    """An interposer PDK root holding ``manifest`` as its technology package
+    manifest, the marker the discovery accepts it by, and ``descriptor`` at
+    the stack path that manifest names (the fixture's when there is none).
+    Either is left out when None (no manifest: a root the discovery
+    refuses)."""
     root = Path(base) / "intm4tm2_pdk"
     (root / "libs.tech" / "klayout").mkdir(parents=True, exist_ok=True)
+    stack = json.loads(PACKAGE_MANIFEST.read_text(encoding="utf-8"))
+    if manifest is not None:
+        (root / "libs.tech" / "adk").mkdir(exist_ok=True)
+        shutil.copyfile(str(manifest),
+                        str(root / "libs.tech" / "adk" / "technology.json"))
+        stack = json.loads(Path(manifest).read_text(encoding="utf-8"))
     if descriptor is not None:
-        shutil.copyfile(str(descriptor),
-                        str(root / "libs.tech" / "intm4tm2_stack.json"))
+        target = root.joinpath(*stack["stack"]["path"].split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(descriptor), str(target))
     return root
+
+
+def write_carrier_package(root, *, ident="intm4tm2",
+                          lyp="libs.tech/klayout/tech/carrier.lyp",
+                          stack="libs.tech/carrier_stack.json"):
+    """A schema-valid technology package manifest at ``root``: the carrier
+    role, ``ident``, and the member paths ``lyp`` and ``stack`` as given
+    (the member files are the caller's). Returns the manifest."""
+    manifest = Path(root).joinpath("libs.tech", "adk", "technology.json")
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({
+        "schema": "technology-package", "schema_version": "1.0",
+        "id": ident, "roles": ["carrier"], "revision": "test",
+        "layer_properties": {"lyp": lyp,
+                             "lyt": "libs.tech/klayout/tech/carrier.lyt"},
+        "stack": {"path": stack},
+    }), encoding="utf-8")
+    return manifest
+
+
+def write_io_pads(path, pads, **envelope):
+    """An io pad manifest at ``path`` as the export writes it: the
+    envelope hyp_to_gds requires, any of its keys replaced by ``envelope``
+    (None drops it), then ``pads``. Returns the path."""
+    from chiplet_export import io_pads_manifest
+    data = {"schema": io_pads_manifest.SCHEMA,
+            "version": io_pads_manifest.VERSION,
+            "frame": io_pads_manifest.FRAME}
+    for key, value in envelope.items():
+        if value is None:
+            data.pop(key, None)
+        else:
+            data[key] = value
+    data["io_pads"] = pads
+    Path(path).write_text(json.dumps(data), encoding="utf-8")
+    return Path(path)
 
 
 @pytest.fixture

@@ -6,10 +6,11 @@ carrier exports use strict lookup to refuse ambiguous drawing definitions;
 legacy callers retain the historical last-definition behavior.
 """
 
+import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
-from typing import Dict, Optional, Tuple
+from typing import Dict, NamedTuple, Optional, Tuple
 import xml.etree.ElementTree as ET
 
 
@@ -17,24 +18,17 @@ class LayerMapError(ValueError):
     """The selected layer source cannot establish an unambiguous mapping."""
 
 
-class CarrierRootRefused(LayerMapError):
-    """``$INTERPOSER_PDK_ROOT`` is set and is not an IntM4TM2 PDK tree.
+class CarrierPackageRefused(LayerMapError):
+    """The carrier's technology package cannot give what the export reads.
 
-    The upward walk used to stand in for such a root, so a run drew with the
-    sibling IntM4TM2 checkout whatever the variable named. The message leads
-    with ``CARRIER_UNSUPPORTED_ROOT``, of the id family packaging-flow and
-    chiplet-spec refuse another carrier with, and names the marker looked for
-    and the path given. Temporary: it goes when a carrier root is validated by
-    its technology package.
+    The message leads with the id chiplet-spec's package validator gives the
+    same fault (PACKAGE_MANIFEST_MISSING, PACKAGE_MEMBER_PATH, ...), so a log
+    reader keys on one vocabulary whichever tool refused.
     """
 
-    def __init__(self, selected, marker):
-        super().__init__(
-            "CARRIER_UNSUPPORTED_ROOT: $INTERPOSER_PDK_ROOT is %s, which has no "
-            "%s, the marker of an IntM4TM2 PDK tree; IntM4TM2 is the only "
-            "carrier modelled until carriers are read from their technology "
-            "package. Point the variable at an IntM4TM2 checkout, or "
-            "unset it to use the sibling checkout." % (selected, marker))
+    def __init__(self, message_id, text):
+        super().__init__("%s: %s" % (message_id, text))
+        self.message_id = message_id
 
 
 class LayerMap:
@@ -130,12 +124,21 @@ class LayerMap:
         return f"LayerMap({len(self.layers)} layers from LYP)"
 
 
+#: A carrier technology package's manifest, relative to its root: the marker
+#: of a carrier root and the one file that names the package's members
+#: (chiplet-spec technology_package.schema.json).
+PACKAGE_MANIFEST = ("libs.tech", "adk", "technology.json")
+PACKAGE_SCHEMA = "technology-package"
+#: The package major this export reads; any minor of it is read.
+PACKAGE_MAJOR = 1
+#: The one carrier the export draws (read_carrier_package).
+CARRIER_TECHNOLOGY = "intm4tm2"
+
 PATH_VAR_MARKERS = {
-    # The stack descriptor, not libs.tech/klayout/: every KLayout PDK tree has
-    # that directory, the SG13G2 die PDK included, so it cannot tell an
-    # IntM4TM2 tree from another.
-    "INTERPOSER_PDK_ROOT": (("interposer", "OpenIntM4TM2"),
-                            ("libs.tech", "intm4tm2_stack.json")),
+    # The technology package manifest, not libs.tech/klayout/: every KLayout
+    # PDK tree has that directory, the SG13G2 die PDK included, so it cannot
+    # tell a carrier from another tree.
+    "INTERPOSER_PDK_ROOT": (("interposer", "OpenIntM4TM2"), PACKAGE_MANIFEST),
     "GDS_TO_KICAD_ROOT": (("gds_to_kicad", "gds-to-kicad"), ("pdks",)),
     "ADK_ROOT": (("adk", "ADK"), ("klayout", "drc")),
     "INTERCONNECT_PDK_ROOT": (("interconnect_pdk",
@@ -152,10 +155,18 @@ def discover_path_var(name: str, *, env=None, start=None) -> Optional[str]:
     """Resolve an ecosystem-root variable: env first, then sibling walk.
 
     A set-but-invalid environment value (marker subpath missing) falls
-    through to the walk, except ``INTERPOSER_PDK_ROOT``, which is refused
-    (:class:`CarrierRootRefused`).
+    through to the walk. ``INTERPOSER_PDK_ROOT`` is the root of the carrier
+    package :func:`find_carrier_package` resolves, so it is refused
+    (:class:`CarrierPackageRefused`) where that refuses.
     Returns the root as a string, or None when unresolvable.
     """
+    if name == "INTERPOSER_PDK_ROOT":
+        package = find_carrier_package(env=env, start=start)
+        return None if package is None else package.root
+    return _discover_root(name, env=env, start=start)
+
+
+def _discover_root(name, *, env, start) -> Optional[str]:
     marker = PATH_VAR_MARKERS.get(name)
     if marker is None:
         # Only the known ecosystem-root variables are expandable. An unknown
@@ -165,8 +176,6 @@ def discover_path_var(name: str, *, env=None, start=None) -> Optional[str]:
     selected = (os.environ if env is None else env).get(name)
     if selected and Path(selected).joinpath(*marker[1]).exists():
         return selected
-    if selected and name == "INTERPOSER_PDK_ROOT":
-        raise CarrierRootRefused(selected, Path(*marker[1]).as_posix())
     dirnames, sub = marker
     here = Path(start or __file__).resolve()
     for base in here.parents:
@@ -175,7 +184,6 @@ def discover_path_var(name: str, *, env=None, start=None) -> Optional[str]:
             if cand.joinpath(*sub).exists():
                 return str(cand)
     return None
-
 
 def expand_path_vars(path: Optional[str], *, env=None, start=None,
                      discover=None) -> Optional[str]:
@@ -213,43 +221,223 @@ def expand_path_vars(path: Optional[str], *, env=None, start=None,
     return result
 
 
+# The member path and version rules below are chiplet-spec's
+# (reference/python/chiplet_format_io: technology_package._unportable and
+# _parse_contract_version), copied so this reader refuses what the package
+# validator refuses and nothing else; tests/test_carrier_package.py holds
+# them equal when a chiplet-spec checkout is at hand.
+_DRIVE = re.compile(r"^[A-Za-z]:")
+
+
+def _unportable(raw: str) -> Optional[str]:
+    """Why a member path would not travel with the package, as written, or None."""
+    if "\0" in raw:
+        return "carries a NUL byte, which no file system takes"
+    if "\\" in raw:
+        return "uses a backslash; member paths use forward slashes"
+    if "$" in raw or "%" in raw:
+        return "carries a variable; member paths are literal"
+    if raw.startswith("~"):
+        return "starts at a home folder; member paths are relative to the package root"
+    if _DRIVE.match(raw):
+        return "names a drive; member paths are relative to the package root"
+    path = PurePosixPath(raw)
+    if path.is_absolute():
+        return "is absolute; member paths are relative to the package root"
+    if ".." in path.parts:
+        return "climbs out of the package root"
+    return None
+
+
+def _contract_version(value) -> Optional[Tuple[int, int]]:
+    """``(major, minor)`` of a ``"MAJOR.MINOR"`` or ``"MAJOR.MINOR.PATCH"``
+    string of ASCII digits, or None."""
+    if not isinstance(value, str):
+        return None
+    parts = value.split(".")
+    if len(parts) not in (2, 3):
+        return None
+    if not all(part.isascii() and part.isdigit() for part in parts):
+        return None
+    return (int(parts[0]), int(parts[1]))
+
+
+class CarrierPackage(NamedTuple):
+    """A carrier technology package the export draws: its root and its
+    manifest, read once by :func:`read_carrier_package`."""
+    root: str
+    manifest: dict
+
+    @property
+    def id(self) -> str:
+        return self.manifest["id"]
+
+    def member(self, *keys) -> str:
+        """The file the manifest names at ``keys`` (``"stack", "path"``);
+        CarrierPackageRefused if the member is absent, its path would not
+        travel with the package, or it names no file.
+        """
+        value = self.manifest
+        for key in keys:
+            value = value.get(key) if isinstance(value, dict) else None
+        where = "%s in %s under %s" % (".".join(keys),
+                                       "/".join(PACKAGE_MANIFEST), self.root)
+        if not isinstance(value, str) or not value:
+            raise CarrierPackageRefused("PACKAGE_MEMBER_ABSENT",
+                                        "no %s" % where)
+        reason = _unportable(value)
+        if reason:
+            raise CarrierPackageRefused(
+                "PACKAGE_MEMBER_PATH", "%s is %r, which %s"
+                % (where, value, reason))
+        path = os.path.join(self.root, *PurePosixPath(value).parts)
+        if not _inside(self.root, path):
+            raise CarrierPackageRefused(
+                "PACKAGE_MEMBER_PATH", "%s is %r, which leads out of the "
+                "package root through a link" % (where, value))
+        if not os.path.isfile(path):
+            raise CarrierPackageRefused(
+                "PACKAGE_MEMBER_MISSING", "%s is %r, which names no file"
+                % (where, value))
+        return path
+
+
+def read_carrier_package(root) -> CarrierPackage:
+    """The technology package at ``root``; CarrierPackageRefused if it is not
+    one the export draws.
+
+    Checks what the export relies on, not the whole schema (chiplet-spec's
+    validator does that): a JSON object inside the root, of schema
+    ``technology-package`` major 1, with the carrier role and an id, and
+    that id IntM4TM2's: the sheet and stack are the package's, but pads and
+    connections still land on IntM4TM2's TopMetal2, so another carrier is
+    refused with ``CARRIER_UNSUPPORTED_TECHNOLOGY``, the id packaging-flow
+    and chiplet-spec refuse it with. That refusal goes when the layer a
+    connection lands on is read from the package.
+    """
+    root = str(root)
+    where = "/".join(PACKAGE_MANIFEST)
+    path = Path(root).joinpath(*PACKAGE_MANIFEST)
+    if not path.is_file():
+        raise CarrierPackageRefused(
+            "PACKAGE_MANIFEST_MISSING", "%s has no %s" % (root, where))
+    if not _inside(root, path):
+        raise CarrierPackageRefused(
+            "PACKAGE_MANIFEST_MISSING",
+            "%s under %s leads out of the root through a link" % (where, root))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise CarrierPackageRefused(
+            "PACKAGE_MANIFEST_UNREADABLE", "%s: %s" % (path, exc)) from None
+    if not isinstance(data, dict):
+        raise CarrierPackageRefused(
+            "PACKAGE_MANIFEST_UNREADABLE", "%s is not a JSON object" % path)
+    version = _contract_version(data.get("schema_version"))
+    if version is None or version[0] != PACKAGE_MAJOR:
+        raise CarrierPackageRefused(
+            "PACKAGE_SCHEMA_VERSION",
+            "%s is version %r; this export reads %s %d.x"
+            % (path, data.get("schema_version"), PACKAGE_SCHEMA,
+               PACKAGE_MAJOR))
+    if data.get("schema") != PACKAGE_SCHEMA:
+        raise CarrierPackageRefused(
+            "PACKAGE_SCHEMA_INVALID", "%s is schema %r, not %r"
+            % (path, data.get("schema"), PACKAGE_SCHEMA))
+    roles = data.get("roles")
+    if not isinstance(roles, list) or not roles \
+            or not all(isinstance(role, str) for role in roles):
+        raise CarrierPackageRefused(
+            "PACKAGE_SCHEMA_INVALID", "%s has roles %r" % (path, roles))
+    if set(roles) != {"carrier"}:
+        raise CarrierPackageRefused(
+            "PACKAGE_ROLE_NOT_MODELLED",
+            "%s has roles %r; carrier is the only role modelled"
+            % (path, roles))
+    if not isinstance(data.get("id"), str) or not data["id"]:
+        raise CarrierPackageRefused(
+            "PACKAGE_SCHEMA_INVALID", "%s has no id" % path)
+    if data["id"] != CARRIER_TECHNOLOGY:
+        raise CarrierPackageRefused(
+            "CARRIER_UNSUPPORTED_TECHNOLOGY",
+            "%s is the package %r; IntM4TM2 (%r) is the only carrier the "
+            "export draws until the layer a connection lands on is read from "
+            "the technology package" % (path, data["id"], CARRIER_TECHNOLOGY))
+    return CarrierPackage(root, data)
+
+
+def find_carrier_package(*, env=None, start=None) -> Optional[CarrierPackage]:
+    """The carrier package at $INTERPOSER_PDK_ROOT, else at the sibling
+    checkout; None when neither is there.
+
+    A set variable that holds no package is refused, not passed over for
+    the sibling: the export would draw with a carrier other than the one
+    named. A package found either way is refused when the export does not
+    draw it (:func:`read_carrier_package`).
+    """
+    selected = (os.environ if env is None else env).get("INTERPOSER_PDK_ROOT")
+    if selected and not Path(selected).joinpath(*PACKAGE_MANIFEST).is_file():
+        raise CarrierPackageRefused(
+            "PACKAGE_MANIFEST_MISSING",
+            "$INTERPOSER_PDK_ROOT is %s, which has no %s, the manifest of a "
+            "carrier technology package (OpenIntM4TM2 has one from v2026.11). "
+            "Point the variable at a package root, or unset it to use the "
+            "sibling checkout." % (selected, "/".join(PACKAGE_MANIFEST)))
+    root = _discover_root("INTERPOSER_PDK_ROOT", env=env, start=start)
+    return None if root is None else read_carrier_package(root)
+
+
+def _inside(root, path) -> bool:
+    real_root = os.path.realpath(root)
+    try:
+        return os.path.commonpath([real_root,
+                                   os.path.realpath(path)]) == real_root
+    except ValueError:  # Windows: the two are on different drives.
+        return False
+
+
 def find_default_lyp(*, env=None, start=None) -> str:
     """Default layer-properties file for the interposer GDS.
 
-    Resolves the interposer PDK's canonical
-    ``libs.tech/klayout/tech/intm4tm2.lyp`` via env/walk discovery. The
-    file belongs to the interposer PDK, not the plugin, so there is no
-    vendored copy: when no checkout resolves, return the unexpanded
-    ``${INTERPOSER_PDK_ROOT}`` form (mirrors _find_interposer_template) so
-    the error text points somewhere actionable instead of silently using a
-    stale bundled .lyp.
+    The ``layer_properties.lyp`` member of the carrier package. The file
+    belongs to the interposer PDK, not the plugin, so there is no vendored
+    copy: when no package resolves, return the unexpanded
+    ``${INTERPOSER_PDK_ROOT}`` form of the manifest that names it, which
+    :func:`expand_path_vars` then refuses with the variable to set.
     """
-    python_dir = find_interposer_pdk_python(env=env, start=start)
-    if python_dir is not None:
-        cand = python_dir.parent / "tech" / "intm4tm2.lyp"
-        if cand.is_file():
-            return str(cand)
-    return "${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp"
+    package = find_carrier_package(env=env, start=start)
+    if package is None:
+        return "${INTERPOSER_PDK_ROOT}/" + "/".join(PACKAGE_MANIFEST)
+    return package.member("layer_properties", "lyp")
+
+
+def find_interposer_template(*, env=None, start=None) -> Optional[str]:
+    """The interposer's KiCad template board, the package's
+    ``kicad_template.board``; None when no package resolves or it names no
+    usable board. Only an error text reads it.
+    """
+    package = find_carrier_package(env=env, start=start)
+    if package is None:
+        return None
+    try:
+        return package.member("kicad_template", "board")
+    except CarrierPackageRefused:
+        return None
 
 
 def find_interposer_pdk_python(*, env=None, start=None):
-    """Locate the interposer PDK's python tooling dir (bump_mirror.py).
+    """Locate the interposer PDK's KLayout python dir (its PCell libraries
+    and landing tooling).
 
-    The root is discover_path_var's: $INTERPOSER_PDK_ROOT first, refused
-    when it is not an IntM4TM2 tree (:class:`CarrierRootRefused`), then the
-    sibling walk. A root without bump_mirror.py is refused too.
-    Returns the directory as a Path, or None when no root resolves.
+    The root is :func:`find_carrier_package`'s. Whether the directory holds
+    a given module is the importer's question. Returns the directory as a
+    Path, or None when no package resolves.
     """
-    root = discover_path_var("INTERPOSER_PDK_ROOT", env=env, start=start)
-    if root is None:
+    package = find_carrier_package(env=env, start=start)
+    if package is None:
         return None
-    python_dir = Path(root) / "libs.tech" / "klayout" / "python"
-    if not (python_dir / "bump_mirror.py").is_file():
-        raise LayerMapError(
-            "ERROR: the interposer PDK at %s is an IntM4TM2 tree without "
-            "libs.tech/klayout/python/bump_mirror.py, the tooling this plugin "
-            "draws pillars and pads with." % root)
-    return python_dir
+    return Path(package.root) / "libs.tech" / "klayout" / "python"
+
 
 def resolve_lyp_path(lyp_path=None, *, env=None, start=None):
     """Select/expand the worker's LYP once and return its absolute path.

@@ -987,6 +987,29 @@ def test_the_writer_exports_exactly_the_dies_the_preflight_names(
     assert io_pads == ["P1"]
 
 
+def test_the_writer_refuses_a_carrier_of_no_size_before_its_output(
+        tmp_path, monkeypatch):
+    """write_chiplet reads its carriers as the preflight does: one with no
+    size is refused, and no .chiplet is left behind."""
+    monkeypatch.setitem(sys.modules, "pcbnew", PAD_DOMAINS_PCBNEW)
+    from chiplet_export.writers import chiplet_writer
+    monkeypatch.setattr(chiplet_writer, "pcbnew", PAD_DOMAINS_PCBNEW)
+    monkeypatch.setattr(chiplet_writer, "validate_interconnect_ids",
+                        lambda **kw: None)
+    board = Mock(
+        Footprints=Mock(return_value=[
+            _writable_part("P1", {"IO_CLASS": "wire_bond",
+                                  "IO_PAD_SIZE_UM": "0x0"})]),
+        GetProperties=Mock(return_value={}),
+        GetProject=Mock(return_value=None),
+        GetFileName=Mock(return_value="design.kicad_pcb"),
+    )
+    output = tmp_path / "design.chiplet"
+    with pytest.raises(ValueError, match="P1 has no pad size"):
+        chiplet_writer.write_chiplet(board, output)
+    assert not output.exists()
+
+
 # --- 8. the wire-bond regeneration driver ------------------------------------
 
 def _regen_driver(monkeypatch, board):

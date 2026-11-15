@@ -64,19 +64,19 @@ try:
 except ImportError:  # Standalone worker script.
     import technology_overlay as _technology_overlay
 TechnologyRefused = _technology_overlay.TechnologyRefused
+try:
+    from . import io_pads_manifest as _io_pads_manifest
+    from . import vendored as _vendored
+except ImportError:  # Standalone worker script.
+    import io_pads_manifest as _io_pads_manifest
+    import vendored as _vendored
+IoPadsRefused = _io_pads_manifest.IoPadsRefused
 
 
 def _vendored_cfio():
-    """Import the vendored ``chiplet_format_io`` (the single guarded read/write
-    path for ``.chiplet``). Kept lazy and path-robust so this worker script
-    resolves it whether run as ``python hyp_to_gds.py`` or imported. Fixes in the
-    reader belong upstream in chiplet-spec and come back as a re-vendor; do not
-    edit ``vendor/chiplet_format_io`` in place."""
-    vendor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor")
-    if vendor not in sys.path:
-        sys.path.insert(0, vendor)
-    import chiplet_format_io as cfio
-    return cfio
+    """The vendored ``chiplet_format_io`` (the single guarded read/write path
+    for ``.chiplet``), as vendored.chiplet_format_io reaches it."""
+    return _vendored.chiplet_format_io()
 
 
 def _chiplet_merge():
@@ -845,12 +845,12 @@ def _si_num(value) -> float:
 
 # The interposer's die-attachment surface (BEOL top), in micrometers: the
 # plane dies mount on, in the interposer's local frame. It is the interposer
-# PDK's own value, read from its stack descriptor on every finalize and never
-# written from memory: a run that cannot read it is refused
-# (AttachFrameRefused). It is a distinct quantity from the interposer's
-# physical body thickness (dimensions.thickness), which comes from the KiCad
-# board stackup.
-ATTACH_FRAME_DESCRIPTOR = ("libs.tech", "intm4tm2_stack.json")
+# PDK's own value, read on every finalize from the stack file its technology
+# package names, and never written from memory: a run that cannot read it is
+# refused (AttachFrameRefused). It is a distinct quantity from the
+# interposer's physical body thickness (dimensions.thickness), which comes
+# from the KiCad board stackup.
+ATTACH_FRAME_MEMBER = ("stack", "path")
 ATTACH_FRAME_KEY = "beol.attachment_surface_z_um"
 
 
@@ -898,16 +898,24 @@ def read_attach_frame() -> AttachFrame:
     """The mount plane from the interposer PDK; AttachFrameRefused otherwise.
 
     The root comes from INTERPOSER_PDK_ROOT through the usual discovery
-    (environment, then a sibling checkout). There is no fallback value.
+    (environment, then a sibling checkout), and the file from its technology
+    package's stack member. There is no fallback value.
     """
-    where = "%s in %s" % (ATTACH_FRAME_KEY, "/".join(ATTACH_FRAME_DESCRIPTOR))
+    where = "%s in the file its technology package names at %s" % (
+        ATTACH_FRAME_KEY, ".".join(ATTACH_FRAME_MEMBER))
     root = _discover_path_var("INTERPOSER_PDK_ROOT")
     if not root:
         raise AttachFrameRefused(
-            "the interposer PDK was not found (set INTERPOSER_PDK_ROOT to an "
-            "OpenIntM4TM2 checkout); the mount plane is its %s and is not "
-            "written from memory" % where)
-    path = os.path.join(root, *ATTACH_FRAME_DESCRIPTOR)
+            "the interposer PDK was not found (set INTERPOSER_PDK_ROOT to the "
+            "root of a carrier technology package, which OpenIntM4TM2 has "
+            "from v2026.11); the mount plane is its %s and is not written "
+            "from memory" % where)
+    try:
+        path = _layer_map.read_carrier_package(root).member(
+            *ATTACH_FRAME_MEMBER)
+    except _layer_map.CarrierPackageRefused as exc:
+        raise AttachFrameRefused(
+            "cannot read the mount plane, the %s: %s" % (where, exc)) from None
     try:
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle, parse_float=Decimal)
@@ -3227,37 +3235,23 @@ class GDSGenerator:
               f"({size_x_um:g}x{size_y_um:g} um)")
         return cell
 
-    def add_io_pads(self, io_pads_json: str) -> List[Dict]:
-        """Place external I/O pads from a sidecar JSON.
+    def add_io_pads(self, pads: List[Dict]) -> List[Dict]:
+        """Place external I/O pads, the entries of an --io-pads manifest.
 
-        The JSON is produced by gds_to_kicad/io_pads/kicad_pcb_to_iopads.py.
-        Each entry has io_class, x_um, y_um, size_x_um, size_y_um already
-        in interposer-global GDS coordinates (Y-up, micrometers).
+        ``pads`` is what io_pads_manifest.read returned: the manifest the
+        KiCad export writes (write_io_pads_json), in the board frame. Each
+        entry has io_class, x_um, y_um, size_x_um, size_y_um in
+        interposer-global GDS coordinates (Y-up, micrometers).
 
         Returns the list of pads actually placed (skipping reserved/unknown
         io_classes), suitable for injection into the .chiplet file.
         """
-        pads_path = Path(io_pads_json)
-        if not pads_path.exists():
-            print(f"Warning: I/O pads file not found: {io_pads_json}",
-                  file=sys.stderr)
-            return []
-
-        try:
-            with open(pads_path, 'r') as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"Warning: could not read I/O pads file {io_pads_json}: "
-                  f"{exc}", file=sys.stderr)
-            return []
-        if not isinstance(data, dict):
-            print(f"Warning: I/O pads file {io_pads_json} is not a JSON "
-                  f"object; ignoring.", file=sys.stderr)
-            return []
-
-        pads = data.get('io_pads', [])
+        if isinstance(pads, (str, os.PathLike)):
+            # A path here would be iterated as characters, every one skipped.
+            raise TypeError("add_io_pads takes the manifest's entries; read "
+                            "the file with io_pads_manifest.read")
         if not pads:
-            print(f"  No io_pads found in {io_pads_json}")
+            print("  No io_pads in the manifest")
             return []
 
         group_cells: Dict[str, db.Cell] = {}
@@ -4371,8 +4365,8 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     # Per chiplet-system-spec/docs/coord_frame_contract.md
                     # sections 1 and 6.1: io_pads positions live in
                     # the same canonical GDS-bbox-corner frame as the
-                    # interposer they nest under. The JSON producer
-                    # (kicad_pcb_to_iopads.py) emits in HYP-absolute
+                    # interposer they nest under. The manifest is in the
+                    # board frame (io_pads_manifest.FRAME), HYP-absolute
                     # (1e5+ um values relative to the HYP file origin,
                     # which is the GDS-internal coord system since the
                     # interposer GDS is itself produced from HYP).
@@ -4872,21 +4866,11 @@ def _find_default_lyp() -> str:
 
 
 def _find_interposer_template() -> str:
-    """Best-effort path to the interposer KiCad template board.
-
-    Discovery mirrors _find_default_lyp: resolve INTERPOSER_PDK_ROOT
-    (environment -> sibling walk), then
-    ``libs.tech/kicad/interposer_template.kicad_pcb`` under it. Returns the
-    unexpanded ``${INTERPOSER_PDK_ROOT}`` form when no checkout resolves,
-    so error text still points somewhere actionable.
-    """
-    sub = ("libs.tech", "kicad", "interposer_template.kicad_pcb")
-    root = _discover_path_var("INTERPOSER_PDK_ROOT")
-    if root:
-        cand = Path(root).joinpath(*sub)
-        if cand.is_file():
-            return str(cand)
-    return "${INTERPOSER_PDK_ROOT}/" + "/".join(sub)
+    """Where the interposer template board is, for an error text."""
+    return (_or_exit(_layer_map.find_interposer_template, start=__file__)
+            or "the board its technology package names (kicad_template.board "
+               "in ${INTERPOSER_PDK_ROOT}/" + "/".join(
+                   _layer_map.PACKAGE_MANIFEST) + ")")
 
 
 def _expand_gds_path(gds_path: str) -> str:
@@ -4915,25 +4899,15 @@ def _component_ref(component: Dict) -> str:
     return '' if ident is None else str(ident)
 
 
-def _io_pad_refs(io_pads_json: Optional[str]) -> List[str]:
-    """The references of every entry of an --io-pads file, placed or not.
+def _io_pad_refs(pads: Optional[List[Dict]]) -> List[str]:
+    """The references of every entry of an --io-pads manifest, placed or not.
 
-    Read before anything is placed, for resolve_die_outlines at the worker
+    Taken before anything is placed, for resolve_die_outlines at the worker
     head; the .chiplet update is handed the same list, so both decide on the
-    same set whichever entries add_io_pads then skips. A file add_io_pads
-    could not read gives none (add_io_pads reports it).
+    same set whichever entries add_io_pads then skips.
     """
-    if not io_pads_json:
-        return []
-    try:
-        with open(io_pads_json, 'r') as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return []
-    pads = data.get('io_pads') if isinstance(data, dict) else None
-    if not isinstance(pads, list):
-        return []
-    return [str(p['ref']) for p in pads if isinstance(p, dict) and p.get('ref')]
+    return [str(p['ref']) for p in pads or ()
+            if isinstance(p, dict) and p.get('ref')]
 
 
 def _die_gds_path(ref: str, component: Optional[Dict],
@@ -5641,7 +5615,8 @@ def _import_bump_mirror():
     """Import bump_mirror (Cu-pillar geometry + DRC + auto-resolve).
 
     Resolved via _find_interposer_pdk_python(). Returns the module, or
-    None when the interposer PDK is not reachable; callers that REQUIRE
+    None when the interposer PDK is not reachable or the import resolves
+    outside its python directory; callers that REQUIRE
     pillars must treat None as a hard error, never as a soft skip.
     Imported inside _intm4tm2_scope, so its directory, which holds the
     interposer's own pypreprocessor, does not stay on sys.path after it.
@@ -5656,6 +5631,15 @@ def _import_bump_mirror():
         if str(python_dir) not in sys.path:
             sys.path.insert(0, str(python_dir))
         import bump_mirror
+        # The package no longer marks itself with this module, so where the
+        # import landed is checked: another bump_mirror earlier on sys.path
+        # would draw landings that are not the carrier's.
+        found = Path(bump_mirror.__file__).resolve().parent
+        if found != Path(python_dir).resolve():
+            print("Warning: bump_mirror was imported from %s, not from the "
+                  "interposer PDK's %s; not using it." % (found, python_dir),
+                  file=sys.stderr)
+            return None
         return bump_mirror
     except Exception as exc:
         print("Warning: could not import bump_mirror: %s" % exc,
@@ -6281,7 +6265,24 @@ def convert_hyp_to_gds(
     # update and add_device reuse what it read.
     outline_reader = _die_outline.DieGdsReader()
     die_plan = _die_outline.DieOutlinePlan()
-    head_io_pad_refs = _io_pad_refs(io_pads_json) if chiplet_file_path else []
+    # The --io-pads manifest, read here for the same reason: a frame it does
+    # not state, or one this worker does not draw in, refuses the run.
+    head_io_pads = None
+    if io_pads_json:
+        try:
+            head_io_pads = _io_pads_manifest.read(
+                io_pads_json,
+                on_warn=lambda note: print(f"Warning: {note}",
+                                           file=sys.stderr))
+        except IoPadsRefused as exc:
+            print("", file=sys.stderr)
+            for line in exc.lines():
+                print(line, file=sys.stderr)
+            print("  Refusing to export: no layout, sidecar or .chiplet was "
+                  "written.", file=sys.stderr)
+            return False
+    head_io_pad_refs = (_io_pad_refs(head_io_pads)
+                        if chiplet_file_path else [])
     if chiplet_file_path or with_chiplets:
         head_chiplet = None
         if chiplet_file_path:
@@ -6737,9 +6738,9 @@ def convert_hyp_to_gds(
 
     # Add external I/O pads (wire-bond, etc.) from sidecar JSON
     placed_io_pads: Optional[List[Dict]] = None
-    if io_pads_json:
+    if head_io_pads is not None:
         print(f"\nAdding I/O pads from {io_pads_json}...")
-        placed_io_pads = generator.add_io_pads(io_pads_json)
+        placed_io_pads = generator.add_io_pads(head_io_pads)
         print(f"Total I/O pads placed: {len(placed_io_pads)}")
     else:
         # Loud guard: standalone components -- PIN refs whose designator is
@@ -6769,9 +6770,8 @@ def convert_hyp_to_gds(
                 "  These look like external I/O pads (e.g. wire-bond). In the "
                 ".hyp they are position-only PINs -- the pad geometry comes "
                 "from the io_pads sidecar, not from the PINs.\n"
-                "  To render them, extract the pads from the board and pass "
-                "the sidecar (the KiCad plugin export does this for you):\n"
-                "    python kicad_pcb_to_iopads.py <board>.kicad_pcb -o io_pads.json\n"
+                "  To render them, pass the io pad manifest the KiCad plugin "
+                "export writes from the board (it does this for you):\n"
                 "    python hyp_to_gds.py ... --io-pads io_pads.json"
                 % (len(standalone), shown), file=sys.stderr)
 
@@ -7043,8 +7043,9 @@ Examples:
     parser.add_argument(
         "-l", "--lyp",
         default=None,
-        help="KLayout LYP layer properties file (default: the interposer "
-             "PDK's canonical intm4tm2.lyp via env/walk discovery; the .lyp "
+        help="KLayout LYP layer properties file (default: the layer_properties"
+             ".lyp the interposer PDK's technology package names, via env/walk "
+             "discovery; the .lyp "
              "belongs to the PDK, so set INTERPOSER_PDK_ROOT or pass this "
              "explicitly when no checkout resolves)"
     )
@@ -7153,13 +7154,18 @@ Examples:
         "--io-pads",
         type=str,
         metavar="JSON_FILE",
-        help="Sidecar JSON with external I/O pad locations in planner net names "
-             "(never inverted here; produced by "
-             "gds_to_kicad/io_pads/kicad_pcb_to_iopads.py). Each entry is "
-             "rendered in the interposer GDS based on its io_class field "
-             "(wire_bond now; flipped_bump and tsv_bump reserved). When "
-             "combined with --update-chiplet-file, the placed pads are also "
-             "injected under the interposer component."
+        help="The io pad manifest of chiplet-spec's io_pads.schema.json, as "
+             "the KiCad plugin export writes it: external I/O pad locations "
+             "in planner net names (never inverted here). Its schema, version "
+             "and frame are required: schema chiplet-io-pad-manifest, "
+             "version 1.x, frame board_absolute_ynegated_um. A file without "
+             "them (a bare pad list), another frame (gds_bbox_corner_um is "
+             "never converted), another major version, or an unreadable file "
+             "exits 1 before anything is written. Each entry is rendered in "
+             "the interposer GDS based on its io_class field (wire_bond now; "
+             "flipped_bump and tsv_bump reserved). When combined with "
+             "--update-chiplet-file, the placed pads are also injected under "
+             "the interposer component."
     )
     parser.add_argument(
         "--cmim-devices",
@@ -7261,9 +7267,13 @@ Examples:
     # artifact has been written yet.
     _report_deferred_source_refusal()
 
-    # Default lyp: the interposer PDK's canonical copy (env/walk); no
+    # Default lyp: the carrier package's layer_properties.lyp (env/walk); no
     # plugin-local fallback, the .lyp belongs to the PDK.
     args.lyp = _or_exit(_layer_map.resolve_lyp_path, args.lyp, start=__file__)
+    # A sheet given by path reads no root, so the root is read here: a
+    # carrier the export does not model is refused before anything is drawn,
+    # whatever else the run is given.
+    _discover_path_var("INTERPOSER_PDK_ROOT")
 
     # Expand ${VAR} ecosystem-root references in every path argument
     # (env -> sibling-checkout walk -> loud failure). Plain absolute or

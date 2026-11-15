@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """The mount plane is the interposer PDK's, read on every finalize.
 
-The plane dies mount on is ``beol.attachment_surface_z_um`` in
-``$INTERPOSER_PDK_ROOT/libs.tech/intm4tm2_stack.json``. There is no value
-written from memory: without the PDK, or with a descriptor that does not
-give the key as a number, the finalizer raises and the worker refuses
-before anything is written; both name INTERPOSER_PDK_ROOT and the key. A
-root without the descriptor is not an IntM4TM2 tree, and the discovery refuses
-it first with CARRIER_UNSUPPORTED_ROOT.
+The plane dies mount on is ``beol.attachment_surface_z_um`` in the stack
+file that the technology package at ``$INTERPOSER_PDK_ROOT`` names at
+``stack.path``. There is no value written from memory: without the PDK, or
+with a descriptor that does not give the key as a number, the finalizer
+raises and the worker refuses before anything is written; both name
+INTERPOSER_PDK_ROOT and the key. A root without the package manifest is not a
+carrier root, and the discovery refuses it first with
+PACKAGE_MANIFEST_MISSING.
 
 Every z the finalizer derives from the plane is the exact decimal sum of the
 plane and the heights as they are written, emitted as the shortest text: a
@@ -31,7 +32,8 @@ if str(PLUGIN_ROOT) not in sys.path:
 
 import hyp_to_gds as h  # noqa: E402
 
-from .conftest import STACK_DESCRIPTOR, make_pdk_root  # noqa: E402
+from .conftest import (  # noqa: E402
+    STACK_DESCRIPTOR, make_pdk_root, write_carrier_package)
 from .test_die_outline_finalize import (  # noqa: E402
     OUTLINE, _board, _chiplet, _die, _die_gds, _run_worker, _tree_state,
     _update,
@@ -81,6 +83,21 @@ def test_the_plane_is_the_descriptor_value_as_written(attach_frame_pdk):
     assert repr(frame.at()) == "10.8103"
 
 
+def test_the_plane_is_read_from_the_stack_file_the_package_names(
+        tmp_path, monkeypatch):
+    root = tmp_path / "pdk"
+    write_carrier_package(root, stack="libs.tech/carrier_stack.json")
+    (root / "libs.tech" / "carrier_stack.json").write_text(
+        _descriptor(attachment_surface_z_um=12.5), encoding="utf-8")
+    # IntM4TM2's file name is not looked for.
+    (root / "libs.tech" / "intm4tm2_stack.json").write_text(
+        STACK_DESCRIPTOR.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(root))
+    frame = h.read_attach_frame()
+    assert frame.z_um == Decimal("12.5")
+    assert frame.source == str(root / "libs.tech" / "carrier_stack.json")
+
+
 def test_an_integer_plane_is_read(tmp_path, monkeypatch):
     _root_with(tmp_path, monkeypatch, _descriptor(attachment_surface_z_um=11))
     assert h.read_attach_frame().z_um == Decimal(11)
@@ -91,20 +108,35 @@ def test_without_the_pdk_the_reader_refuses(monkeypatch):
     with pytest.raises(h.AttachFrameRefused,
                        match=r"interposer PDK was not found \(set "
                              r"INTERPOSER_PDK_ROOT .*beol\.attachment_surface"
-                             r"_z_um in libs\.tech/intm4tm2_stack\.json"):
+                             r"_z_um in the file its technology package names "
+                             r"at stack\.path"):
         h.read_attach_frame()
 
 
-def test_a_root_without_the_descriptor_is_not_an_intm4tm2_tree(
+def test_a_root_without_the_package_is_not_a_carrier_root(
         tmp_path, monkeypatch):
-    # The descriptor is the marker of an IntM4TM2 tree, so its absence is
-    # the carrier root's refusal, which ends the run.
-    root = make_pdk_root(tmp_path, None)
+    # The manifest is the marker of a carrier root, so its absence is the
+    # carrier root's refusal, which ends the run.
+    root = make_pdk_root(tmp_path, manifest=None)
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(root))
     with pytest.raises(SystemExit,
-                       match=r"^CARRIER_UNSUPPORTED_ROOT: \$INTERPOSER_PDK_ROOT "
-                             r"is %s, which has no libs\.tech/intm4tm2_stack"
+                       match=r"^PACKAGE_MANIFEST_MISSING: \$INTERPOSER_PDK_ROOT "
+                             r"is %s, which has no libs\.tech/adk/technology"
                              r"\.json," % re.escape(str(root))):
+        h.read_attach_frame()
+
+
+def test_a_package_whose_stack_file_is_missing_refuses(tmp_path, monkeypatch):
+    root = make_pdk_root(tmp_path, None)
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(root))
+    with pytest.raises(h.AttachFrameRefused,
+                       match=r"^cannot read the mount plane, the beol\."
+                             r"attachment_surface_z_um in the file its "
+                             r"technology package names at stack\.path: "
+                             r"PACKAGE_MEMBER_MISSING: stack\.path in "
+                             r"libs\.tech/adk/technology\.json under %s is "
+                             r"'libs\.tech/intm4tm2_stack\.json', which names "
+                             r"no file$" % re.escape(str(root))):
         h.read_attach_frame()
 
 
@@ -135,8 +167,9 @@ def test_a_descriptor_that_is_not_json_refuses(tmp_path, monkeypatch):
     root = _root_with(tmp_path, monkeypatch, '{"beol": ')
     with pytest.raises(h.AttachFrameRefused,
                        match=r"^cannot read beol\.attachment_surface_z_um in "
-                             r"libs\.tech/intm4tm2_stack\.json under "
-                             r"INTERPOSER_PDK_ROOT=%s: Expecting value" % root):
+                             r"the file its technology package names at "
+                             r"stack\.path under INTERPOSER_PDK_ROOT=%s: "
+                             r"Expecting value" % root):
         h.read_attach_frame()
 
 
@@ -243,7 +276,7 @@ def test_the_worker_reads_the_plane_and_names_it(tmp_path, attach_frame_pdk):
 
 def test_the_worker_refuses_before_writing_anything(tmp_path, monkeypatch):
     hyp, _die_path, out, chiplet = _board(tmp_path)
-    root = make_pdk_root(tmp_path / "pdk", None)
+    root = make_pdk_root(tmp_path / "pdk", manifest=None)
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(root))
     before = _tree_state(str(tmp_path))
     result = _run_worker(tmp_path, hyp, out, chiplet,
@@ -251,8 +284,8 @@ def test_the_worker_refuses_before_writing_anything(tmp_path, monkeypatch):
     assert result.returncode == 1, result.stdout
     assert _tree_state(str(tmp_path)) == before
     assert result.stderr.startswith(
-        "CARRIER_UNSUPPORTED_ROOT: $INTERPOSER_PDK_ROOT is %s, which has no "
-        "libs.tech/intm4tm2_stack.json," % root)
+        "PACKAGE_MANIFEST_MISSING: $INTERPOSER_PDK_ROOT is %s, which has no "
+        "libs.tech/adk/technology.json," % root)
 
 
 def test_the_worker_without_a_chiplet_reads_no_plane(tmp_path, monkeypatch):

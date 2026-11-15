@@ -33,7 +33,9 @@ if str(PLUGIN_ROOT) not in sys.path:
 
 import hyp_to_gds as h  # noqa: E402
 
-from .conftest import FIXTURE_PDK_ROOT  # noqa: E402
+from .conftest import (  # noqa: E402
+    FIXTURE_PDK_ROOT, write_carrier_package, write_io_pads,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -646,6 +648,47 @@ def test_declared_run_does_write(tmp_path):
             _die(chiplet, "U1")["dimensions"]["height"]) == (200.0, 120.0)
 
 
+def test_a_second_carrier_is_refused_without_a_system(tmp_path, monkeypatch):
+    """The KiCad dialog passes no --system-chiplet and the sheet by path, so
+    neither reads the root; the worker reads it anyway, and a package other
+    than IntM4TM2 stops the run before anything is written. The control is
+    test_declared_run_does_write, the same run on the IntM4TM2 root."""
+    hyp, _unused, out, chiplet = _board(tmp_path)
+    root = tmp_path / "interposer_x"
+    write_carrier_package(root, ident="interposer_x")
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(root))
+    before = _tree_state(str(tmp_path))
+    result = _run_worker(tmp_path, hyp, out, chiplet,
+                         ["--die-outline-layers", "U1=%d/%d" % OUTLINE])
+    assert result.returncode == 1, result.stderr
+    assert _tree_state(str(tmp_path)) == before
+    assert "CARRIER_UNSUPPORTED_TECHNOLOGY: %s is the package 'interposer_x'" % (
+        root / "libs.tech" / "adk" / "technology.json") in result.stderr
+
+
+@pytest.mark.parametrize("ident, code", [("intm4tm2", 0),
+                                          ("interposer_x", 1)])
+def test_a_second_carrier_is_refused_without_a_chiplet(tmp_path, monkeypatch,
+                                                       ident, code):
+    """A layout-only run, the sheet by path: nothing else reads the root, so
+    the worker's own read is what refuses. The IntM4TM2 package is the
+    control."""
+    hyp, _unused, out, _chiplet = _board(tmp_path)
+    root = tmp_path / ident
+    write_carrier_package(root, ident=ident)
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(root))
+    before = _tree_state(str(tmp_path))
+    result = subprocess.run(
+        [sys.executable, str(PLUGIN_ROOT / "hyp_to_gds.py"), hyp,
+         "-o", str(out / "layout" / "demo_interposer.gds"), "-l", _LYP],
+        cwd=str(tmp_path), capture_output=True, text=True, timeout=300)
+    assert result.returncode == code, result.stderr
+    refusal = "CARRIER_UNSUPPORTED_TECHNOLOGY: %s is the package %r" % (
+        root / "libs.tech" / "adk" / "technology.json", ident)
+    assert (refusal in result.stderr) == bool(code)
+    assert (_tree_state(str(tmp_path)) == before) == bool(code)
+
+
 @pytest.mark.parametrize("flag,value,message", [
     ("--die-outline-layers", "U1=39",
      "Invalid die outline layer '39' for 'U1' in --die-outline-layers"),
@@ -826,15 +869,51 @@ def test_worker_io_pad_entry_it_skips_keeps_its_die_unsized(tmp_path,
     keeps the J1 component, which is still a pad and not sized."""
     hyp, die, out, chiplet = _board(tmp_path)
     _chiplet(Path(chiplet), [("U1", {"layout": die}), ("J1", {})])
-    pads = tmp_path / "io_pads.json"
-    pads.write_text(json.dumps({"io_pads": [
-        dict(_PAD, size_x_um=1.0, size_y_um=1.0)]}))
+    pads = write_io_pads(tmp_path / "io_pads.json",
+                         [dict(_PAD, size_x_um=1.0, size_y_um=1.0)])
     assert _convert(hyp, out, chiplet, io_pads_json=str(pads),
                     die_outline_layers={"U1": OUTLINE}) is True
     assert ("J1: not sized: an --io-pads entry carries this id"
             in capsys.readouterr().out)
     assert _die(chiplet, "J1")["dimensions"]["width"] == 100.0
     assert _die(chiplet, "U1")["dimensions"]["width"] == 200.0
+
+
+@pytest.mark.parametrize("envelope, cause", [
+    ({"schema": None, "version": None, "frame": None},
+     " has no schema, version or frame"),
+    ({"frame": "gds_bbox_corner_um"},
+     " is in frame 'gds_bbox_corner_um'; hyp_to_gds reads only "
+     "'board_absolute_ynegated_um' and never converts"),
+    ({"version": "2.0"}, ": io_pads.json: unsupported version '2.0'"),
+], ids=["bare", "canonical-frame", "major-2"])
+def test_an_io_pads_file_the_worker_does_not_read_refuses_the_run(
+        tmp_path, envelope, cause):
+    """The pads are not dropped and the run not carried on: the worker exits
+    1 before anything is written. The enveloped file runs (the case above)."""
+    hyp, die, out, chiplet = _board(tmp_path)
+    _chiplet(Path(chiplet), [("U1", {"layout": die}), ("J1", {})])
+    pads = write_io_pads(tmp_path / "io_pads.json", [dict(_PAD)], **envelope)
+    before = _tree_state(str(tmp_path))
+    result = _run_worker(tmp_path, hyp, out, chiplet,
+                         ["--die-outline-layers", "U1=%d/%d" % OUTLINE,
+                          "--io-pads", str(pads)])
+    assert result.returncode == 1, result.stderr
+    assert _tree_state(str(tmp_path)) == before
+    assert "I/O pads refused: %s%s" % (pads, cause) in result.stderr
+    assert ("Refusing to export: no layout, sidecar or .chiplet was written."
+            in result.stderr)
+
+
+def test_an_io_pads_file_is_read_without_a_chiplet(tmp_path, capsys):
+    """The manifest is read whether or not a .chiplet is updated: without
+    one, a bare file still refuses before the layout is written."""
+    hyp, _unused, out, _none = _board(tmp_path, chiplet=False)
+    pads = write_io_pads(tmp_path / "io_pads.json", [dict(_PAD)],
+                         schema=None, version=None, frame=None)
+    assert _convert(hyp, out, io_pads_json=str(pads)) is False
+    assert "I/O pads refused: " in capsys.readouterr().err
+    assert not (out / "layout" / "demo_interposer.gds").exists()
 
 
 def test_cli_takes_a_reference_that_starts_with_a_dash(tmp_path, monkeypatch,

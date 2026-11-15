@@ -121,16 +121,13 @@ def test_diagonal_trace_is_not_narrower_than_nominal():
 
 
 def test_instance_origins_and_pad_geometry_are_snapped(tmp_path):
-    import json
     gen = _make_generator()
     pads = {"io_pads": [
         {"ref": "J1", "io_class": "wire_bond",
          "x_um": 100.000002, "y_um": 50.000003,
          "size_x_um": 100.0, "size_y_um": 100.0, "net": "VDD"},
     ]}
-    pads_json = tmp_path / "io_pads.json"
-    pads_json.write_text(json.dumps(pads))
-    placed = gen.add_io_pads(str(pads_json))
+    placed = gen.add_io_pads(pads["io_pads"])
     out = tmp_path / "carrier.gds"
     gen.write(str(out))
 

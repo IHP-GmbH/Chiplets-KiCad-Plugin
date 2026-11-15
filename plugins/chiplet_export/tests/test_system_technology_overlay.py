@@ -244,12 +244,16 @@ def test_an_undeclared_technology_refuses(tmp_path):
              r"System's technologies$")
 
 
+def _carrier(system, tech):
+    system["technologies"][tech] = {}
+    _component(system, "interposer")["technology"] = tech
+
+
 def test_a_carrier_other_than_intm4tm2_refuses(tmp_path):
-    # Declared, so only the carrier rule refuses it: until a carrier is read
-    # from its technology package, IntM4TM2 is the only one.
+    # Declared, so only the carrier rule refuses it: until the layer a
+    # connection lands on is read from the package, IntM4TM2 is the only one.
     system = _system()
-    system["technologies"]["gf180mcu"] = {}
-    _component(system, "interposer")["technology"] = "gf180mcu"
+    _carrier(system, "gf180mcu")
     _refused(tmp_path, system,
              r"^interposer: CARRIER_UNSUPPORTED_TECHNOLOGY: the carrier's "
              r"technology is 'gf180mcu'")
@@ -345,7 +349,11 @@ def _write_system(tmp_path, edit):
         "layer_properties", "intm4tm2.lyp"),
      "Technology refused: intm4tm2: layer_properties 'intm4tm2.lyp' is a "
      "relative path"),
-], ids=["no-technology", "relative-path"])
+    (lambda s: _carrier(s, "gf180mcu"),
+     "Technology refused: interposer: CARRIER_UNSUPPORTED_TECHNOLOGY: the "
+     "carrier's technology is 'gf180mcu'; IntM4TM2 ('intm4tm2') is the only "
+     "carrier modelled"),
+], ids=["no-technology", "relative-path", "another-carrier"])
 def test_worker_refusal_writes_nothing(tmp_path, edit, line):
     system = _write_system(tmp_path, edit)
     _out, _chiplet, run = _worker(tmp_path, system)
