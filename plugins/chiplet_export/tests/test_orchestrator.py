@@ -49,7 +49,7 @@ from chiplet_export.writers.connection_stacks import (  # noqa: E402
 )
 import chiplet_export.writers.connection_stacks as connection_stacks  # noqa: E402
 
-from .conftest import sibling_workspace  # noqa: E402
+from .conftest import sibling_workspace, write_carrier_package  # noqa: E402
 
 # Sibling-dependent tests: the walk and the manifest listing assert against
 # real ecosystem checkouts on disk. On a lone checkout (e.g. a bare CI
@@ -731,7 +731,7 @@ def test_build_adk_drc_argv_adds_interconnect_methods_when_set():
 
 def _fake_pdk_tree(base, var_name, name_index=0):
     """Create <base>/<dirname>/<marker...> for a dependency root; a marker
-    with a suffix is a file (the interposer's stack descriptor)."""
+    with a suffix is a file (the interposer's package manifest)."""
     dirnames, marker = DEPENDENCY_ROOT_MARKERS[var_name]
     root = base / dirnames[name_index]
     path = root.joinpath(*marker)
@@ -855,14 +855,15 @@ def test_discover_interposer_lyp_textvar_after_env(tmp_path, monkeypatch):
 
 def test_discover_interposer_lyp_unresolved_textvar_falls_to_pdk(
         tmp_path, monkeypatch):
-    """A ${VAR}-form text variable is not a file on disk; the canonical
-    copy under the discovered PDK root wins instead."""
+    """A ${VAR}-form text variable is not a file on disk; the sheet the
+    discovered PDK root's technology package names wins instead."""
     monkeypatch.delenv("INTERPOSER_LYP", raising=False)
     monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
     pdk = _fake_pdk_tree(tmp_path / "ws", "INTERPOSER_PDK_ROOT")
+    write_carrier_package(pdk)
     tech = pdk / "libs.tech" / "klayout" / "tech"
     tech.mkdir(parents=True, exist_ok=True)
-    canonical = tech / "intm4tm2.lyp"
+    canonical = tech / "carrier.lyp"
     canonical.write_text("<layer-properties/>")
     start = tmp_path / "ws" / "plugin" / "pipeline" / "orchestrator.py"
     start.parent.mkdir(parents=True)
@@ -871,6 +872,26 @@ def test_discover_interposer_lyp_unresolved_textvar_falls_to_pdk(
             "${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp"})
     found = discover_interposer_lyp(board=board, start=str(start))
     assert found == str(canonical)
+
+
+@pytest.mark.parametrize("manifest", ["{}\n", None], ids=["not-a-package", "no-sheet-file"])
+def test_discover_interposer_lyp_a_package_without_its_sheet_returns_empty(
+        tmp_path, monkeypatch, manifest):
+    """A manifest that is not a package, or a sheet that is not there, leaves the
+    picker empty, never IntM4TM2's file name beside it."""
+    monkeypatch.delenv("INTERPOSER_LYP", raising=False)
+    monkeypatch.delenv("INTERPOSER_PDK_ROOT", raising=False)
+    pdk = _fake_pdk_tree(tmp_path / "ws", "INTERPOSER_PDK_ROOT")
+    if manifest is None:
+        write_carrier_package(pdk)
+    else:
+        pdk.joinpath("libs.tech", "adk", "technology.json").write_text(manifest)
+    tech = pdk / "libs.tech" / "klayout" / "tech"
+    tech.mkdir(parents=True)
+    (tech / "intm4tm2.lyp").write_text("<layer-properties/>")
+    start = tmp_path / "ws" / "plugin" / "pipeline" / "orchestrator.py"
+    start.parent.mkdir(parents=True)
+    assert discover_interposer_lyp(board=_FakeBoard({}), start=str(start)) == ""
 
 
 def test_discover_interposer_lyp_no_source_returns_empty(tmp_path, monkeypatch):
@@ -2667,6 +2688,21 @@ def test_a_board_report_refusal_is_distinguished_before_output_creation(tmp_path
     assert result.error == 'IO pad carriers refused: report does not describe the board'
     assert result.error_input == 'export_report'
     assert not Path(options.output_dir).exists()
+    assert calls == []
+
+
+def test_an_io_pads_writer_crash_stops_the_export(tmp_path, monkeypatch):
+    """A layout without its io pads is not a warning: the worker never runs."""
+    calls, _seams = _install_staged_finalize_fakes(monkeypatch)
+    writer = sys.modules['chiplet_export.writers.chiplet_writer']
+
+    def crash(_board, _path, **_kw):
+        raise OSError("disk full")
+
+    writer.write_io_pads_json = crash
+    options = _staged_finalize_options(tmp_path)
+    result = orchestrator.run_export(_RunExportBoard(), options, '/unused/plugin')
+    assert result.error.startswith('IO pads writer crashed: disk full\n')
     assert calls == []
 
 

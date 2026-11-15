@@ -29,7 +29,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 from ..connection_methods import refused_landings, resolve_die_methods
-from ..layer_map import PATH_VAR_MARKERS
+from ..layer_map import (
+    PATH_VAR_MARKERS, CarrierPackageRefused, read_carrier_package,
+)
 
 
 # Default ADK interposer adapter used when neither the dialog nor the
@@ -57,8 +59,9 @@ INTERCONNECT_ABSENCE_WARNING = (
 # variable -- explicit selection IS the convention's env leg, so swapping in
 # another PDK checkout (a vendor fork, a release tag) needs no code change.
 DEPENDENCY_ROOT_MARKERS = {
-    # The worker's own entry, so the dialog never shows a root the worker
-    # refuses (a KLayout PDK tree that is not IntM4TM2).
+    # The worker's own marker, so the dialog never offers a KLayout PDK tree
+    # without a technology package. A package of another carrier is still
+    # offered; the worker refuses it by its id.
     "INTERPOSER_PDK_ROOT": PATH_VAR_MARKERS["INTERPOSER_PDK_ROOT"],
     "INTERCONNECT_PDK_ROOT": (("interconnect_pdk",
                                "IHP-Interconnect-IntM4TM2"), ("manifest",)),
@@ -86,7 +89,7 @@ def discover_dependency_root(var_name: str, board=None,
             return False
 
     # A set INTERPOSER_PDK_ROOT is a selection, shown as given even when it
-    # is not an IntM4TM2 tree, so the worker refuses it; skipping it would
+    # holds no carrier technology package, so the worker refuses it; skipping it would
     # offer the sibling checkout in its place without a word (the same rule
     # as discover_interconnect_root).
     selection = var_name == "INTERPOSER_PDK_ROOT"
@@ -144,12 +147,12 @@ def discover_interposer_lyp(board=None, start: Optional[str] = None) -> str:
     """Default interposer layer-properties file for the dialog's LYP field.
 
     Chain (first existing file wins): INTERPOSER_LYP environment variable
-    -> INTERPOSER_LYP project text variable -> canonical
-    ``libs.tech/klayout/tech/intm4tm2.lyp`` under the discovered interposer
-    PDK root. The .lyp belongs to the interposer PDK, not the plugin, so
-    there is no bundled fallback: when nothing resolves this returns ""
-    (the dialog leaves the picker empty for the user, and the worker errors
-    pointing at INTERPOSER_PDK_ROOT). Mirrors the worker's own default
+    -> INTERPOSER_LYP project text variable -> the ``layer_properties.lyp``
+    that the discovered interposer PDK root's technology package names.
+    The .lyp belongs to the interposer PDK, not the plugin, so there is no
+    bundled fallback: when nothing resolves, or the package cannot name it,
+    this returns "" (the dialog leaves the picker empty for the user, and
+    the worker refuses naming the cause). Mirrors the worker's own default
     (hyp_to_gds._find_default_lyp).
     """
     from .discovery import _lookup_text_var
@@ -170,10 +173,11 @@ def discover_interposer_lyp(board=None, start: Optional[str] = None) -> str:
         return found
     root = discover_dependency_root("INTERPOSER_PDK_ROOT", board, start)
     if root:
-        found = _existing(Path(root).joinpath(
-            "libs.tech", "klayout", "tech", "intm4tm2.lyp"))
-        if found:
-            return found
+        try:
+            return _existing(read_carrier_package(root).member(
+                "layer_properties", "lyp"))
+        except CarrierPackageRefused:
+            pass
     return ""
 
 
@@ -1931,11 +1935,15 @@ def run_export(board, options, plugin_dir,
         effective_io_pads = options.io_pads_json
         if not effective_io_pads:
             io_pads_auto = os.path.join(tmpdir, "%s_io_pads.json" % board_name)
+            # The carriers passed preflight_carriers, so a failure here is
+            # the writer's; the export stops rather than ship no pads.
             try:
                 n_io = write_io_pads_json(board, io_pads_auto, export_report=export_report)
             except Exception as exc:
-                n_io = 0
-                _log("Warning: io_pads auto-extraction failed: %s" % exc)
+                return ExportResult(
+                    error="IO pads writer crashed: %s\n%s"
+                          % (exc, traceback.format_exc()),
+                )
             if n_io:
                 effective_io_pads = io_pads_auto
                 _log("Auto-extracted %d io_pad(s) from board" % n_io)

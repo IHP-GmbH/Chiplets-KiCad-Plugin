@@ -3,6 +3,7 @@
 
 import json
 import hashlib
+import re
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -13,8 +14,10 @@ import pytest
 from .test_pad_domains import PCBNEW, PROPERTY, document, footprint
 from .test_orchestrator import _install_run_export_fakes
 from .test_layer_map_parity import REFERENCE_LYP, REFERENCE_SHA256
+from .conftest import write_carrier_package
 from chiplet_export.layer_map import (
-    CarrierRootRefused, LayerMap, LayerMapError, resolve_lyp_path,
+    CarrierPackageRefused, LayerMap, LayerMapError, discover_path_var,
+    find_interposer_template, resolve_lyp_path,
 )
 from chiplet_export.pad_domains import PadDomainError, validate_board_pad_domains
 from chiplet_export.pipeline import orchestrator
@@ -177,14 +180,11 @@ def test_board_layer_api_failure_refuses_before_writes(setup_export):
 def test_preflight_sends_exact_selected_lyp_to_worker(setup_export, tmp_path, monkeypatch, explicit):
     board, props, options, calls, seams = setup_export
     root = tmp_path / "selected-pdk"
-    lyp = write_lyp(root / "libs.tech/klayout/tech/intm4tm2.lyp")
+    lyp = write_lyp(root / "libs.tech/klayout/tech/selected.lyp")
     lyp.write_bytes(REFERENCE_LYP.read_bytes())
-    tooling = root / "libs.tech/klayout/python"
-    tooling.mkdir()
-    (tooling / "bump_mirror.py").write_text("# discovery marker only\n")
-    (root / "libs.tech/intm4tm2_stack.json").write_text("{}\n")
+    write_carrier_package(root, lyp="libs.tech/klayout/tech/selected.lyp")
     options.interposer_pdk_root = str(root)
-    options.lyp_override = ("${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp"
+    options.lyp_override = ("${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/selected.lyp"
                             if explicit else "")
     original_option = options.lyp_override
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(tmp_path / "wrong-env"))
@@ -249,12 +249,65 @@ def test_bad_path_variables_are_loud(tmp_path, name):
 def test_default_resolution_keeps_worker_env_then_walk_rules(tmp_path):
     worker = tmp_path / "plugin/hyp_to_gds.py"
     sibling = tmp_path / "OpenIntM4TM2"
-    lyp = write_lyp(sibling / "libs.tech/klayout/tech/intm4tm2.lyp")
-    tooling = sibling / "libs.tech/klayout/python"
-    tooling.mkdir()
-    (tooling / "bump_mirror.py").write_text("# marker\n")
-    (sibling / "libs.tech/intm4tm2_stack.json").write_text("{}\n")
+    lyp = write_lyp(sibling / "libs.tech/klayout/tech/carrier.lyp")
+    # IntM4TM2's file name is not looked for: the manifest names the sheet.
+    write_lyp(sibling / "libs.tech/klayout/tech/intm4tm2.lyp")
+    write_carrier_package(sibling)
     assert resolve_lyp_path(env={}, start=worker) == str(lyp)
-    # A set root that is not an IntM4TM2 tree is refused, never walked past.
-    with pytest.raises(CarrierRootRefused, match="^CARRIER_UNSUPPORTED_ROOT: "):
-        resolve_lyp_path(env={"INTERPOSER_PDK_ROOT": str(tmp_path / "missing")}, start=worker)
+    # A set root without a technology package is refused, never walked past.
+    missing = tmp_path / "missing"
+    with pytest.raises(CarrierPackageRefused,
+                       match=r"^PACKAGE_MANIFEST_MISSING: \$INTERPOSER_PDK_ROOT is "
+                             r"%s, which has no libs\.tech/adk/technology\.json, "
+                             % re.escape(str(missing))):
+        resolve_lyp_path(env={"INTERPOSER_PDK_ROOT": str(missing)}, start=worker)
+
+
+@pytest.mark.parametrize("selected", [True, False], ids=["env", "walk"])
+def test_a_package_of_another_carrier_is_refused_at_discovery(
+        tmp_path, selected):
+    """Its pads and connections would still land on IntM4TM2's TopMetal2."""
+    worker = tmp_path / "plugin/hyp_to_gds.py"
+    root = tmp_path / "OpenIntM4TM2"
+    write_lyp(root / "libs.tech/klayout/tech/carrier.lyp")
+    write_carrier_package(root, ident="interposer_x")
+    env = {"INTERPOSER_PDK_ROOT": str(root)} if selected else {}
+    with pytest.raises(CarrierPackageRefused,
+                       match=r"^CARRIER_UNSUPPORTED_TECHNOLOGY: .*technology"
+                             r"\.json is the package 'interposer_x'; IntM4TM2 "
+                             r"\('intm4tm2'\) is the only carrier"):
+        discover_path_var("INTERPOSER_PDK_ROOT", env=env, start=worker)
+
+
+def test_a_sheet_the_package_names_and_lacks_is_refused(tmp_path):
+    worker = tmp_path / "plugin/hyp_to_gds.py"
+    root = tmp_path / "pdk"
+    write_lyp(root / "libs.tech/klayout/tech/intm4tm2.lyp")
+    write_carrier_package(root)
+    with pytest.raises(CarrierPackageRefused,
+                       match=r"^PACKAGE_MEMBER_MISSING: layer_properties\.lyp "
+                             r"in libs\.tech/adk/technology\.json under .* is "
+                             r"'libs\.tech/klayout/tech/carrier\.lyp', which "
+                             r"names no file$"):
+        resolve_lyp_path(env={"INTERPOSER_PDK_ROOT": str(root)}, start=worker)
+
+
+def test_the_template_hint_is_the_board_the_package_names(tmp_path):
+    worker = tmp_path / "plugin/hyp_to_gds.py"
+    root = tmp_path / "pdk"
+    manifest = write_carrier_package(root)
+    env = {"INTERPOSER_PDK_ROOT": str(root)}
+    # Optional: a package that names none, or names a file it lacks, has no
+    # hint, and neither has no package.
+    assert find_interposer_template(env=env, start=worker) is None
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data["kicad_template"] = {"board": "libs.tech/kicad/carrier.kicad_pcb",
+                              "project": "libs.tech/kicad/carrier.kicad_pro",
+                              "rules": "libs.tech/kicad/carrier.kicad_dru"}
+    manifest.write_text(json.dumps(data), encoding="utf-8")
+    board = root / "libs.tech/kicad/carrier.kicad_pcb"
+    assert find_interposer_template(env=env, start=worker) is None
+    board.parent.mkdir(parents=True)
+    board.write_text("(kicad_pcb)", encoding="utf-8")
+    assert find_interposer_template(env=env, start=worker) == str(board)
+    assert find_interposer_template(env={}, start=worker) is None

@@ -179,7 +179,10 @@ def main():
     parser.add_argument(
         "--io-pads",
         default="",
-        help="Sidecar io_pads.json (forwarded to hyp_to_gds.py).",
+        help="io pad manifest for hyp_to_gds.py --io-pads, with the "
+             "envelope the export writes (hyp_to_gds.py refuses a bare pad "
+             "list). Omitted, the export writes the board's own; "
+             "--use-existing-hyp writes none.",
     )
     parser.add_argument(
         "--cupillar-gds",

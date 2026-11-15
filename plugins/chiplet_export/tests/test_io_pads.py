@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Tests for the I/O pad support added to hyp_to_gds.GDSGenerator."""
-import json
 import sys
 from pathlib import Path
 
@@ -55,10 +54,7 @@ def test_add_io_pads_places_pads_on_topmetal2(tmp_path):
              "size_x_um": 100.0, "size_y_um": 100.0, "net": "OUT0"},
         ]
     }
-    json_path = tmp_path / "io_pads.json"
-    json_path.write_text(json.dumps(pads))
-
-    placed = gen.add_io_pads(str(json_path))
+    placed = gen.add_io_pads(pads["io_pads"])
     assert len(placed) == 2
 
     out_gds = tmp_path / "out.gds"
@@ -98,18 +94,18 @@ def test_io_class_dispatch_skips_reserved(tmp_path):
              "size_x_um": 60.0, "size_y_um": 60.0, "net": "C"},
         ]
     }
-    json_path = tmp_path / "io_pads.json"
-    json_path.write_text(json.dumps(pads))
-
-    placed = gen.add_io_pads(str(json_path))
+    placed = gen.add_io_pads(pads["io_pads"])
     assert len(placed) == 1
     assert placed[0]["ref"] == "J1"
 
 
-def test_add_io_pads_handles_missing_file(tmp_path):
+def test_add_io_pads_takes_entries_not_a_path(tmp_path):
+    """A path would be iterated as characters and every one skipped."""
     gen = _make_generator()
-    placed = gen.add_io_pads(str(tmp_path / "does_not_exist.json"))
-    assert placed == []
+    with pytest.raises(TypeError, match="io_pads_manifest.read"):
+        gen.add_io_pads(str(tmp_path / "io_pads.json"))
+    with pytest.raises(TypeError, match="io_pads_manifest.read"):
+        gen.add_io_pads(tmp_path / "io_pads.json")
 
 
 def test_add_io_pads_skips_invalid_size(tmp_path):
@@ -119,9 +115,7 @@ def test_add_io_pads_skips_invalid_size(tmp_path):
          "x_um": 0.0, "y_um": 0.0,
          "size_x_um": 0.0, "size_y_um": 100.0, "net": "X"},
     ]}
-    json_path = tmp_path / "io_pads.json"
-    json_path.write_text(json.dumps(pads))
-    placed = gen.add_io_pads(str(json_path))
+    placed = gen.add_io_pads(pads["io_pads"])
     assert placed == []
 
 

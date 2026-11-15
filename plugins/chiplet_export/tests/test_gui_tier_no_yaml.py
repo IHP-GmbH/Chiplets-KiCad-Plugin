@@ -194,7 +194,8 @@ def _gui_tier_sources():
         files.extend(sorted((CHIPLET_EXPORT_ROOT / sub).rglob("*.py")))
     for name in ("__init__.py", "dialog_chiplet_export.py",
                  "chiplet_export_action.py", "fill_readback.py",
-                 "die_outline.py"):
+                 "die_outline.py", "draft_net_names.py",
+                 "io_pads_manifest.py"):
         p = CHIPLET_EXPORT_ROOT / name
         if p.exists():
             files.append(p)

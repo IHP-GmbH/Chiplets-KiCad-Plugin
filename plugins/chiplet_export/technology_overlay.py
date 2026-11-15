@@ -20,10 +20,11 @@ the finalizer folds under the interposer and does not treat as a die.
 The carrier must be IntM4TM2: a System whose interposer component names
 another technology is refused, the cause led by
 ``CARRIER_UNSUPPORTED_TECHNOLOGY``, the id packaging-flow and chiplet-spec
-refuse the same carrier with. The export draws every carrier with IntM4TM2's
-sheet, layers and via cells, so it would otherwise write a valid-looking
+refuse the same carrier with. The sheet and layers are read from the
+interposer PDK's technology package, but the pads and connections still land
+on IntM4TM2's TopMetal2, so the export would otherwise write a valid-looking
 interposer for a carrier it does not model. The refusal is temporary: it goes
-when a carrier is read from its technology package.
+when the layer a connection lands on is read from the package too.
 
 Every offender is collected before raising, so one run names them all.
 """
@@ -31,14 +32,15 @@ Every offender is collected before raising, so one run names them all.
 import copy
 import os
 
+try:
+    from .layer_map import CARRIER_TECHNOLOGY
+except ImportError:  # Standalone worker script.
+    from layer_map import CARRIER_TECHNOLOGY
+
 #: Fields of a technology entry that hold a resource path (the chiplet-spec
 #: technology definition is a closed set; the other two are description and
 #: dbu).
 PATH_FIELDS = ("layer_properties", "stackup")
-
-#: The one carrier technology the export models (the module docstring).
-CARRIER_TECHNOLOGY = "intm4tm2"
-
 
 class TechnologyRefused(Exception):
     """The System .chiplet cannot supply the exported document's technologies.
@@ -106,8 +108,9 @@ def plan(document, system, pads=()):
         if source.get("type") == "interposer" and tech != CARRIER_TECHNOLOGY:
             offenders.append((ident, "CARRIER_UNSUPPORTED_TECHNOLOGY: the "
                                      "carrier's technology is %r; IntM4TM2 (%r) "
-                                     "is the only carrier modelled until carriers "
-                                     "are read from their technology package"
+                                     "is the only carrier modelled until the "
+                                     "layer a connection lands on is read from "
+                                     "the technology package"
                                      % (tech, CARRIER_TECHNOLOGY)))
             continue
         bindings[ident] = tech

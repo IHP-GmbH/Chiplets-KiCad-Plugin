@@ -21,7 +21,8 @@ if str(PLUGIN_ROOT) not in sys.path:
 import hyp_to_gds as h  # noqa: E402
 
 from .conftest import (  # noqa: E402
-    FIXTURE_PDK_ROOT, sibling_workspace, use_sibling_checkouts)
+    FIXTURE_PDK_ROOT, sibling_workspace, use_sibling_checkouts,
+    write_carrier_package)
 
 # This module asserts real sibling-PDK content: interconnect manifest methods,
 # interposer canonical lyp paths, gds_to_kicad walk targets. On a lone
@@ -176,8 +177,8 @@ def test_interposer_pdk_python_found_via_walk(tmp_path, monkeypatch):
 
 def _refusal(root):
     """The root refusal's id, the path given and the marker looked for."""
-    return (r"^CARRIER_UNSUPPORTED_ROOT: \$INTERPOSER_PDK_ROOT is %s, which "
-            r"has no libs\.tech/intm4tm2_stack\.json," % re.escape(str(root)))
+    return (r"^PACKAGE_MANIFEST_MISSING: \$INTERPOSER_PDK_ROOT is %s, which "
+            r"has no libs\.tech/adk/technology\.json," % re.escape(str(root)))
 
 
 def test_interposer_pdk_env_override_wins(tmp_path, monkeypatch):
@@ -185,10 +186,8 @@ def test_interposer_pdk_env_override_wins(tmp_path, monkeypatch):
     root without the marker is refused, naming it, and never replaced by
     the walk (which would draw with the sibling checkout)."""
     _walk_from(tmp_path, monkeypatch, "INTERPOSER_PDK_ROOT")
+    write_carrier_package(tmp_path / "pdk")
     fake = tmp_path / "pdk" / "libs.tech" / "klayout" / "python"
-    fake.mkdir(parents=True)
-    (fake / "bump_mirror.py").write_text("# stub\n")
-    (tmp_path / "pdk" / "libs.tech" / "intm4tm2_stack.json").write_text("{}\n")
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(tmp_path / "pdk"))
     assert h._find_interposer_pdk_python() == fake
 
@@ -199,7 +198,8 @@ def test_interposer_pdk_env_override_wins(tmp_path, monkeypatch):
     assert re.match(_refusal(bogus), str(exc.value))
 
 
-def test_a_klayout_pdk_tree_that_is_not_intm4tm2_is_refused(tmp_path, monkeypatch):
+def test_a_klayout_pdk_tree_without_a_technology_package_is_refused(
+        tmp_path, monkeypatch):
     """Every KLayout PDK tree has libs.tech/klayout/, the SG13G2 die PDK
     included, and it shares IntM4TM2's metal names: every reader of the
     variable refuses it, none draws with it."""
@@ -208,7 +208,7 @@ def test_a_klayout_pdk_tree_that_is_not_intm4tm2_is_refused(tmp_path, monkeypatc
     (die_pdk / "libs.tech" / "klayout" / "python" / "sg13g2_pycell_lib").mkdir(
         parents=True)
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(die_pdk))
-    with pytest.raises(h._layer_map.CarrierRootRefused) as refused:
+    with pytest.raises(h._layer_map.CarrierPackageRefused) as refused:
         h._layer_map.discover_path_var("INTERPOSER_PDK_ROOT")
     assert re.match(_refusal(die_pdk), str(refused.value))
     for reader in (lambda: h._discover_path_var("INTERPOSER_PDK_ROOT"),
@@ -219,13 +219,40 @@ def test_a_klayout_pdk_tree_that_is_not_intm4tm2_is_refused(tmp_path, monkeypatc
         assert re.match(_refusal(die_pdk), str(exc.value))
 
 
-def test_an_intm4tm2_root_without_bump_mirror_names_it(monkeypatch):
+def test_a_carrier_root_is_accepted_without_landing_tooling(monkeypatch):
+    """The package is the marker: a root whose python dir holds no landing
+    module is still a carrier (a method that needs one is refused alone)."""
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(FIXTURE_PDK_ROOT))
-    with pytest.raises(SystemExit) as exc:
-        h._find_interposer_pdk_python()
-    assert re.match(r"^ERROR: the interposer PDK at %s is an IntM4TM2 tree "
-                    r"without libs\.tech/klayout/python/bump_mirror\.py,"
-                    % re.escape(str(FIXTURE_PDK_ROOT)), str(exc.value))
+    found = h._find_interposer_pdk_python()
+    assert found == FIXTURE_PDK_ROOT / "libs.tech" / "klayout" / "python"
+    assert not found.exists()
+
+
+def test_bump_mirror_is_used_only_from_the_carrier_package(
+        tmp_path, monkeypatch, capsys):
+    """A bump_mirror already imported from another root (an earlier export
+    in the same process) is not the carrier's: it is not used."""
+    # Whatever this case imports leaves with it.
+    monkeypatch.setitem(sys.modules, "bump_mirror", None)
+    del sys.modules["bump_mirror"]
+    roots = []
+    for name in ("first", "second"):
+        root = tmp_path / name
+        write_carrier_package(root)
+        python = root / "libs.tech" / "klayout" / "python"
+        python.mkdir(parents=True)
+        (python / "bump_mirror.py").write_text("ROOT = %r\n" % name,
+                                               encoding="utf-8")
+        roots.append(root)
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(roots[0]))
+    assert h._import_bump_mirror().ROOT == "first"
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(roots[1]))
+    assert h._import_bump_mirror() is None
+    assert ("bump_mirror was imported from %s" % (
+        roots[0] / "libs.tech" / "klayout" / "python")
+        in capsys.readouterr().err)
+    monkeypatch.delitem(sys.modules, "bump_mirror")
+    assert h._import_bump_mirror().ROOT == "second"
 
 
 def test_interconnect_pdk_resolves_live_not_fallback(tmp_path, monkeypatch):
@@ -283,8 +310,7 @@ def test_expand_path_vars_env_wins(tmp_path, monkeypatch):
     marker it lacks, and never replaced by the walk."""
     workspace = _walk_from(tmp_path, monkeypatch, "INTERPOSER_PDK_ROOT")
     fake = tmp_path / "pdk"
-    (fake / "libs.tech").mkdir(parents=True)
-    (fake / "libs.tech" / "intm4tm2_stack.json").write_text("{}\n")
+    write_carrier_package(fake)
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(fake))
     got = h._expand_path_vars(
         "${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp")
