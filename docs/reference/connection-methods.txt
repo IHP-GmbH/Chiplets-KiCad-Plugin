@@ -1,0 +1,10 @@
+usage: connection_methods.py [-h]
+
+Report which interconnect methods this worker can draw a landing for.
+
+options:
+  -h, --help  show this help message and exit
+
+INTERCONNECT_PDK_ROOT and INTERPOSER_PDK_ROOT select the PDKs, as for
+hyp_to_gds.py. Exit 0 with the report on stdout; 5 or 6 when the interconnect
+manifest is present but unusable.

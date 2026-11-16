@@ -3,7 +3,7 @@
 
 import pytest
 
-from carrier_profile import resolve_carrier_profile
+from carrier_profile import check_anchor_drawable, resolve_carrier_profile
 
 
 TABLE = {44.0: {"passiv_opening": 35.0}}
@@ -45,3 +45,49 @@ def test_overflowing_landing_diameter_refuses():
         resolve_carrier_profile("attachment", {
             "passiv_opening_um": 1e308, "tm2_enclosure_um": 1e308,
         }, 80, TABLE)
+
+
+ANCHORS = {
+    "pillar": {"layers": {"passiv": "9/35", "dfpad": "41/35", "recog": "99/35"}},
+    "bump": {"layers": {"passiv": "9/36", "dfpad": "41/36", "recog": "99/36"}},
+    "partial": {"layers": {"passiv": "9/35", "dfpad": "41/35"}},
+}
+PILLAR_OPENINGS = {(9, 35), (41, 35), (99, 35)}
+BUMP_OPENINGS = {(9, 36), (41, 36), (99, 36)}
+
+
+@pytest.mark.parametrize("anchor,drawn", [
+    ("pillar", PILLAR_OPENINGS), ("bump", BUMP_OPENINGS)])
+def test_an_anchor_whose_openings_the_generator_draws_passes(anchor, drawn):
+    check_anchor_drawable("attachment", anchor, ANCHORS, drawn)
+
+
+@pytest.mark.parametrize("anchor,drawn", [
+    ("bump", PILLAR_OPENINGS),
+    ("pillar", BUMP_OPENINGS),
+    ("partial", PILLAR_OPENINGS),
+    ("pillar", PILLAR_OPENINGS | {(9, 36)}),
+    ("pillar", set()),
+])
+def test_an_anchor_the_generator_cannot_draw_refuses(anchor, drawn):
+    with pytest.raises(ValueError, match="cannot draw that landing"):
+        check_anchor_drawable("attachment", anchor, ANCHORS, drawn)
+
+
+@pytest.mark.parametrize("anchor,table", [
+    (None, ANCHORS), ("", ANCHORS), (7, ANCHORS),
+    ("absent", ANCHORS), ("pillar", None), ("pillar", {"pillar": {}}),
+    ("pillar", {"pillar": {"layers": {}}}),
+])
+def test_an_anchor_the_manifest_does_not_describe_refuses(anchor, table):
+    with pytest.raises(ValueError, match="fab_anchor must|declares no UBM layers"):
+        check_anchor_drawable("attachment", anchor, table, PILLAR_OPENINGS)
+
+
+@pytest.mark.parametrize("spec", ["9/35x", " 9/35", "9/-35", 935, None])
+def test_a_malformed_anchor_layer_refuses(spec):
+    # The other two openings match, so only the malformed entry can refuse.
+    layers = {"passiv": spec, "dfpad": "41/35", "recog": "99/35"}
+    with pytest.raises(ValueError, match="malformed layer"):
+        check_anchor_drawable("attachment", "pillar", {"pillar": {"layers": layers}},
+                              PILLAR_OPENINGS)

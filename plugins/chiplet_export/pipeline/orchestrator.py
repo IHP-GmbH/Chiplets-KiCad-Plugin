@@ -28,7 +28,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
-from ..layer_map import PATH_VAR_MARKERS
+from ..connection_methods import refused_landings, resolve_die_methods
+from ..layer_map import (
+    PATH_VAR_MARKERS, CarrierPackageRefused, read_carrier_package,
+)
 
 
 # Default ADK interposer adapter used when neither the dialog nor the
@@ -56,8 +59,9 @@ INTERCONNECT_ABSENCE_WARNING = (
 # variable -- explicit selection IS the convention's env leg, so swapping in
 # another PDK checkout (a vendor fork, a release tag) needs no code change.
 DEPENDENCY_ROOT_MARKERS = {
-    # The worker's own entry, so the dialog never shows a root the worker
-    # refuses (a KLayout PDK tree that is not IntM4TM2).
+    # The worker's own marker, so the dialog never offers a KLayout PDK tree
+    # without a technology package. A package of another carrier is still
+    # offered; the worker refuses it by its id.
     "INTERPOSER_PDK_ROOT": PATH_VAR_MARKERS["INTERPOSER_PDK_ROOT"],
     "INTERCONNECT_PDK_ROOT": (("interconnect_pdk",
                                "IHP-Interconnect-IntM4TM2"), ("manifest",)),
@@ -85,7 +89,7 @@ def discover_dependency_root(var_name: str, board=None,
             return False
 
     # A set INTERPOSER_PDK_ROOT is a selection, shown as given even when it
-    # is not an IntM4TM2 tree, so the worker refuses it; skipping it would
+    # holds no carrier technology package, so the worker refuses it; skipping it would
     # offer the sibling checkout in its place without a word (the same rule
     # as discover_interconnect_root).
     selection = var_name == "INTERPOSER_PDK_ROOT"
@@ -143,12 +147,12 @@ def discover_interposer_lyp(board=None, start: Optional[str] = None) -> str:
     """Default interposer layer-properties file for the dialog's LYP field.
 
     Chain (first existing file wins): INTERPOSER_LYP environment variable
-    -> INTERPOSER_LYP project text variable -> canonical
-    ``libs.tech/klayout/tech/intm4tm2.lyp`` under the discovered interposer
-    PDK root. The .lyp belongs to the interposer PDK, not the plugin, so
-    there is no bundled fallback: when nothing resolves this returns ""
-    (the dialog leaves the picker empty for the user, and the worker errors
-    pointing at INTERPOSER_PDK_ROOT). Mirrors the worker's own default
+    -> INTERPOSER_LYP project text variable -> the ``layer_properties.lyp``
+    that the discovered interposer PDK root's technology package names.
+    The .lyp belongs to the interposer PDK, not the plugin, so there is no
+    bundled fallback: when nothing resolves, or the package cannot name it,
+    this returns "" (the dialog leaves the picker empty for the user, and
+    the worker refuses naming the cause). Mirrors the worker's own default
     (hyp_to_gds._find_default_lyp).
     """
     from .discovery import _lookup_text_var
@@ -169,10 +173,11 @@ def discover_interposer_lyp(board=None, start: Optional[str] = None) -> str:
         return found
     root = discover_dependency_root("INTERPOSER_PDK_ROOT", board, start)
     if root:
-        found = _existing(Path(root).joinpath(
-            "libs.tech", "klayout", "tech", "intm4tm2.lyp"))
-        if found:
-            return found
+        try:
+            return _existing(read_carrier_package(root).member(
+                "layer_properties", "lyp"))
+        except CarrierPackageRefused:
+            pass
     return ""
 
 
@@ -1046,6 +1051,59 @@ def build_worker_env(options: ExportOptions,
     return env
 
 
+#: The worker command that reports which methods it can draw a landing for.
+CONNECTION_METHODS_SCRIPT = "connection_methods.py"
+CONNECTION_METHODS_TIMEOUT_SECONDS = 60
+
+
+class ConnectionAvailabilityError(Exception):
+    """The worker's method availability could not be read."""
+
+
+def query_connection_availability(worker_py: str, plugin_dir: str,
+                                  options: ExportOptions,
+                                  timeout: float = CONNECTION_METHODS_TIMEOUT_SECONDS,
+                                  cancel_event=None
+                                  ) -> Tuple[Dict[str, Optional[str]], str]:
+    """Run the worker's connection_methods.py with the export's PDK roots.
+
+    Returns ``(availability, shown)``: each manifest method id mapped to None
+    when the worker can draw its landing, else the reason it refuses, and the
+    command as a shell line, its root variables first. Raises
+    ConnectionAvailabilityError when the command fails, times out, is
+    cancelled through ``cancel_event``, or its report is malformed.
+    """
+    import shlex
+    import subprocess
+    from ..connection_methods import ReportError, parse_report
+    from .runner import run_async
+
+    command = [worker_py, str(Path(plugin_dir) / CONNECTION_METHODS_SCRIPT)]
+    env = build_worker_env(options)
+    roots = ["%s=%s" % (name, (env or {}).get(name)) for name in (
+        "INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT") if (env or {}).get(name)]
+    shown = " ".join(shlex.quote(word) for word in roots + command)
+    try:
+        run = run_async(command, env=env, cancel_event=cancel_event,
+                        timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ConnectionAvailabilityError("%s: %s" % (shown, exc)) from exc
+    if run.cancelled:
+        raise ConnectionAvailabilityError("%s: cancelled" % shown)
+    if run.timed_out:
+        raise ConnectionAvailabilityError(
+            "%s timed out after %g s" % (shown, timeout))
+    if run.exit_code != 0:
+        lines = run.stderr.strip().splitlines()
+        raise ConnectionAvailabilityError("%s exited %d: %s" % (
+            shown, run.exit_code, lines[-1] if lines else "no message"))
+    try:
+        return parse_report(run.stdout), shown
+    except ReportError as exc:
+        raise ConnectionAvailabilityError(
+            "%s printed %s" % (shown, exc)) from exc
+
+
 def build_adk_drc_argv(adk_runner_path: str,
                        gds_path: str,
                        interposer_adapter: str,
@@ -1131,7 +1189,7 @@ def _reject_delimiter_chars(mapping: Dict[str, str], what: str,
 
 # The GDS layouts and their derived sidecars (the .boundaries.json the worker
 # writes next to each GDS, the .ixn_methods.json the assembly DRC reads, and the
-# cu-pillar DRC json the worker drops next to the interposer GDS) live in a
+# landing DRC json the worker drops next to the interposer GDS) live in a
 # `layout/` subdir of the output directory. The .chiplet stays at the output-dir
 # root and references the interposer GDS by a `layout/<file>` relative path:
 # hyp_to_gds --update-chiplet-file emits it automatically via relative_to(), and
@@ -1877,11 +1935,15 @@ def run_export(board, options, plugin_dir,
         effective_io_pads = options.io_pads_json
         if not effective_io_pads:
             io_pads_auto = os.path.join(tmpdir, "%s_io_pads.json" % board_name)
+            # The carriers passed preflight_carriers, so a failure here is
+            # the writer's; the export stops rather than ship no pads.
             try:
                 n_io = write_io_pads_json(board, io_pads_auto, export_report=export_report)
             except Exception as exc:
-                n_io = 0
-                _log("Warning: io_pads auto-extraction failed: %s" % exc)
+                return ExportResult(
+                    error="IO pads writer crashed: %s\n%s"
+                          % (exc, traceback.format_exc()),
+                )
             if n_io:
                 effective_io_pads = io_pads_auto
                 _log("Auto-extracted %d io_pad(s) from board" % n_io)
@@ -2011,6 +2073,41 @@ def run_export(board, options, plugin_dir,
             die_methods=effective_die_conns.values(),
             manifest=interconnect_manifest,
         )
+
+        # The worker refuses a die whose landing it cannot draw, but only after
+        # the intermediates are staged. Ask it first, with the same roots, for
+        # the dies it would draw pads for; a pre-generated cupillar_gds is
+        # merged as given and draws none.
+        landing_methods = resolve_die_methods(
+            [] if options.cupillar_gds else effective_pad_locs,
+            effective_die_conns, options.connection_type)
+        refused = []
+        if landing_methods:
+            try:
+                availability, query = query_connection_availability(
+                    worker_py, plugin_dir, dataclasses.replace(
+                        options,
+                        interconnect_pdk_root=interconnect_manifest.root),
+                    cancel_event=cancel_event)
+            except ConnectionAvailabilityError as exc:
+                if cancel_event is not None and cancel_event.is_set():
+                    _log("Cancelled during the connection methods check.")
+                    return ExportResult(cancelled=True)
+                message = "Cannot check the connection methods: %s" % exc
+                _log(message)
+                return ExportResult(error=message)
+            _log("$ " + query)
+            refused = refused_landings(availability, landing_methods)
+        # A Cancel during the checks above stops here, before anything is
+        # staged in the output dir, and before a refusal it would mislabel.
+        if cancel_event is not None and cancel_event.is_set():
+            _log("Cancelled before the worker started.")
+            return ExportResult(cancelled=True)
+        if refused:
+            message = "Cannot draw the landing of %s" % "; ".join(
+                "%s (%s): %s" % entry for entry in refused)
+            _log(message)
+            return ExportResult(error=message)
 
         # All pre-worker validation passed: stage the intermediate into the
         # output dir now, as a sibling of the canonical .chiplet that hyp_to_gds
@@ -2271,11 +2368,11 @@ def run_export(board, options, plugin_dir,
                 _log("Warning: could not record .chiplet content digest: %s"
                      % exc)
 
-        # The worker writes <board>_cupillar_drc.json next to the interposer
-        # GDS (now under layout/) when a cupillar stack drives pillar
-        # generation. Surface it only if it was actually produced this run,
-        # and tuck it under reports/ so the output-dir root keeps just the
-        # .chiplet and the MANIFEST.
+        # The worker writes <board>_cupillar_drc.json, the landing DRC of
+        # every connection method, next to the interposer GDS (now under
+        # layout/) when it draws landings. Surface it only if it was actually
+        # produced this run, and tuck it under reports/ so the output-dir root
+        # keeps just the .chiplet and the MANIFEST.
         drc_report = ""
         cupillar_flat = layout_path(options.output_dir,
                                     "%s_cupillar_drc.json" % board_name)
@@ -2288,7 +2385,7 @@ def run_export(board, options, plugin_dir,
                 shutil.move(cupillar_flat, cupillar_dst)
                 drc_report = cupillar_dst
             except OSError as exc:
-                _log("Warning: could not move cu-pillar DRC into reports/: %s"
+                _log("Warning: could not move landing DRC into reports/: %s"
                      % exc)
                 drc_report = cupillar_flat
 

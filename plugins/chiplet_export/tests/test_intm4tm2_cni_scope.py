@@ -7,9 +7,9 @@ GDSGenerator.__init__). Every IntM4TM2 PCell therefore runs inside
 _intm4tm2_scope. What that must guarantee, each in a fresh interpreter so the
 answer does not depend on test order:
 
-  * the four IntM4TM2 PCells (CuPillarPad, bondpad, cmim, sealring) draw
-    the same geometry after an SG13G2 PCell as in a process that never
-    loaded SG13G2;
+  * the IntM4TM2 PCells (CuPillarPad, bondpad, cmim, sealring, and
+    SolderBumpPad where the interposer has it) draw the same geometry after
+    an SG13G2 PCell as in a process that never loaded SG13G2;
   * an SG13G2 via_stack created after them draws the same geometry as in a
     process that never loaded IntM4TM2, and SG13G2's cni is the one loaded
     after every scope exit;
@@ -131,6 +131,11 @@ g.top_cell.shapes(g.layout.layer(*g.PRBOUNDARY_LAYER)).insert(
 result["cni_before"] = cni()
 bm = h._import_bump_mirror()
 pillars = bm.CuPillarGenerator(enclosure_um=7.5)
+# The solder-bump pad cell, where the interposer has per-anchor pad cells.
+sbumps = (bm.CuPillarGenerator(enclosure_um=10.0, passiv_opening_um=60.0,
+                               fab_anchor_id="ihp_sbump_anchor")
+          if hasattr(bm, "fab_anchor_openings") else None)
+result["sbump"] = sbumps is not None
 bumps = [bm.BumpLocation("U1", "p0", 0.0, 0.0)]
 cmim = [{"ref": "C1", "x_um": 300.0, "y_um": 250.0, "w_um": 57.68,
          "l_um": 57.68, "m": 1}]
@@ -158,10 +163,20 @@ if mode == "refusal":
         result["refused"]["bondpad"] = str(exc)
     result["exits"]["bondpad"] = cni()
     try:
-        h._add_device_pillars(bm, pillars, "U1", bumps, 44.0)
+        h._add_device_pillars(bm, pillars, "U1", bumps, 44.0,
+                              pcell="CuPillarPad")
     except h.IntM4TM2Refused as exc:
         result["refused"]["CuPillarPad"] = str(exc)
     result["exits"]["CuPillarPad"] = cni()
+    if sbumps is not None:
+        try:
+            h._add_device_pillars(bm, sbumps, "U1", bumps, 80.0,
+                                  pcell="SolderBumpPad")
+        except h.IntM4TM2Refused as exc:
+            result["refused"]["SolderBumpPad"] = str(exc)
+        result["exits"]["SolderBumpPad"] = cni()
+        result["sbump_cells"] = sorted(
+            c.name for c in sbumps.layout.each_cell())
     result["added_cells"] = sorted(
         set(c.name for c in g.layout.each_cell()) - set(before))
     result["pillar_cells"] = sorted(
@@ -175,10 +190,16 @@ elif mode == "registered_outside":
     result["has_seal_ring"] = g.has_seal_ring()
 elif mode in ("sg13g2_first", "interposer_only"):
     # The flow's own order: pillars, pads, CMIM, then the ring.
-    h._add_device_pillars(bm, pillars, "U1", bumps, 44.0)
+    h._add_device_pillars(bm, pillars, "U1", bumps, 44.0, pcell="CuPillarPad")
     result["exits"]["CuPillarPad"] = cni()
     result["cells"]["CuPillarPad"] = digest(
         pillars.layout, pillars.layout.cell("CUPILLARS_U1"))
+    if sbumps is not None:
+        h._add_device_pillars(bm, sbumps, "U1", bumps, 80.0,
+                              pcell="SolderBumpPad")
+        result["exits"]["SolderBumpPad"] = cni()
+        result["cells"]["SolderBumpPad"] = digest(
+            sbumps.layout, sbumps.layout.cell("SBUMPS_U1"))
     pad = g._create_wire_bond_pad_cell(100.0, 100.0)
     result["exits"]["bondpad"] = cni()
     result["cells"]["bondpad"] = digest(g.layout, pad)
@@ -195,7 +216,8 @@ elif mode in ("sg13g2_first", "interposer_only"):
     result["declared"] = {
         name: type(lib.layout().pcell_declaration(name)).produce.__code__
         .co_filename for name in ("CuPillarPad", "bondpad", "cmim",
-                                  "sealring")}
+                                  "sealring")
+        + (("SolderBumpPad",) if sbumps is not None else ())}
 if mode in ("sg13g2_first", "sg13g2_only"):
     result["via"] = via_after()
     result["cni_after_via"] = cni()
@@ -226,6 +248,12 @@ def runs(tmp_path_factory):
         "registered_outside")}
 
 
+def _pcells(run):
+    # The IntM4TM2 PCells a child placed, by what its interposer provides.
+    names = ["CuPillarPad", "bondpad", "cmim", "sealring"]
+    return sorted(names + ["SolderBumpPad"] if run["sbump"] else names)
+
+
 def _under(path, root):
     root = os.path.realpath(root)
     return os.path.commonpath([root, os.path.realpath(path)]) == root
@@ -241,8 +269,8 @@ def test_intm4tm2_pcells_draw_the_same_after_an_sg13g2_pcell(runs):
     assert alone["cni_before"] is None
     assert alone["modules"] == ["intm4tm2_pycell_lib"]
     assert first["cmim_return"] == alone["cmim_return"] == [1, []]
-    assert sorted(first["cells"]) == ["CuPillarPad", "bondpad", "cmim",
-                                      "sealring"]
+    assert first["sbump"] == alone["sbump"]
+    assert sorted(first["cells"]) == _pcells(first)
     for name, layers in first["cells"].items():
         assert layers, name
         assert layers == alone["cells"][name], name
@@ -260,8 +288,7 @@ def test_sg13g2_keeps_its_cni_after_every_intm4tm2_scope(runs):
     first, alone = runs["sg13g2_first"], runs["sg13g2_only"]
     assert first["modules"] == ["intm4tm2_pycell_lib", "sg13g2_pycell_lib"]
     assert alone["modules"] == ["sg13g2_pycell_lib"]
-    assert sorted(first["exits"]) == ["CuPillarPad", "bondpad", "cmim",
-                                      "sealring"]
+    assert sorted(first["exits"]) == _pcells(first)
     for name, path in first["exits"].items():
         assert path == first["cni_before"], name
     assert first["cni_after_via"] == first["cni_before"]
@@ -279,8 +306,7 @@ def test_a_library_registered_on_sg13g2s_cni_is_refused(runs):
     refusal = runs["refusal"]
     sg13g2_dlo = refusal["cni_before"]
     assert _under(sg13g2_dlo, SG13G2_ROOT)
-    assert sorted(refusal["refused"]) == ["CuPillarPad", "bondpad", "cmim",
-                                          "sealring"]
+    assert sorted(refusal["refused"]) == _pcells(refusal)
     for name, message in refusal["refused"].items():
         assert "IntM4TM2 %s PCell" % name in message, message
         assert sg13g2_dlo in message, message
@@ -290,6 +316,8 @@ def test_a_library_registered_on_sg13g2s_cni_is_refused(runs):
     assert refusal["cmim_return"] == [0, ["C1"]]
     assert refusal["added_cells"] == []
     assert refusal["pillar_cells"] == ["TOP"]
+    if refusal["sbump"]:
+        assert refusal["sbump_cells"] == ["TOP"]
     assert refusal["has_seal_ring"] is False
 
 

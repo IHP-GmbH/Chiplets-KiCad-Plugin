@@ -189,9 +189,10 @@ Machine-readable sidecars land next to each generated GDS:
   including runs that place zero bumps (empty `pillars` array). The x/y
   values are authoritative for manifest-level checks; the GDS remains
   the fabrication ground truth.
-- `<board>_cupillar_drc.json`: the complete Cu-pillar DRC report
-  (per-method parameters, per-device results), so warn-and-continue
-  violations survive past the dialog log.
+- `<board>_cupillar_drc.json`: the complete landing DRC report for every
+  connection method in the run, Cu pillar and solder bump alike (the file
+  name is historical): per-method parameters, per-device results, so
+  warn-and-continue violations survive past the dialog log.
 
 Readers of both manifests exact-match the `version` string; producer and
 readers are bumped together.
@@ -353,10 +354,15 @@ that PDK's manifest. Overrides reach the worker as the matching
 environment variables: `INTERPOSER_PDK_ROOT`, `INTERCONNECT_PDK_ROOT`,
 `ADK_ROOT`.
 
-Every export needs the interposer PDK. The plane the dies mount on (the
+Every export needs the interposer PDK, OpenIntM4TM2 v2026.11 or later
+(earlier releases have no technology package). The plane the dies mount on (the
 `.chiplet`'s `attachment_surface_z`) is its `beol.attachment_surface_z_um`,
-read from `libs.tech/intm4tm2_stack.json` on each run; there is no value
-written from memory. Without the PDK, or with a descriptor that does not
+read on each run from the stack file its technology package
+(`libs.tech/adk/technology.json`) names; there is no value written from
+memory. The package also names the default layer properties. A package
+whose id is not `intm4tm2`, and a `--system-chiplet` whose interposer
+technology is not `intm4tm2`, are refused (`CARRIER_UNSUPPORTED_TECHNOLOGY`):
+pads and connections still land on IntM4TM2's TopMetal2. Without the PDK, or with a descriptor that does not
 give that key as a number, the export is refused before anything is
 written, and the message names `INTERPOSER_PDK_ROOT` and the key.
 
@@ -370,6 +376,16 @@ written, and the message names `INTERPOSER_PDK_ROOT` and the key.
   dies' existing connection field untouched. This is the assembly-wide
   default; per-die rows below override it.
 
+  A method whose landing the worker cannot draw is labelled
+  `(unavailable)` here and in the per-die rows, its reason replaces the
+  grey line, and Run stays disabled while a die uses it. The dialog asks
+  the worker with `connection_methods.py`, the same command chiplet-export
+  runs before it stages anything, and logs the command it ran. The query
+  runs in the background, again whenever the worker or a PDK root changes;
+  until it answers, or when it fails, nothing is marked and the export
+  makes the same check at Run. The dialog checks every die row, while the
+  export checks only the dies whose pins it draws.
+
   Each entry is labelled with the numbers the choice actually turns on —
   `cupillar_opt1 - 75um pitch, 44um dia` — and the grey line underneath
   spells the selected method out in full (pitch, minimum spacing,
@@ -382,20 +398,27 @@ written, and the message names `INTERPOSER_PDK_ROOT` and the key.
   file of the interposer technology. Pre-filled with the discovered
   default via `discover_interposer_lyp()`, which follows the
   `INTERPOSER_LYP` env var, then the `INTERPOSER_LYP` project text
-  variable, then the PDK's canonical
-  `libs.tech/klayout/tech/intm4tm2.lyp`. The `.lyp` belongs to the
+  variable, then the `layer_properties.lyp` that the PDK's technology
+  package names. The `.lyp` belongs to the
   interposer PDK, not the plugin, so there is no bundled copy: when none
   resolves the field is left blank and the export errors asking you to set
   `INTERPOSER_PDK_ROOT` or pick a file. Replace it only when the interposer
   uses a different technology. Do not point it at the interconnect `.lyp`
   (bump layers only); that one is consumed automatically via the
   `.chiplet`.
-- *I/O pads*: auto-extracted from the loaded board's IO_CLASS footprints,
+- *I/O pads*: auto-extracted from the loaded board's IO_CLASS footprints
+  into chiplet-spec's io pad manifest (`io_pads.schema.json`, board frame),
   rendered in the interposer GDS and injected under the interposer
-  component. An explicit sidecar JSON from `kicad_pcb_to_iopads.py` can be
-  supplied through the headless `ExportOptions.io_pads_json`.
-- *Cu-pillars*: auto-generated from each flip-chip die's footprint pads when
-  the die's connection is a cu-pillar stack. A pre-generated cu-pillar GDS,
+  component. A carrier whose IO_CLASS is not `wire_bond`, `flipped_bump` or
+  `tsv_bump`, or whose size neither `IO_PAD_SIZE_UM` (`<x>x<y>` in
+  micrometers) nor its first pad gives, is refused before any output. An
+  explicit manifest can be supplied through the headless
+  `ExportOptions.io_pads_json`; it needs the same envelope (schema, version
+  1.x, frame `board_absolute_ynegated_um`), and `hyp_to_gds.py` refuses one
+  without it, or in another frame, before any output.
+- *Landings*: auto-generated from each flip-chip die's footprint pads when
+  the die has a connection method: Cu-pillar pads for a cu-pillar stack,
+  solder-bump pads for a solder bump. A pre-generated cu-pillar GDS,
   typically from `bump_mirror.py`, can be supplied through the headless
   `ExportOptions.cupillar_gds`.
 - *Integrated MIM capacitors*: auto-extracted from the board's `cap_cmim`
@@ -681,11 +704,11 @@ Edge.Cuts outline)"**
 The Hyperlynx writer needs a closed board outline to derive units and
 bounding box. Add an Edge.Cuts polygon enclosing the design and retry.
 
-**Cu-pillars missing in the chiplet-studio Detailed render**
+**Cu-pillars or solder bumps missing in the chiplet-studio Detailed render**
 
-Cu-pillars are generated only when a die's connection is a cu-pillar stack
-(set via the per-die *Connection* row or the assembly-wide *Connection
-stack*). Confirm the die has a cu-pillar method selected, then re-run. A
+Landings are generated only when a die has a connection method (set via the
+per-die *Connection* row or the assembly-wide *Connection stack*). Confirm
+the die has a method selected, then re-run. A
 pre-generated cu-pillar GDS can instead be supplied through the headless
 `ExportOptions.cupillar_gds`.
 
@@ -752,7 +775,7 @@ options = ExportOptions(
     emit_chiplet=True,
     emit_complete_gds=True,
     top_cell="INTERPOSER",
-    lyp_override="/path/to/intm4tm2.lyp",
+    lyp_override="/path/to/interposer.lyp",
     io_pads_json="",
     cupillar_gds="/path/to/cu_pillars.gds",
 )
@@ -888,9 +911,25 @@ is then passed to the worker. Check the board's copper layer names and selected
 LYP when this check fails; changing a KiCad layer's name does not change its
 internal layer identifier. Unmarked exports retain the existing layer policy.
 
-The supported fabrication profile is presently `ihp_cupillar_anchor`, circular
-TopMetal2 landings, mapped to the canonical KiCad copper layer recorded by the
-producer. This does not claim arbitrary fabrication-anchor support. The HYP
+The supported fabrication profile is circular TopMetal2 landings, mapped to
+the canonical KiCad copper layer recorded by the producer. The record's anchor
+must be the selected manifest method's `fab_anchor`, and the worker draws a
+landing only when the UBM openings that anchor declares in the manifest's
+`fab_anchors` table are the ones the interposer PDK's pad cell for that
+anchor draws (bump_mirror's `fab_anchor_openings`): CuPillarPad for
+`ihp_cupillar_anchor`, SolderBumpPad for `ihp_sbump_anchor`. Each die's pads
+are placed in a group cell named by that pad cell (`CUPILLARS_<ref>`,
+`SBUMPS_<ref>`) and checked against its own rule set (Padc, Padb). An
+interposer PDK older than the solder-bump pad cell draws CuPillarPad only, so
+there an `ihp_sbump_anchor` method (`sbump_sac305`) is refused before the GDS
+is written instead of losing its landings, whenever the worker draws the pads
+from pin locations. `connection_methods.py` runs that check for every method
+and prints the result as JSON; the dialog and chiplet-export use it to refuse
+such a die before the export stages anything. A pre-generated `--cupillar-gds` is merged as given; for
+marked boards the preflight refuses that override. For every method the
+landing diameter is `passiv_opening_um + 2 * tm2_enclosure_um` from the
+manifest. A solder bump's `body_diameter_um` is the ball, a 3D body only, and
+neither number is derived from the other. The HYP
 writer deliberately exports the **carrier** padstack geometry; the die pin-list
 writer instead retains original die dimensions and physical indices. Its known
 geometry fields are normalized to nm in footprint-local GDS Y-up coordinates,

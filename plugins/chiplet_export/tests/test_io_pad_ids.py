@@ -126,6 +126,35 @@ def test_a_sheeted_board_reads_ids_not_designators(tmp_path):
     assert sorted(json_refs(tmp_path, board, same_names(board))) == sorted(names)
 
 
+def test_a_real_board_writes_the_pdk_layer_and_keeps_its_own(tmp_path):
+    """On a board pcbnew loaded: ``layer`` is the PDK's, ``source_layer`` the
+    name the board gives the footprint's copper layer."""
+    board = load(tmp_path, DRAFT.read_text())
+    out = tmp_path / "io_pads.json"
+    write_io_pads_json(board, str(out))
+    data = json.loads(out.read_text())
+    assert (data["schema"], data["version"], data["frame"]) == (
+        "chiplet-io-pad-manifest", "1.0.0", "board_absolute_ynegated_um")
+    assert data["board"] == "board.kicad_pcb"
+    pads = data["io_pads"]
+    assert len(pads) == len(carriers(DRAFT.read_text()))
+    assert {p["layer"] for p in pads} == {"TopMetal2"}
+    assert {p["source_layer"] for p in pads} == {board.GetLayerName(pcbnew.F_Cu)}
+    assert {(p["size_x_um"], p["size_y_um"]) for p in pads} == {(80.0, 80.0)}
+
+
+@pytest.mark.parametrize("writer", [write_chiplet, write_io_pads_json])
+def test_a_carrier_class_outside_the_vocabulary_is_refused(tmp_path, writer):
+    text = DRAFT.read_text().replace('"IO_CLASS" "wire_bond"', '"IO_CLASS" "wirebond"', 1)
+    board = load(tmp_path, text)
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="unrecognized IO_CLASS 'wirebond'"):
+        writer(board, str(out))
+    assert not out.exists()
+    with pytest.raises(ValueError, match="unrecognized IO_CLASS 'wirebond'"):
+        preflight_carriers(board, None)
+
+
 @pytest.mark.parametrize("writer", [write_chiplet, write_io_pads_json])
 def test_a_sheeted_carrier_without_its_id_is_refused(tmp_path, writer):
     text = DRAFT.read_text()

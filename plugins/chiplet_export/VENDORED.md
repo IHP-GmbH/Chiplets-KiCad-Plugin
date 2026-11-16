@@ -1,10 +1,11 @@
 # Vendored copies
 
 Files in this plugin that are another repository's bytes, copied in. Each entry names
-the upstream commit and the sha256 of the copy, and each is gated by a test, so a local
+the upstream revision (a commit, or a release tag where the upstream is not public) and
+the sha256 of the copy, and each is gated by a test, so a local
 edit fails the suite instead of drifting quietly into a second, diverging original.
 
-Re-vendor with a plain copy of the upstream file. The same commit updates the commit and
+Re-vendor with a plain copy of the upstream file. The same commit updates the revision and
 sha256 in the copy's SOURCE file, which the gates read the pin from, and in its entry here.
 For the reader it also updates the release in its entry and in the heading of its standing
 rules, any rule the new copy changed, and its table of moves.
@@ -29,7 +30,7 @@ that is kept and never rebased, squashed or deleted; never the head of a branch 
 because a pin has to name a commit that survives whatever the merge does.
 
 **`vendor/chiplet_format_io/__init__.py`**
-from `reference/python/chiplet_format_io/__init__.py` at commit `48a3052`,
+from `reference/python/chiplet_format_io/__init__.py` at commit `c87c5b3`,
 sha256 `256191bb3b7a9538cc5c7ace9a48b8f9c967bb66be0e9ed47a389d8a1af879da`,
 reader release 1.22.0.
 Gated by `tests/test_vendored_copies.py`. `vendor/chiplet_format_io.SOURCE` states the
@@ -90,7 +91,7 @@ line-break and grammar oracle, so that is the frontier it covers.
 | 2026-09-05 | 1.4.0 to 1.5.0 | Additive: `split_top_level_keys` and `TopLevelKeys`. |
 
 **`tests/fixtures/top_level_blocks_cases.json`**
-from `conformance/fixtures/top_level_blocks_cases.json` at commit `48a3052`,
+from `conformance/fixtures/top_level_blocks_cases.json` at commit `c87c5b3`,
 sha256 `45c37f47f142d88c63dfd3056a3dceba07afe6f2035d25243b7f87f2c37bccd0`,
 oracle version 5. Its commit is the reader's pin.
 Gated by `tests/test_top_level_block_grammar.py`
@@ -107,10 +108,19 @@ evidence that the copy drifted. The fixture is an oracle: it is also compared ag
 checkout's working tree, so when the oracle moves upstream this repo goes red and has to
 decide, which is the whole reason the fixture is consumed here instead of transcribed.
 
+**Two rules in `layer_map.py`, copied, not a file**
+`_unportable` is chiplet-spec's `technology_package._unportable` and `_contract_version` its
+`_parse_contract_version` (`reference/python/chiplet_format_io`), at the pin
+`vendor/chiplet_format_io.SOURCE` names. They are copied rather than imported because
+`layer_map` loads in the KiCad process, which has neither the vendored reader's YAML nor
+jsonschema. Gated by `tests/test_carrier_package.py`, which runs both on a list of inputs
+against the checkout and requires the same answers; when the pin moves, the rules are copied
+again with it.
+
 ## interposer-pnr
 
 **`vendor/round_trip_names.py`**
-from `src/interposer_pnr/round_trip_names.py` at commit `54caf81`,
+from `src/interposer_pnr/round_trip_names.py` at release `v2026.11.1`,
 sha256 `e7a11170121cc17dcbdefa6ffb0efdf5319c6474950ce2751bcb2ce34e6d1060`.
 interposer-pnr's reader of an export report's net names and its rules for reading a
 board's carriers against a report (`read_board_carriers`: each carrier's io_pad id, and

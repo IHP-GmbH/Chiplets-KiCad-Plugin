@@ -21,3 +21,9 @@ inputs, environment, outputs and examples: [chiplet-export](CLI.md).
 ```{literalinclude} reference/hyp-to-gds.txt
 :language: text
 ```
+
+## connection_methods.py
+
+```{literalinclude} reference/connection-methods.txt
+:language: text
+```

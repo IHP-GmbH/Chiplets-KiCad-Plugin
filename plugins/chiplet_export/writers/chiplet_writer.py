@@ -14,6 +14,7 @@ chiplet-system-spec/docs/coord_frame_contract.md sections 1 and 2 and the writer
 import math
 import os
 import sys
+from collections import namedtuple
 
 import pcbnew
 
@@ -35,12 +36,14 @@ if "." in (__package__ or ""):
         NOT_EMITTED, OUTLINE_DIE, die_role, is_cmim,
     )
     from ..draft_net_names import BoardCarrier, planner_net, read_board_carriers
+    from .. import io_pads_manifest as _io_pads_manifest
 else:
     from die_outline import (  # noqa: F401
         CMIM, CMIM_MODEL, FIELD as DIE_OUTLINE_LAYER_FIELD, IO_PAD,
         NOT_EMITTED, OUTLINE_DIE, die_role, is_cmim,
     )
     from draft_net_names import BoardCarrier, planner_net, read_board_carriers
+    import io_pads_manifest as _io_pads_manifest
 
 
 def _iu_to_um(iu):
@@ -111,10 +114,80 @@ def carrier_identities(carriers, report):
     return named
 
 
+#: The io_pad usage classes, the closed vocabulary of both the .chiplet and
+#: io_pads.json. The .chiplet reader throws on any other (IOPad.cpp
+#: string_to_io_class) and the finalizer does not normalize them on the
+#: no-sidecar path, so a typo is refused at export, as the C++ exporter does.
+IO_CLASSES = ("wire_bond", "flipped_bump", "tsv_bump")
+
+#: The PDK layer the worker draws every io_pad on, as both files name it.
+IO_PAD_LAYER = "TopMetal2"
+
+
+def _size_um(x, y):
+    """(x, y) to the nanometer, or None unless both are finite and above zero."""
+    size = (round(x, 3), round(y, 3))
+    return size if all(math.isfinite(v) and v > 0.0 for v in size) else None
+
+
+def io_pad_size_um(fp):
+    """A carrier's pad size in micrometers, to the nanometer: IO_PAD_SIZE_UM
+    ("<x>x<y>"), else its first pad's. None when neither gives a finite size
+    above zero on both axes once rounded."""
+    parts = _field_text(fp, "IO_PAD_SIZE_UM").split("x")
+    if len(parts) == 2:
+        try:
+            size = _size_um(float(parts[0]), float(parts[1]))
+        except ValueError:
+            size = None
+        if size:
+            return size
+    pads = list(fp.Pads())
+    if not pads:
+        return None
+    return _size_um(_iu_to_um(pads[0].GetSizeX()), _iu_to_um(pads[0].GetSizeY()))
+
+
+def _io_pad_class_and_size(fp):
+    """A carrier's io_class and size, refusing (ValueError) a class outside
+    IO_CLASSES or a size io_pad_size_um cannot tell."""
+    io_class = _field_text(fp, "IO_CLASS")
+    if io_class not in IO_CLASSES:
+        raise ValueError(
+            "Footprint %s has an unrecognized IO_CLASS '%s'; expected %s."
+            % (fp.GetReference(), io_class, ", ".join(IO_CLASSES)))
+    size = io_pad_size_um(fp)
+    if size is None:
+        raise ValueError(
+            "Footprint %s has no pad size: give IO_PAD_SIZE_UM as <x>x<y> in "
+            "micrometers, or a pad, with both sides above zero."
+            % fp.GetReference())
+    return io_class, size
+
+
+#: A carrier as both files write it: its footprint, io_pad id, net, io_class
+#: and (x, y) size in micrometers.
+IoPad = namedtuple("IoPad", "fp ident net io_class size")
+
+
+def read_io_pads(footprints, report):
+    """Every carrier (io_pad_carriers) as both writers take it, in order.
+
+    The one read of the carriers: their classes and sizes first, then their
+    ids and nets (carrier_identities), so the preflight and both writers
+    refuse the same boards with the same first error, before any output.
+    """
+    carriers = io_pad_carriers(footprints)
+    checked = [_io_pad_class_and_size(fp) for fp in carriers]
+    named = carrier_identities(carriers, report)
+    return [IoPad(fp, ident, net, io_class, size)
+            for fp, (io_class, size), (ident, net) in zip(carriers, checked, named)]
+
+
 def preflight_carriers(board, report):
-    """Refuse a board whose carriers both writers would refuse, by id or by
-    net (see carrier_identities), before any output exists."""
-    carrier_identities(io_pad_carriers(board.Footprints()), report)
+    """Refuse a board whose carriers either writer would refuse
+    (read_io_pads), before any output exists."""
+    read_io_pads(board.Footprints(), report)
 
 
 def _lookup_property(board, name):
@@ -220,58 +293,51 @@ def _lookup_text_var(board, name):
 
 
 def write_io_pads_json(board, output_path, export_report=None):
-    """Extract IO_CLASS footprints from `board` into an io_pads.json sidecar.
+    """Extract IO_CLASS footprints from `board` into an io_pads.json manifest.
 
-    Output matches gds_to_kicad/io_pads/kicad_pcb_to_iopads.py: positions in
-    micrometers with Y negated (KiCad Y-down -> GDS Y-up), consumed by
-    hyp_to_gds.py --io-pads to render the TopMetal2 pad geometry and inject
-    the pads under the interposer component (so the GDS bbox includes them).
-    Each entry's ``ref`` is the io_pad id (carrier_identities), not necessarily the
-    footprint reference, and its ``net`` as carrier_identities names it from
-    ``export_report``.
+    The manifest of chiplet-spec's io_pads.schema.json, in the board frame:
+    positions in micrometers with Y negated (KiCad Y-down -> GDS Y-up), in
+    the whole nanometers the board holds, consumed by hyp_to_gds.py --io-pads
+    to render the pad geometry and inject the pads under the interposer
+    component (so the GDS bbox includes them). Each entry's ``ref`` is the io_pad id
+    (carrier_identities), not necessarily the footprint reference, and its
+    ``net`` as carrier_identities names it from ``export_report``; ``layer``
+    is the PDK layer, and the KiCad layer goes in ``source_layer``. A carrier
+    read_io_pads refuses raises before the file is opened.
 
     Returns the number of io_pads written (0 -> nothing written, no file).
     """
     import json
 
     pads_out = []
-    carriers = io_pad_carriers(board.Footprints())
-    for fp, (ident, net_name) in zip(carriers, carrier_identities(carriers, export_report)):
-        io_class = _field_text(fp, "IO_CLASS")
-        size_str = _field_text(fp, "IO_PAD_SIZE_UM")
-        size_x_um = 0.0
-        size_y_um = 0.0
-        if size_str:
-            parts = size_str.split("x")
-            if len(parts) == 2:
-                try:
-                    size_x_um = float(parts[0])
-                    size_y_um = float(parts[1])
-                except ValueError:
-                    pass
-        pads_list = list(fp.Pads())
-        if (size_x_um <= 0.0 or size_y_um <= 0.0) and pads_list:
-            size_x_um = _iu_to_um(pads_list[0].GetSizeX())
-            size_y_um = _iu_to_um(pads_list[0].GetSizeY())
-        pos = fp.GetPosition()
-        try:
-            layer_name = board.GetLayerName(fp.GetLayer())
-        except Exception:
-            layer_name = "F.Cu"
+    for pad in read_io_pads(board.Footprints(), export_report):
+        pos = pad.fp.GetPosition()
         pads_out.append({
-            "ref": ident,
-            "io_class": io_class,
+            "ref": pad.ident,
+            "io_class": pad.io_class,
             "x_um": _iu_to_um(pos.x),
             "y_um": -_iu_to_um(pos.y),
-            "size_x_um": size_x_um,
-            "size_y_um": size_y_um,
-            "net": net_name,
-            "layer": layer_name,
+            "size_x_um": pad.size[0],
+            "size_y_um": pad.size[1],
+            "net": pad.net,
+            "layer": IO_PAD_LAYER,
+            "source_layer": str(board.GetLayerName(pad.fp.GetLayer())),
         })
     if not pads_out:
         return 0
+    manifest = {
+        # The envelope hyp_to_gds reads the manifest by (io_pads_manifest).
+        "schema": _io_pads_manifest.SCHEMA,
+        "version": _io_pads_manifest.VERSION,
+        "frame": _io_pads_manifest.FRAME,
+        "generator": "chiplet_writer.write_io_pads_json",
+    }
+    board_file = os.path.basename(board.GetFileName() or "")
+    if board_file:
+        manifest["board"] = board_file
+    manifest["io_pads"] = pads_out
     with open(output_path, "w") as f:
-        json.dump({"io_pads": pads_out}, f, indent=2)
+        json.dump(manifest, f, indent=2)
     return len(pads_out)
 
 
@@ -789,7 +855,8 @@ def write_chiplet(board, output_path, interconnect_manifest=None, export_report=
         True on success.
 
     Raises:
-        OSError if the output path is not writable.
+        OSError if the output path is not writable; ValueError for a board
+        it refuses (a carrier read_io_pads refuses, before the output opens).
     """
     # --- Data gathering ---
     if "." in __package__:
@@ -851,18 +918,7 @@ def write_chiplet(board, output_path, interconnect_manifest=None, export_report=
             continue
 
         if role == IO_PAD:
-            io_class = _field_text(footprint, "IO_CLASS")
-            # The reader only accepts these classes (IOPad.cpp
-            # string_to_io_class throws otherwise) and the finalizer does not
-            # normalize them on the no-sidecar path, so a typo would ship a
-            # .chiplet that fails at load. Fail loudly at export, mirroring the
-            # C++ exporter.
-            if io_class not in ("wire_bond", "flipped_bump", "tsv_bump"):
-                raise ValueError(
-                    "Footprint %s has an unrecognized IO_CLASS '%s'; expected "
-                    "wire_bond, flipped_bump, or tsv_bump."
-                    % (footprint.GetReference(), io_class)
-                )
+            # Read with every other carrier below (read_io_pads).
             io_pads.append(footprint)
             continue
 
@@ -918,10 +974,9 @@ def write_chiplet(board, output_path, interconnect_manifest=None, export_report=
 
     # Before opening the output, so a refused carrier leaves no file behind.
     # Over the sidecar's carrier set, not only the emitted io_pads.
-    carriers = io_pad_carriers(footprints)
     # Keyed on the wrappers in `footprints`, which io_pads holds too: rebuild
     # neither list from fresh board lookups, or id() stops matching.
-    named_by_fp = dict(zip(map(id, carriers), carrier_identities(carriers, export_report)))
+    read_by_fp = {id(pad.fp): pad for pad in read_io_pads(footprints, export_report)}
 
     # --- YAML emission ---
 
@@ -1029,35 +1084,16 @@ def write_chiplet(board, output_path, interconnect_manifest=None, export_report=
         if io_pads:
             f.write("    io_pads:\n")
             for fp in io_pads:
-                ident, net_name = named_by_fp[id(fp)]
-                io_class = _field_text(fp, "IO_CLASS")
-                size_str = _field_text(fp, "IO_PAD_SIZE_UM")
-
-                size_x_um = 0.0
-                size_y_um = 0.0
-                if size_str:
-                    parts = size_str.split("x")
-                    if len(parts) == 2:
-                        try:
-                            size_x_um = float(parts[0])
-                            size_y_um = float(parts[1])
-                        except ValueError:
-                            pass
-
-                pads_list = list(fp.Pads())
-                if (size_x_um <= 0.0 or size_y_um <= 0.0) and pads_list:
-                    pad = pads_list[0]
-                    size_x_um = _iu_to_um(pad.GetSizeX())
-                    size_y_um = _iu_to_um(pad.GetSizeY())
-
+                pad = read_by_fp[id(fp)]
+                size_x_um, size_y_um = pad.size
 
                 pos = fp.GetPosition()
                 x_um = _iu_to_um(pos.x - interposer_x_min)
                 y_um = _iu_to_um(interposer_y_max - pos.y)
 
-                f.write("      - id: %s\n" % yaml_scalar(ident))
-                f.write("        io_class: %s\n" % yaml_scalar(io_class))
-                f.write('        net: "%s"\n' % escape_yaml_dq(net_name))
+                f.write("      - id: %s\n" % yaml_scalar(pad.ident))
+                f.write("        io_class: %s\n" % yaml_scalar(pad.io_class))
+                f.write('        net: "%s"\n' % escape_yaml_dq(pad.net))
                 f.write(
                     "        position: { x: %.6f, y: %.6f }\n"
                     % (x_um, y_um)
@@ -1066,7 +1102,7 @@ def write_chiplet(board, output_path, interconnect_manifest=None, export_report=
                     "        size: { x: %.3f, y: %.3f }\n"
                     % (size_x_um, size_y_um)
                 )
-                f.write("        layer: TopMetal2\n")
+                f.write("        layer: %s\n" % IO_PAD_LAYER)
         f.write("\n")
 
         # 2) Die components.
@@ -1079,7 +1115,7 @@ def write_chiplet(board, output_path, interconnect_manifest=None, export_report=
             # means face_up. Any other token (a typo, or the non-canonical
             # "face_down") would otherwise fall through to a non-flip die that
             # is silently emitted un-mirrored and without its connection stack.
-            # Fail loudly at export, mirroring the IO_CLASS check above.
+            # Fail loudly at export, as an IO_CLASS is (read_io_pads).
             if orient not in ("", "face_up", "flip_chip"):
                 raise ValueError(
                     "Footprint %s has an unrecognized ORIENTATION '%s'; expected "

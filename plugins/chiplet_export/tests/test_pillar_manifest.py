@@ -299,9 +299,7 @@ def test_complete_manifest_reuses_interposer_frame_origin(tmp_path):
     gen.top_cell.shapes(gen.layout.layer(235, 0)).insert(
         db.DBox(-200.0, -200.0, 200.0, 200.0))
 
-    io1 = tmp_path / "io1.json"
-    io1.write_text(json.dumps({"io_pads": [_pad("J1", 0, 0)]}))
-    gen.add_io_pads(str(io1))
+    assert len(gen.add_io_pads([_pad("J1", 0, 0)])) == 1
     gen.record_pillars([{
         "device_ref": "U1", "pin_name": "p0", "method": "cupillar_opt1",
         "x_um": 100.0, "y_um": 50.0, "diameter_um": 44,
@@ -315,9 +313,7 @@ def test_complete_manifest_reuses_interposer_frame_origin(tmp_path):
     assert (m1["pillars"][0]["x_um"], m1["pillars"][0]["y_um"]) == (300.0,
                                                                     250.0)
     # Grow the bbox toward the lower left, as merged chiplet artwork could.
-    io2 = tmp_path / "io2.json"
-    io2.write_text(json.dumps({"io_pads": [_pad("J2", -500, -500)]}))
-    gen.add_io_pads(str(io2))
+    assert len(gen.add_io_pads([_pad("J2", -500, -500)])) == 1
     complete = tmp_path / "frame_complete.gds"
     gen.write(str(complete))
     m2 = _manifest(complete)

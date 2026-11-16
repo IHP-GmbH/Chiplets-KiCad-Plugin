@@ -136,7 +136,8 @@ def test_second_attachment_geometry_is_not_a_coupon_constant():
     lambda d: d["carrier"].update(diameter_um=55),
     lambda d: d["carrier"].update(kicad_layer="TopMetal2"),
     lambda d: d["interconnect"].update(method="unknown"),
-    lambda d: d["interconnect"].update(fab_anchor="unknown"),
+    lambda d: d["interconnect"].update(fab_anchor=""),
+    lambda d: d["interconnect"].pop("fab_anchor"),
     lambda d: d["interconnect"].update(tm2_enclosure_um=float("nan")),
     lambda d: d["die"]["pin_list"].update(dbu_um=True),
     lambda d: d["die"]["pin_list"].pop("dbu_um"),
@@ -263,6 +264,20 @@ def test_new_metadata_compares_to_selected_manifest(changed):
         assert footprint_pin_list(fp, PCBNEW, {"attachment": source})
     with pytest.raises(PadDomainError, match="selected manifest method"):
         footprint_pin_list(fp, PCBNEW, {})
+
+
+def test_the_anchor_comes_from_the_selected_manifest_not_a_literal():
+    # A solder-bump record decodes here; whether its landing can be drawn is
+    # the worker's check against the manifest's fab_anchors table.
+    doc = document(opening=60, enclosure=10)
+    doc["interconnect"].update(fab_anchor="ihp_sbump_anchor", body_diameter_um=80)
+    fp, props = footprint(doc)
+    source = {"fab_anchor": "ihp_sbump_anchor", "body_diameter_um": 80,
+              "fab_params": {"passiv_opening_um": 60, "tm2_enclosure_um": 10}}
+    assert footprint_pin_list(fp, PCBNEW, {"attachment": source})
+    source["fab_anchor"] = "ihp_cupillar_anchor"
+    with pytest.raises(PadDomainError, match="fab_anchor differs from selected manifest"):
+        footprint_pin_list(fp, PCBNEW, {"attachment": source})
 
 
 @pytest.mark.parametrize("override", [{}, {"pad_locations": {"U1": "external.json"}},

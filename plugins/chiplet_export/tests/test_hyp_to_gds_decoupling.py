@@ -10,6 +10,7 @@ literals exactly, while the vendor demo method becomes selectable.
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,7 +21,8 @@ if str(PLUGIN_ROOT) not in sys.path:
 import hyp_to_gds as h  # noqa: E402
 
 from .conftest import (  # noqa: E402
-    FIXTURE_PDK_ROOT, sibling_workspace, use_sibling_checkouts)
+    FIXTURE_PDK_ROOT, sibling_workspace, use_sibling_checkouts,
+    write_carrier_package)
 
 # This module asserts real sibling-PDK content: interconnect manifest methods,
 # interposer canonical lyp paths, gds_to_kicad walk targets. On a lone
@@ -60,8 +62,8 @@ def test_body_diameter_ihp_identical():
     assert h._connection_to_body_diameter("cupillar_opt1") == 44
     assert h._connection_to_body_diameter("cupillar_opt2") == 49
     assert h._connection_to_body_diameter("cupillar_opt3") == 54
-    # Solder bump -> no single pillar body -> None (skip pillar gen).
-    assert h._connection_to_body_diameter("sbump_sac305") is None
+    # A solder bump's body is its ball.
+    assert h._connection_to_body_diameter("sbump_sac305") == 80
     assert h._connection_to_body_diameter("") is None
     assert h._connection_to_body_diameter("bogus") is None
 
@@ -175,8 +177,8 @@ def test_interposer_pdk_python_found_via_walk(tmp_path, monkeypatch):
 
 def _refusal(root):
     """The root refusal's id, the path given and the marker looked for."""
-    return (r"^CARRIER_UNSUPPORTED_ROOT: \$INTERPOSER_PDK_ROOT is %s, which "
-            r"has no libs\.tech/intm4tm2_stack\.json," % re.escape(str(root)))
+    return (r"^PACKAGE_MANIFEST_MISSING: \$INTERPOSER_PDK_ROOT is %s, which "
+            r"has no libs\.tech/adk/technology\.json," % re.escape(str(root)))
 
 
 def test_interposer_pdk_env_override_wins(tmp_path, monkeypatch):
@@ -184,10 +186,8 @@ def test_interposer_pdk_env_override_wins(tmp_path, monkeypatch):
     root without the marker is refused, naming it, and never replaced by
     the walk (which would draw with the sibling checkout)."""
     _walk_from(tmp_path, monkeypatch, "INTERPOSER_PDK_ROOT")
+    write_carrier_package(tmp_path / "pdk")
     fake = tmp_path / "pdk" / "libs.tech" / "klayout" / "python"
-    fake.mkdir(parents=True)
-    (fake / "bump_mirror.py").write_text("# stub\n")
-    (tmp_path / "pdk" / "libs.tech" / "intm4tm2_stack.json").write_text("{}\n")
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(tmp_path / "pdk"))
     assert h._find_interposer_pdk_python() == fake
 
@@ -198,7 +198,8 @@ def test_interposer_pdk_env_override_wins(tmp_path, monkeypatch):
     assert re.match(_refusal(bogus), str(exc.value))
 
 
-def test_a_klayout_pdk_tree_that_is_not_intm4tm2_is_refused(tmp_path, monkeypatch):
+def test_a_klayout_pdk_tree_without_a_technology_package_is_refused(
+        tmp_path, monkeypatch):
     """Every KLayout PDK tree has libs.tech/klayout/, the SG13G2 die PDK
     included, and it shares IntM4TM2's metal names: every reader of the
     variable refuses it, none draws with it."""
@@ -207,7 +208,7 @@ def test_a_klayout_pdk_tree_that_is_not_intm4tm2_is_refused(tmp_path, monkeypatc
     (die_pdk / "libs.tech" / "klayout" / "python" / "sg13g2_pycell_lib").mkdir(
         parents=True)
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(die_pdk))
-    with pytest.raises(h._layer_map.CarrierRootRefused) as refused:
+    with pytest.raises(h._layer_map.CarrierPackageRefused) as refused:
         h._layer_map.discover_path_var("INTERPOSER_PDK_ROOT")
     assert re.match(_refusal(die_pdk), str(refused.value))
     for reader in (lambda: h._discover_path_var("INTERPOSER_PDK_ROOT"),
@@ -218,13 +219,40 @@ def test_a_klayout_pdk_tree_that_is_not_intm4tm2_is_refused(tmp_path, monkeypatc
         assert re.match(_refusal(die_pdk), str(exc.value))
 
 
-def test_an_intm4tm2_root_without_bump_mirror_names_it(monkeypatch):
+def test_a_carrier_root_is_accepted_without_landing_tooling(monkeypatch):
+    """The package is the marker: a root whose python dir holds no landing
+    module is still a carrier (a method that needs one is refused alone)."""
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(FIXTURE_PDK_ROOT))
-    with pytest.raises(SystemExit) as exc:
-        h._find_interposer_pdk_python()
-    assert re.match(r"^ERROR: the interposer PDK at %s is an IntM4TM2 tree "
-                    r"without libs\.tech/klayout/python/bump_mirror\.py,"
-                    % re.escape(str(FIXTURE_PDK_ROOT)), str(exc.value))
+    found = h._find_interposer_pdk_python()
+    assert found == FIXTURE_PDK_ROOT / "libs.tech" / "klayout" / "python"
+    assert not found.exists()
+
+
+def test_bump_mirror_is_used_only_from_the_carrier_package(
+        tmp_path, monkeypatch, capsys):
+    """A bump_mirror already imported from another root (an earlier export
+    in the same process) is not the carrier's: it is not used."""
+    # Whatever this case imports leaves with it.
+    monkeypatch.setitem(sys.modules, "bump_mirror", None)
+    del sys.modules["bump_mirror"]
+    roots = []
+    for name in ("first", "second"):
+        root = tmp_path / name
+        write_carrier_package(root)
+        python = root / "libs.tech" / "klayout" / "python"
+        python.mkdir(parents=True)
+        (python / "bump_mirror.py").write_text("ROOT = %r\n" % name,
+                                               encoding="utf-8")
+        roots.append(root)
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(roots[0]))
+    assert h._import_bump_mirror().ROOT == "first"
+    monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(roots[1]))
+    assert h._import_bump_mirror() is None
+    assert ("bump_mirror was imported from %s" % (
+        roots[0] / "libs.tech" / "klayout" / "python")
+        in capsys.readouterr().err)
+    monkeypatch.delitem(sys.modules, "bump_mirror")
+    assert h._import_bump_mirror().ROOT == "second"
 
 
 def test_interconnect_pdk_resolves_live_not_fallback(tmp_path, monkeypatch):
@@ -282,8 +310,7 @@ def test_expand_path_vars_env_wins(tmp_path, monkeypatch):
     marker it lacks, and never replaced by the walk."""
     workspace = _walk_from(tmp_path, monkeypatch, "INTERPOSER_PDK_ROOT")
     fake = tmp_path / "pdk"
-    (fake / "libs.tech").mkdir(parents=True)
-    (fake / "libs.tech" / "intm4tm2_stack.json").write_text("{}\n")
+    write_carrier_package(fake)
     monkeypatch.setenv("INTERPOSER_PDK_ROOT", str(fake))
     got = h._expand_path_vars(
         "${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp")
@@ -615,6 +642,475 @@ def test_single_method_export_unchanged_by_die_connections_param(
         layers = _cell_layers(str(out), "CUPILLARS_%s" % ref)
         assert {(500, 35), (501, 35)} <= layers
         assert not ({(510, 35), (511, 35)} & layers)
+
+
+def _per_anchor_pads(bm):
+    """True when the loaded bump_mirror draws one pad cell per fab anchor."""
+    return hasattr(bm, "fab_anchor_openings")
+
+
+@pytest.mark.parametrize("method", [
+    "cupillar_opt1", "cupillar_opt2", "cupillar_opt3", "vendorx_microbump"])
+def test_pillar_anchored_methods_are_drawable(method):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    cell = h._check_landing_anchor(method, h._import_bump_mirror())
+    assert (cell.anchor, cell.pcell, cell.group_prefix, cell.table_6_1) == (
+        "ihp_cupillar_anchor", "CuPillarPad", "CUPILLARS_", True)
+
+
+def test_a_solder_bump_is_drawable_where_its_pad_cell_exists():
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    bm = h._import_bump_mirror()
+    if not _per_anchor_pads(bm):
+        pytest.skip("this interposer PDK has no SolderBumpPad")
+    cell = h._check_landing_anchor("sbump_sac305", bm)
+    assert (cell.anchor, cell.pcell, cell.group_prefix, cell.table_6_1,
+            cell.generator_kwargs) == (
+        "ihp_sbump_anchor", "SolderBumpPad", "SBUMPS_", False,
+        {"fab_anchor_id": "ihp_sbump_anchor"})
+
+
+def test_a_pre_anchor_bump_mirror_draws_cupillarpad_without_the_new_keyword():
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    cell = h._check_landing_anchor("cupillar_opt1", CUPILLAR_ONLY_BM)
+    assert cell == h.LandingCell(
+        "ihp_cupillar_anchor", "CuPillarPad", "CUPILLARS_",
+        frozenset({(9, 35), (41, 35), (99, 35)}), True, {})
+
+
+# A bump_mirror before per-anchor pad cells: CuPillarPad only.
+CUPILLAR_ONLY_BM = SimpleNamespace(CUPILLAR_FAB_LAYERS={
+    "TopMetal2": (134, 0), "Passiv:pillar": (9, 35),
+    "dfpad:pillar": (41, 35), "Recog:pillar": (99, 35)})
+
+
+def _per_anchor_bm(openings):
+    """A bump_mirror with a pad cell for each anchor of ``openings``."""
+    def fab_anchor(anchor):
+        if anchor not in openings:
+            raise ValueError("no interposer pad for fab anchor %r" % anchor)
+        return SimpleNamespace(pcell="Pad_" + anchor, cell_prefix="PAD",
+                               table_6_1=False)
+
+    def fab_anchor_openings(anchor):
+        fab_anchor(anchor)
+        return openings[anchor]
+    return SimpleNamespace(fab_anchor=fab_anchor,
+                           fab_anchor_openings=fab_anchor_openings)
+
+
+@pytest.mark.parametrize("bm,method,reason", [
+    (CUPILLAR_ONLY_BM, "sbump_sac305",
+     "ihp_sbump_anchor opens 9/36, 41/36, 99/36, but the pad generator "
+     "draws 9/35, 41/35, 99/35"),
+    (_per_anchor_bm({}), "sbump_sac305",
+     "sbump_sac305: no interposer pad for fab anchor 'ihp_sbump_anchor'"),
+    (_per_anchor_bm({"ihp_sbump_anchor": {"passiv": (9, 36)}}), "sbump_sac305",
+     "ihp_sbump_anchor opens 9/36, 41/36, 99/36, but the pad generator "
+     "draws 9/36;"),
+    (_per_anchor_bm({"ihp_sbump_anchor": [(9, 36)]}), "sbump_sac305",
+     "no opening table for fab anchor ihp_sbump_anchor"),
+])
+def test_a_pad_cell_that_cannot_draw_the_anchor_refuses(bm, method, reason):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    with pytest.raises(ValueError, match=reason):
+        h._check_landing_anchor(method, bm)
+
+
+@pytest.mark.parametrize("anchor", [None, "", 7, ["ihp_sbump_anchor"]])
+def test_a_malformed_fab_anchor_is_refused_before_bump_mirror_is_asked(anchor):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    import copy
+    manifest = copy.deepcopy(h._import_interconnect_manifest().load_manifest())
+    manifest["methods"]["sbump_sac305"]["fab_anchor"] = anchor
+    asked = []
+    bm = SimpleNamespace(fab_anchor_openings=lambda a: asked.append(a) or {})
+    with pytest.raises(ValueError, match="fab_anchor must be a nonempty string"):
+        h._check_landing_anchor("sbump_sac305", bm, manifest)
+    assert asked == []
+
+
+def test_the_anchor_check_asks_the_pad_cell_of_the_methods_own_anchor():
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    bm = _per_anchor_bm({
+        "ihp_cupillar_anchor": {"passiv": (9, 35), "dfpad": (41, 35),
+                                "recog": (99, 35)},
+        "ihp_sbump_anchor": {"passiv": (9, 36), "dfpad": (41, 36),
+                             "recog": (99, 36)}})
+    assert h._check_landing_anchor("sbump_sac305", bm).pcell == "Pad_ihp_sbump_anchor"
+    assert h._check_landing_anchor("cupillar_opt1", bm).pcell == "Pad_ihp_cupillar_anchor"
+
+
+@pytest.mark.parametrize("bm,reason", [
+    (None, "needs bump_mirror"),
+    (SimpleNamespace(), "no pad-cell layer table"),
+])
+def test_an_anchor_check_without_the_pad_cell_table_refuses(bm, reason):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    with pytest.raises(ValueError, match=reason):
+        h._check_landing_anchor("cupillar_opt1", bm)
+
+
+def test_an_unknown_method_is_left_to_the_body_check():
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    assert h._check_landing_anchor("bogus", None) is None
+
+
+def test_an_unreadable_manifest_is_a_typed_refusal(monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    im = h._import_interconnect_manifest()
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("torn")
+    monkeypatch.setattr(im, "load_manifest", unreadable)
+    with pytest.raises(h.SourceRefused, match="fab anchor of 'cupillar_opt1'"):
+        h._check_landing_anchor("cupillar_opt1", h._import_bump_mirror())
+
+
+def test_an_unreadable_manifest_refuses_the_method_list(monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    im = h._import_interconnect_manifest()
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("torn")
+    monkeypatch.setattr(im, "load_manifest", unreadable)
+    with pytest.raises(h.SourceRefused, match="the method list could not"):
+        h.connection_method_availability()
+
+
+def test_the_body_diameter_comes_from_the_manifest_given():
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    import copy
+    manifest = copy.deepcopy(h._import_interconnect_manifest().load_manifest())
+    manifest["methods"]["cupillar_opt1"]["body_diameter_um"] = 123.0
+    assert h._connection_to_body_diameter("cupillar_opt1", manifest) == 123.0
+    assert h._connection_to_body_diameter("cupillar_opt1") != 123.0
+
+
+def _landing_reads(tmp_path, monkeypatch, refs):
+    """(landing checks, manifest reads) of one cupillar_opt1 export with pad
+    locations for ``refs``."""
+    im = h._import_interconnect_manifest()
+    loaded, checks, landings = [], [], []
+    load, check = im.load_manifest, h._check_landing_anchor
+    landing = h._method_landing
+
+    def counted_load(*args, **kwargs):
+        loaded.append(load(*args, **kwargs))
+        return loaded[-1]
+
+    def recorded_check(method, bm, manifest=None):
+        checks.append((method, manifest))
+        return check(method, bm, manifest)
+
+    def recorded_landing(bm, im, method, cell, manifest):
+        landings.append(manifest)
+        return landing(bm, im, method, cell, manifest)
+    out = tmp_path / ("%d.gds" % len(refs))
+    hyp = tmp_path / "pillar.hyp"
+    hyp.write_text(MIXED_HYP)
+    with monkeypatch.context() as patch:
+        patch.setattr(im, "load_manifest", counted_load)
+        patch.setattr(h, "_check_landing_anchor", recorded_check)
+        patch.setattr(h, "_method_landing", recorded_landing)
+        assert h.convert_hyp_to_gds(
+            hyp_path=str(hyp), output_path=str(out),
+            lyp_path=h._find_default_lyp(),
+            pad_locations={ref: _write_pin_list(tmp_path, ref)
+                           for ref in refs},
+            connection_type="cupillar_opt1") is True
+    for method, manifest in checks:
+        assert any(manifest is read for read in loaded), method
+    # The landings are drawn from the read the checks used.
+    assert landings and all(manifest is checks[0][1] for manifest in landings)
+    return [method for method, _ in checks], len(loaded)
+
+
+def test_an_export_checks_each_method_once_on_one_manifest(
+        tmp_path, monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    one_checks, one_reads = _landing_reads(tmp_path, monkeypatch, ["U1"])
+    two_checks, two_reads = _landing_reads(tmp_path, monkeypatch, ["U1", "U2"])
+    assert one_checks == two_checks == ["cupillar_opt1"]
+    # A second die on the same method reads the manifest no more often.
+    assert two_reads == one_reads
+
+
+PILLAR_TABLE = {"passiv": (9, 35), "dfpad": (41, 35), "recog": (99, 35)}
+
+
+def _broken_bm(fab_anchor=None, openings=None):
+    """A bump_mirror whose fab anchor API answers wrongly."""
+    def default_anchor(anchor):
+        return SimpleNamespace(pcell="CuPillarPad", cell_prefix="CUPILLAR",
+                               table_6_1=True)
+    return SimpleNamespace(
+        fab_anchor=fab_anchor or default_anchor,
+        fab_anchor_openings=openings or (lambda anchor: dict(PILLAR_TABLE)))
+
+
+def _raise(exc):
+    def raiser(*args):
+        raise exc
+    return raiser
+
+
+# The pad cell of an interposer between its per-anchor openings and its
+# per-anchor cell names: a FabAnchor without cell_prefix or table_6_1.
+NAMELESS_PAD_BM = _broken_bm(
+    fab_anchor=lambda anchor: SimpleNamespace(pcell="CuPillarPad", rules="Padc",
+                                              layers={}))
+
+
+@pytest.mark.parametrize("bm,kind", [
+    (NAMELESS_PAD_BM, "AttributeError"),
+    (_broken_bm(fab_anchor=_raise(KeyError("ihp_cupillar_anchor"))), "KeyError"),
+    (_broken_bm(openings=_raise(TypeError("takes 0 arguments"))), "TypeError"),
+    (_broken_bm(openings=lambda a: {"passiv": [9, 35]}), "TypeError"),
+])
+def test_a_bump_mirror_that_answers_wrongly_is_a_typed_refusal(bm, kind):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    with pytest.raises(h.SourceRefused, match="fab anchor API is unusable \\(%s"
+                       % kind) as refused:
+        h._check_landing_anchor("cupillar_opt1", bm)
+    assert refused.value.exit_code == h.EXIT_SOURCE_UNREACHABLE
+
+
+def test_a_bump_mirror_that_answers_wrongly_refuses_every_method(
+        monkeypatch, capsys):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    import connection_methods
+    monkeypatch.setattr(h, "_import_bump_mirror", lambda: NAMELESS_PAD_BM)
+    availability = h.connection_method_availability()
+    assert availability
+    assert all("cell_prefix" in reason for reason in availability.values())
+    assert connection_methods.main([]) == 0
+    reported = connection_methods.parse_report(capsys.readouterr().out)
+    assert reported == availability
+
+
+def test_an_export_on_a_bump_mirror_that_answers_wrongly_is_refused(
+        tmp_path, monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    monkeypatch.setattr(h, "_import_bump_mirror", lambda: NAMELESS_PAD_BM)
+    hyp = tmp_path / "pillar.hyp"
+    hyp.write_text(MIXED_HYP)
+    out = tmp_path / "pillar_interposer.gds"
+    with pytest.raises(h.SourceRefused, match="cell_prefix"):
+        h.convert_hyp_to_gds(
+            hyp_path=str(hyp), output_path=str(out),
+            lyp_path=h._find_default_lyp(),
+            pad_locations={"U1": _write_pin_list(tmp_path, "U1"),
+                           "U2": _write_pin_list(tmp_path, "U2")},
+            connection_type="cupillar_opt1")
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("global_method,per_die", [
+    ("sbump_sac305", {}),
+    ("cupillar_opt1", {"U2": "sbump_sac305"}),
+])
+def test_a_solder_bump_die_is_refused_before_the_gds(
+        tmp_path, capsys, monkeypatch, global_method, per_die):
+    """A bump_mirror without the solder-bump pad cell: the die is refused,
+    with or without carrier metadata, instead of exported without landings."""
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    monkeypatch.setattr(h, "_import_bump_mirror", lambda: CUPILLAR_ONLY_BM)
+    hyp = tmp_path / "sbump.hyp"
+    hyp.write_text(MIXED_HYP)
+    out = tmp_path / "sbump_interposer.gds"
+    ok = h.convert_hyp_to_gds(
+        hyp_path=str(hyp), output_path=str(out),
+        lyp_path=h._find_default_lyp(),
+        pad_locations={"U1": _write_pin_list(tmp_path, "U1"),
+                       "U2": _write_pin_list(tmp_path, "U2")},
+        connection_type=global_method, die_connections=per_die,
+    )
+    assert ok is False
+    assert not out.exists()
+    err = capsys.readouterr().err
+    assert "Cannot draw the landing of" in err
+    assert "ihp_sbump_anchor opens 9/36, 41/36, 99/36" in err
+    assert "cannot draw that landing" in err
+
+
+SBUMP_OPENINGS = {(9, 36), (41, 36), (99, 36)}
+PILLAR_OPENINGS = {(9, 35), (41, 35), (99, 35)}
+
+
+@pytest.mark.parametrize("global_method,per_die", [
+    ("sbump_sac305", {}),
+    ("cupillar_opt1", {"U2": "sbump_sac305"}),
+])
+def test_a_solder_bump_die_lands_on_the_solder_bump_pad(
+        tmp_path, capsys, monkeypatch, global_method, per_die):
+    """With the SolderBumpPad cell the export draws the solder-bump openings
+    under each sbump die, in its own SBUMPS_<ref> group, and keeps the
+    Cu-pillar openings for a cupillar die in the same GDS."""
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    if not _per_anchor_pads(h._import_bump_mirror()):
+        pytest.skip("this interposer PDK has no SolderBumpPad")
+    checked = []
+    check = h._check_intm4tm2_cni
+    monkeypatch.setattr(h, "_check_intm4tm2_cni",
+                        lambda pcell, *a: checked.append(pcell) or check(pcell, *a))
+    hyp = tmp_path / "sbump.hyp"
+    hyp.write_text(MIXED_HYP)
+    out = tmp_path / "sbump_interposer.gds"
+    ok = h.convert_hyp_to_gds(
+        hyp_path=str(hyp), output_path=str(out),
+        lyp_path=h._find_default_lyp(),
+        pad_locations={"U1": _write_pin_list(tmp_path, "U1"),
+                       "U2": _write_pin_list(tmp_path, "U2")},
+        connection_type=global_method, die_connections=per_die,
+    )
+    assert ok is True
+    # Each pad cell is checked to come from the IntM4TM2 library in use.
+    assert "SolderBumpPad" in checked
+    assert ("CuPillarPad" in checked) == bool(per_die)
+    u2 = _cell_layers(str(out), "SBUMPS_U2")
+    assert SBUMP_OPENINGS | {(134, 0)} <= u2
+    assert not (PILLAR_OPENINGS & u2)
+    if per_die:
+        u1 = _cell_layers(str(out), "CUPILLARS_U1")
+        assert PILLAR_OPENINGS | {(134, 0)} <= u1
+        assert not (SBUMP_OPENINGS & u1)
+    else:
+        assert SBUMP_OPENINGS <= _cell_layers(str(out), "SBUMPS_U1")
+    # Placed and checked against the solder-bump rule set (Padb) and the
+    # method's own opening and pitch, not the Cu-pillar Option 2 defaults.
+    import json
+    drc = json.loads((tmp_path / "sbump_cupillar_drc.json").read_text())
+    params = drc["methods"]["sbump_sac305"]["params"]
+    assert params["Padb_a_diameter_um"] == 60.0
+    assert params["Padb_c_min_enclosure_um"] == 10.0
+    assert params["Padb_e_min_pitch_um"] == 130.0
+    assert drc["summary"]["passed"] is True
+    printed = capsys.readouterr()
+    assert "Table 6.1" not in printed.out + printed.err
+    # The report holds every method's landings, not just the Cu pillar's.
+    assert "Landing DRC report:" in printed.out
+
+
+def test_a_landing_names_its_pad_cell():
+    """No default pad cell: a call that does not name it would check the
+    Cu-pillar cell's cni while the generator draws another anchor's."""
+    class Generator:
+        def add_device_bumps(self, *args):
+            raise AssertionError("drew without a pad cell")
+
+    with pytest.raises(TypeError, match="pcell"):
+        h._add_device_pillars(SimpleNamespace(), Generator(), "U1",
+                              [], 44.0)
+    with pytest.raises(TypeError):
+        h._add_device_pillars(SimpleNamespace(), Generator(), "U1",
+                              [], 44.0, "SolderBumpPad")
+
+
+def test_the_landing_is_drawn_from_the_manifest_the_checks_read(monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    im, bm = h._import_interconnect_manifest(), h._import_bump_mirror()
+    manifest = im.load_manifest()
+    cell = h._check_landing_anchor("cupillar_opt1", bm, manifest)
+
+    def reread(*args, **kwargs):
+        raise AssertionError("the landing read the manifest again")
+    monkeypatch.setattr(im, "load_manifest", reread)
+    _generator, _params, diameter = h._method_landing(
+        bm, im, "cupillar_opt1", cell, manifest)
+    assert diameter == (
+        manifest["methods"]["cupillar_opt1"]["body_diameter_um"])
+
+
+def test_a_method_without_fab_params_refuses_the_export(
+        tmp_path, capsys, monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    im = h._import_interconnect_manifest()
+
+    def no_fab_params(method, *args, **kwargs):
+        raise KeyError("%s declares no fab_params" % method)
+    monkeypatch.setattr(im, "fab_params", no_fab_params)
+    hyp = tmp_path / "nofab.hyp"
+    hyp.write_text(MIXED_HYP)
+    out = tmp_path / "nofab_interposer.gds"
+    ok = h.convert_hyp_to_gds(
+        hyp_path=str(hyp), output_path=str(out),
+        lyp_path=h._find_default_lyp(),
+        pad_locations={"U1": _write_pin_list(tmp_path, "U1")},
+        connection_type="cupillar_opt1")
+    assert ok is False
+    assert ("Cannot draw carrier landing for cupillar_opt1: "
+            "'cupillar_opt1 declares no fab_params'") in capsys.readouterr().err
+
+
+def test_the_methods_command_agrees_with_the_worker_on_the_live_pdks():
+    """connection_methods.py run as the dialog and run_export run it."""
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    from chiplet_export.pipeline import orchestrator
+    availability, shown = orchestrator.query_connection_availability(
+        sys.executable, str(PLUGIN_ROOT), orchestrator.ExportOptions())
+    assert shown.endswith("%s %s" % (sys.executable,
+                                     PLUGIN_ROOT / "connection_methods.py"))
+    assert availability == h.connection_method_availability()
+    refused = {m for m, reason in availability.items() if reason}
+    if _per_anchor_pads(h._import_bump_mirror()):
+        assert refused == set()
+    else:
+        assert refused == {"sbump_sac305"}
+        assert "ihp_sbump_anchor opens 9/36, 41/36, 99/36" in availability["sbump_sac305"]
+    for method in ("cupillar_opt1", "cupillar_opt2", "cupillar_opt3",
+                   "vendorx_microbump"):
+        assert availability[method] is None
+
+
+def test_without_the_pad_cell_every_method_is_unavailable(monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    monkeypatch.setattr(h, "_import_bump_mirror", lambda: None)
+    availability = h.connection_method_availability()
+    assert availability
+    assert all("needs bump_mirror" in reason for reason in availability.values())
+
+
+def test_a_method_whose_entry_is_unusable_is_refused_alone(monkeypatch):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    check = h._check_landing_anchor
+
+    def torn_entry(method, *args, **kwargs):
+        if method == "cupillar_opt2":
+            raise h.SourceRefused("cupillar_opt2: torn entry")
+        return check(method, *args, **kwargs)
+    monkeypatch.setattr(h, "_check_landing_anchor", torn_entry)
+    availability = h.connection_method_availability()
+    assert availability["cupillar_opt2"] == "cupillar_opt2: torn entry"
+    assert availability["cupillar_opt1"] is None
+
+
+def test_the_methods_command_prints_only_json_on_stdout(monkeypatch, capsys):
+    import connection_methods
+
+    def noisy():
+        print("a PDK module talking while it loads")
+        return {"cupillar_opt1": None}
+    monkeypatch.setattr(h, "connection_method_availability", noisy)
+    assert connection_methods.main([]) == 0
+    out = capsys.readouterr()
+    assert connection_methods.parse_report(out.out) == {"cupillar_opt1": None}
+    assert "talking" in out.err
+
+
+def test_an_unusable_method_list_is_a_typed_refusal(monkeypatch, capsys):
+    use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
+    import connection_methods
+    im = h._import_interconnect_manifest()
+
+    def torn(*args, **kwargs):
+        raise RuntimeError("torn")
+    monkeypatch.setattr(im, "list_methods", torn)
+    with pytest.raises(h.SourceRefused, match="the method list"):
+        h.connection_method_availability()
+    assert connection_methods.main([]) == h.EXIT_SOURCE_UNREACHABLE
+    out = capsys.readouterr()
+    assert out.out == "" and "the method list" in out.err
 
 
 # ---------------------------------------------------------------------------

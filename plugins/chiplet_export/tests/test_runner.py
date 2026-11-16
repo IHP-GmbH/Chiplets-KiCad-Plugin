@@ -65,6 +65,36 @@ def test_cancel_terminates():
     assert result.exit_code != 0
 
 
+def test_timeout_terminates():
+    start = time.monotonic()
+    result = runner.run_async([PY, "-c", "import time; time.sleep(30)"],
+                              timeout=0.3)
+    assert result.timed_out is True
+    assert result.cancelled is False
+    assert result.exit_code != 0
+    assert time.monotonic() - start < runner.GRACE_SECONDS + 3
+
+
+def test_a_run_inside_its_timeout_is_not_timed_out():
+    result = runner.run_async([PY, "-c", "print('ok')"], timeout=30)
+    assert (result.exit_code, result.stdout, result.timed_out) == (
+        0, "ok\n", False)
+
+
+def test_the_child_reads_no_stdin_of_the_caller():
+    """The caller's stdin is a pipe with data in it; the child sees EOF."""
+    import subprocess
+    caller = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from chiplet_export.pipeline import runner\n"
+        "run = runner.run_async([sys.executable, '-c',"
+        " 'import sys; print(repr(sys.stdin.read()))'], timeout=30)\n"
+        "print(run.stdout, end='')\n" % str(PLUGIN_ROOT.parent))
+    proc = subprocess.run([PY, "-c", caller], input="leaked\n",
+                          capture_output=True, text=True, timeout=60)
+    assert proc.stdout == "''\n", proc.stderr
+
+
 def test_an_interrupt_stops_the_child_before_it_propagates(monkeypatch):
     """A KeyboardInterrupt can land anywhere in the wait loop; this one lands
     at the cancel check. It must reach the caller, but not with the child
