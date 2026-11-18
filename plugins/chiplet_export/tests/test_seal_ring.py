@@ -776,6 +776,51 @@ def test_the_real_minimum_is_the_pcells(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# the minimum, from the PDK's rule values
+# --------------------------------------------------------------------------
+
+# The three seal rules the minimum reads, in nm as loadSealRules gives them.
+SEAL_RULES_NM = {"Seal_a": 3500, "Seal_k": 21000, "Seal_l1": 30000}
+
+
+def _seal_module(monkeypatch, rules, **names):
+    """The PDK's sealring_code as the minimum imports it: these rule values,
+    the module names given, and nothing else."""
+    code = types.ModuleType("intm4tm2_pycell_lib.ihp.sealring_code")
+    code.loadSealRules = lambda: dict(rules)
+    vars(code).update(names)
+    ihp = types.ModuleType("intm4tm2_pycell_lib.ihp")
+    ihp.sealring_code = code
+    lib = types.ModuleType("intm4tm2_pycell_lib")
+    lib.ihp = ihp
+    for module in (lib, ihp, code):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+
+@pytest.mark.parametrize("rules, corner_steps, minimum_um", [
+    (SEAL_RULES_NM, 4, 114.25),
+    ({**SEAL_RULES_NM, "Seal_l1": 40000}, 4, 134.25),
+    ({**SEAL_RULES_NM, "Seal_k": 20000}, 4, 112.0),
+    ({**SEAL_RULES_NM, "Seal_a": 4000}, 4, 115.25),
+    (SEAL_RULES_NM, 5, 113.2),
+])
+def test_the_minimum_is_the_pcells_formula_on_the_rules(
+        monkeypatch, rules, corner_steps, minimum_um):
+    _seal_module(monkeypatch, rules, CORNER_STEPS=corner_steps)
+    assert _generator()._seal_ring_minimum_um() == pytest.approx(minimum_um)
+
+
+def test_rules_without_the_boundary_are_refused_by_name(monkeypatch):
+    """An interposer PDK that drew the boundary as a module constant has no
+    Seal_l1 rule; the constant is not read in its place."""
+    rules = {k: v for k, v in SEAL_RULES_NM.items() if k != "Seal_l1"}
+    _seal_module(monkeypatch, rules, CORNER_STEPS=4,
+                 BOUNDARY_TO_EDGESEAL_NM=30000)
+    with pytest.raises(ValueError, match="have no Seal_l1 .*0.6.0"):
+        _generator()._seal_ring_minimum_um()
+
+
+# --------------------------------------------------------------------------
 # the clearance layers are the deck's
 # --------------------------------------------------------------------------
 
