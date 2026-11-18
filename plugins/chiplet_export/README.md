@@ -258,6 +258,9 @@ be one axis-aligned rectangle; the PCell's `EdgeSeal.boundary` (39/4) is then
 the outline itself. Off by default. The export prints
 `Seal ring: drawn on the board outline (x0, y0)-(x1, y1) um, l x w um`, and
 `Seal ring: carried into the complete GDS` after the complete GDS.
+The minimum outline is computed from the PDK's seal rules (`Seal_l1`,
+`Seal_k`, `Seal_a`), so the ring needs OpenIntM4TM2 0.6.0 or later (rule file
+1.8); an older interposer PDK has no `Seal_l1` and is refused by name.
 
 With the ring drawn, no-fill keep-outs are clipped to 39/4, and the export
 stops before writing (exit 1, `ERROR: seal ring refused: ...`) when the

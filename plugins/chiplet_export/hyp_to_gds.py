@@ -2788,15 +2788,26 @@ class GDSGenerator:
         """Smallest outline side the PDK sealring PCell accepts, in um.
 
         The PCell refuses a smaller outline by returning an empty cell, which
-        says nothing about why, so the same bound is computed here from the
-        PDK's own constants and rule values and refused with a reason.
-        Needs the IntM4TM2 library bootstrapped (its python dir on sys.path).
+        says nothing about why, so the same bound is computed here as the
+        PCell computes it: from the PDK's seal rules (Seal_l1, EdgeSeal's
+        distance inside the boundary; Seal_k, the corner span; Seal_a, the
+        ring width) and its corner step count, a drawing constant with no
+        rule. Needs the IntM4TM2 library bootstrapped (its python dir on
+        sys.path).
         """
         from intm4tm2_pycell_lib.ihp import sealring_code as sc
         rules = sc.loadSealRules()
-        span = rules['Seal_k']
-        nm = (2 * (sc.BOUNDARY_TO_EDGESEAL_NM + span + rules['Seal_a'])
-              + span // sc.CORNER_STEPS)
+        keys = ("Seal_l1", "Seal_k", "Seal_a")
+        # Before OpenIntM4TM2 0.6.0 the boundary was a module constant, not
+        # a rule; such a PDK is refused rather than read the old way.
+        missing = [key for key in keys if key not in rules]
+        if missing:
+            raise ValueError(
+                "the seal rules have no %s (an interposer PDK older than "
+                "OpenIntM4TM2 0.6.0, rule file 1.8; update the checkout)"
+                % ", ".join(missing))
+        boundary, span, width = (rules[key] for key in keys)
+        nm = 2 * (boundary + span + width) + span // sc.CORNER_STEPS
         return nm / 1000.0
 
     @_intm4tm2_scope()
