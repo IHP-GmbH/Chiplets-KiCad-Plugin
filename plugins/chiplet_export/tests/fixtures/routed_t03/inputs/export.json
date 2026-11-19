@@ -1,0 +1,1114 @@
+{
+  "format": "interposer_pnr.export",
+  "version": 1,
+  "rules_source": {
+    "physical_stack": {
+      "source": "<TOOLS>/OpenIntM4TM2/libs.tech/intm4tm2_stack.json",
+      "sha256": "46a5879540ece79cec3267975a29af51d617e81fb77e358dfd5af67452d24117",
+      "version": "1.1"
+    },
+    "routing_tech": {
+      "source": "<TOOLS>/staging/interposer-pnr/src/interposer_pnr/descriptors/ihp_sg13g2_intm4tm2_rdl2.routing_tech.json",
+      "sha256": "998ac0cdd5a8127fce1f715ae7bf33d30af154efa67a89276c789a16ab3085cf",
+      "version": "1.3"
+    }
+  },
+  "board": "<RUN>/pnr/cf_typical_03_from_schematic.draft.kicad_pcb",
+  "board_sha256": "3e6e7d1d17c1a30f753c955041432d4c447c1a00bfc43291c270ed3b1ca29d90",
+  "source_board": null,
+  "source_board_sha256": null,
+  "board_kind": "synthesized",
+  "kicad_rules": {
+    "kicad_dru": {
+      "path": "<RUN>/pnr/cf_typical_03_from_schematic.draft.kicad_dru",
+      "sha256": "e007014d10187a5cb2baa83d53c2a51d65d287f3be6b7671b27bfecf6c92435e",
+      "source": "<TOOLS>/OpenIntM4TM2/libs.tech/kicad/interposer_template.kicad_dru"
+    },
+    "kicad_pro": {
+      "path": "<RUN>/pnr/cf_typical_03_from_schematic.draft.kicad_pro",
+      "sha256": "3d935116ee350e53de2a5f05499439acfa4362997fb68b8ff4a63160d15e3ac7",
+      "source": "<TOOLS>/OpenIntM4TM2/libs.tech/kicad/interposer_template.kicad_pro"
+    }
+  },
+  "origin_mm": [
+    0.0,
+    0.0
+  ],
+  "segments_written": 54,
+  "segments_skipped_existing": 0,
+  "nets_added": [
+    "Net-(J1-Pad1)",
+    "Net-(J2-Pad1)",
+    "Net-(J3-Pad1)",
+    "Net-(J4-Pad1)",
+    "VDD",
+    "VSS",
+    "lane0",
+    "lane1",
+    "lane2",
+    "lane3"
+  ],
+  "nets_reused": [],
+  "layers_used": [
+    "F.Cu",
+    "In1.Cu"
+  ],
+  "vias_written": 22,
+  "width_fallbacks": 0,
+  "notes": [],
+  "round_trip": {
+    "net_names": {
+      "U1_ext[0]": "Net-(J1-Pad1)",
+      "U1_ext[1]": "Net-(J2-Pad1)",
+      "U2_ext[0]": "Net-(J3-Pad1)",
+      "U2_ext[1]": "Net-(J4-Pad1)",
+      "VDD": "VDD",
+      "VSS": "VSS",
+      "lane0": "lane0",
+      "lane1": "lane1",
+      "lane2": "lane2",
+      "lane3": "lane3"
+    },
+    "endpoints": [
+      {
+        "net": "U1_ext[0]",
+        "component": "U1",
+        "pad": "ext[0]",
+        "x_um": 485.0,
+        "y_um": 630.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "U1_ext[1]",
+        "component": "U1",
+        "pad": "ext[1]",
+        "x_um": 485.0,
+        "y_um": 730.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "U2_ext[0]",
+        "component": "U2",
+        "pad": "ext[0]",
+        "x_um": 2077.0,
+        "y_um": 630.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "U2_ext[1]",
+        "component": "U2",
+        "pad": "ext[1]",
+        "x_um": 2077.0,
+        "y_um": 730.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "VDD",
+        "component": "U1",
+        "pad": "VDD",
+        "x_um": 780.0,
+        "y_um": 875.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "VDD",
+        "component": "U2",
+        "pad": "VDD",
+        "x_um": 1782.0,
+        "y_um": 875.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "VSS",
+        "component": "U1",
+        "pad": "VSS",
+        "x_um": 780.0,
+        "y_um": 485.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "VSS",
+        "component": "U2",
+        "pad": "VSS",
+        "x_um": 1782.0,
+        "y_um": 485.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "lane0",
+        "component": "U1",
+        "pad": "d2d[0]",
+        "x_um": 1075.0,
+        "y_um": 530.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "lane0",
+        "component": "U2",
+        "pad": "d2d[0]",
+        "x_um": 1487.0,
+        "y_um": 530.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "lane1",
+        "component": "U1",
+        "pad": "d2d[1]",
+        "x_um": 1075.0,
+        "y_um": 630.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "lane1",
+        "component": "U2",
+        "pad": "d2d[1]",
+        "x_um": 1487.0,
+        "y_um": 630.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "lane2",
+        "component": "U1",
+        "pad": "d2d[2]",
+        "x_um": 1075.0,
+        "y_um": 730.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "lane2",
+        "component": "U2",
+        "pad": "d2d[2]",
+        "x_um": 1487.0,
+        "y_um": 730.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "lane3",
+        "component": "U1",
+        "pad": "d2d[3]",
+        "x_um": 1075.0,
+        "y_um": 830.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "lane3",
+        "component": "U2",
+        "pad": "d2d[3]",
+        "x_um": 1487.0,
+        "y_um": 830.0,
+        "layer": "TopMetal2",
+        "landing_um": 50.0
+      },
+      {
+        "net": "U1_ext[0]",
+        "component": "J1",
+        "pad": "1",
+        "x_um": 140.0,
+        "y_um": 625.0,
+        "layer": "TopMetal2",
+        "size_um": 80.0
+      },
+      {
+        "net": "U1_ext[1]",
+        "component": "J2",
+        "pad": "1",
+        "x_um": 140.0,
+        "y_um": 775.0,
+        "layer": "TopMetal2",
+        "size_um": 80.0
+      },
+      {
+        "net": "U2_ext[0]",
+        "component": "J3",
+        "pad": "1",
+        "x_um": 2460.0,
+        "y_um": 625.0,
+        "layer": "TopMetal2",
+        "size_um": 80.0
+      },
+      {
+        "net": "U2_ext[1]",
+        "component": "J4",
+        "pad": "1",
+        "x_um": 2460.0,
+        "y_um": 775.0,
+        "layer": "TopMetal2",
+        "size_um": 80.0
+      },
+      {
+        "net": "VDD",
+        "component": "J5",
+        "pad": "1",
+        "x_um": 1300.0,
+        "y_um": 1260.0,
+        "layer": "TopMetal2",
+        "size_um": 80.0
+      },
+      {
+        "net": "VSS",
+        "component": "J6",
+        "pad": "1",
+        "x_um": 1300.0,
+        "y_um": 140.0,
+        "layer": "TopMetal2",
+        "size_um": 80.0
+      }
+    ],
+    "outline_mm": [
+      0.0,
+      -1.4,
+      2.6,
+      0.0
+    ],
+    "layers": {
+      "F.Cu": "TopMetal2",
+      "In1.Cu": "TopMetal1",
+      "In2.Cu": "Metal5",
+      "B.Cu": "Metal4"
+    },
+    "nets": {
+      "Net-(J1-Pad1)": {
+        "layers": [
+          "TopMetal1",
+          "TopMetal2"
+        ],
+        "via_spans": [
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ],
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ]
+        ]
+      },
+      "Net-(J2-Pad1)": {
+        "layers": [
+          "TopMetal1",
+          "TopMetal2"
+        ],
+        "via_spans": [
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ],
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ]
+        ]
+      },
+      "Net-(J3-Pad1)": {
+        "layers": [
+          "TopMetal1",
+          "TopMetal2"
+        ],
+        "via_spans": [
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ],
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ]
+        ]
+      },
+      "Net-(J4-Pad1)": {
+        "layers": [
+          "TopMetal1",
+          "TopMetal2"
+        ],
+        "via_spans": [
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ],
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ]
+        ]
+      },
+      "VDD": {
+        "layers": [
+          "TopMetal1",
+          "TopMetal2"
+        ],
+        "via_spans": [
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ],
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ],
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ]
+        ]
+      },
+      "VSS": {
+        "layers": [
+          "TopMetal1",
+          "TopMetal2"
+        ],
+        "via_spans": [
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ],
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ],
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ]
+        ]
+      },
+      "lane0": {
+        "layers": [
+          "TopMetal1",
+          "TopMetal2"
+        ],
+        "via_spans": [
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ],
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ]
+        ]
+      },
+      "lane1": {
+        "layers": [
+          "TopMetal1",
+          "TopMetal2"
+        ],
+        "via_spans": [
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ],
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ]
+        ]
+      },
+      "lane2": {
+        "layers": [
+          "TopMetal1",
+          "TopMetal2"
+        ],
+        "via_spans": [
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ],
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ]
+        ]
+      },
+      "lane3": {
+        "layers": [
+          "TopMetal1",
+          "TopMetal2"
+        ],
+        "via_spans": [
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ],
+          [
+            "TopMetal1",
+            "TopMetal2"
+          ]
+        ]
+      }
+    },
+    "footprints": {
+      "U1": {
+        "at_mm": [
+          1.18,
+          -0.38
+        ],
+        "rotation_deg": 0.0,
+        "layer": "F.Cu",
+        "gds_file": "../../../../dies/PAD_FRAME_L/layout.gds",
+        "gds_sha256": "36aa050b9898a580b7e18cd65d73aaa890e5ef951d5d09b1fb6da313e5863dd4",
+        "pads_sha256": "0c382143319dd1bcd05e91a28867ea2bbd3323269710b31be2b9c235c056ebf2",
+        "properties": {
+          "orientation": "flip_chip",
+          "connection": "cupillar_opt1",
+          "die_thickness_um": "750",
+          "pad_domains": {
+            "attachments": [
+              {
+                "pad_index": 0,
+                "pad_number": "ext[0]"
+              },
+              {
+                "pad_index": 1,
+                "pad_number": "ext[1]"
+              },
+              {
+                "pad_index": 2,
+                "pad_number": "VDD"
+              },
+              {
+                "pad_index": 3,
+                "pad_number": "d2d[0]"
+              },
+              {
+                "pad_index": 4,
+                "pad_number": "d2d[1]"
+              },
+              {
+                "pad_index": 5,
+                "pad_number": "d2d[2]"
+              },
+              {
+                "pad_index": 6,
+                "pad_number": "d2d[3]"
+              },
+              {
+                "pad_index": 7,
+                "pad_number": "VSS"
+              }
+            ],
+            "carrier": {
+              "diameter_um": 50.0,
+              "frame": "die_local_gds_y_up",
+              "kicad_layer": "F.Cu",
+              "layer": "TopMetal2",
+              "shape": "circle",
+              "tech_sha256": "998ac0cdd5a8127fce1f715ae7bf33d30af154efa67a89276c789a16ab3085cf"
+            },
+            "component": "U1",
+            "die": {
+              "frame": "die_local_gds_y_up",
+              "pin_list": {
+                "chiplet_name": "PAD_FRAME_L",
+                "coordinate_frame": "die-local DEF frame, Y up; the flip-chip footprint mirrors X",
+                "dbu_um": 0.001,
+                "die_bbox_dbu": {
+                  "x_max": 800000.0,
+                  "x_min": 0.0,
+                  "y_max": 600000.0,
+                  "y_min": 0.0
+                },
+                "gds_source": "layout.gds",
+                "geometry": "pin centre and size are the Passiv (9/0) opening of the bond pad master placed at the frame spec's pad centre; electrode_dbu is its TopMetal2 plate",
+                "identity": {
+                  "alias": "the pad name; a pad frame gives each pad a port of its own",
+                  "alias_rule": "coupon contact assigner: nearest die edge; sides right, top, left, bottom; ascending along the edge; repeated port labels gain _0, _1, ... in that order",
+                  "electrical": "port, net, direction and role as the frame spec states them; no circuit stands behind them",
+                  "primary": "the pad name the frame spec gives"
+                },
+                "pins": [
+                  {
+                    "alias": "ext[0]",
+                    "center_x_dbu": 695000.0,
+                    "center_y_dbu": 250000.0,
+                    "direction": "INOUT",
+                    "electrode_dbu": [
+                      660000,
+                      215000,
+                      730000,
+                      285000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "ext[0]",
+                    "net": "ext[0]",
+                    "ordinal": 0,
+                    "pad_index": 0,
+                    "port": "ext[0]",
+                    "role": "SIGNAL",
+                    "side": "right",
+                    "type": "bidirectional",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "ext[1]",
+                    "center_x_dbu": 695000.0,
+                    "center_y_dbu": 350000.0,
+                    "direction": "INOUT",
+                    "electrode_dbu": [
+                      660000,
+                      315000,
+                      730000,
+                      385000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "ext[1]",
+                    "net": "ext[1]",
+                    "ordinal": 0,
+                    "pad_index": 1,
+                    "port": "ext[1]",
+                    "role": "SIGNAL",
+                    "side": "right",
+                    "type": "bidirectional",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "VDD",
+                    "center_x_dbu": 400000.0,
+                    "center_y_dbu": 495000.0,
+                    "direction": "INOUT",
+                    "electrode_dbu": [
+                      365000,
+                      460000,
+                      435000,
+                      530000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "VDD",
+                    "net": "VDD",
+                    "ordinal": 0,
+                    "pad_index": 2,
+                    "port": "VDD",
+                    "role": "POWER",
+                    "side": "top",
+                    "type": "power_in",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "d2d[0]",
+                    "center_x_dbu": 105000.0,
+                    "center_y_dbu": 150000.0,
+                    "direction": "OUTPUT",
+                    "electrode_dbu": [
+                      70000,
+                      115000,
+                      140000,
+                      185000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "d2d[0]",
+                    "net": "d2d[0]",
+                    "ordinal": 0,
+                    "pad_index": 3,
+                    "port": "d2d[0]",
+                    "role": "SIGNAL",
+                    "side": "left",
+                    "type": "output",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "d2d[1]",
+                    "center_x_dbu": 105000.0,
+                    "center_y_dbu": 250000.0,
+                    "direction": "OUTPUT",
+                    "electrode_dbu": [
+                      70000,
+                      215000,
+                      140000,
+                      285000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "d2d[1]",
+                    "net": "d2d[1]",
+                    "ordinal": 0,
+                    "pad_index": 4,
+                    "port": "d2d[1]",
+                    "role": "SIGNAL",
+                    "side": "left",
+                    "type": "output",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "d2d[2]",
+                    "center_x_dbu": 105000.0,
+                    "center_y_dbu": 350000.0,
+                    "direction": "OUTPUT",
+                    "electrode_dbu": [
+                      70000,
+                      315000,
+                      140000,
+                      385000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "d2d[2]",
+                    "net": "d2d[2]",
+                    "ordinal": 0,
+                    "pad_index": 5,
+                    "port": "d2d[2]",
+                    "role": "SIGNAL",
+                    "side": "left",
+                    "type": "output",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "d2d[3]",
+                    "center_x_dbu": 105000.0,
+                    "center_y_dbu": 450000.0,
+                    "direction": "OUTPUT",
+                    "electrode_dbu": [
+                      70000,
+                      415000,
+                      140000,
+                      485000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "d2d[3]",
+                    "net": "d2d[3]",
+                    "ordinal": 0,
+                    "pad_index": 6,
+                    "port": "d2d[3]",
+                    "role": "SIGNAL",
+                    "side": "left",
+                    "type": "output",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "VSS",
+                    "center_x_dbu": 400000.0,
+                    "center_y_dbu": 105000.0,
+                    "direction": "INOUT",
+                    "electrode_dbu": [
+                      365000,
+                      70000,
+                      435000,
+                      140000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "VSS",
+                    "net": "VSS",
+                    "ordinal": 0,
+                    "pad_index": 7,
+                    "port": "VSS",
+                    "role": "GROUND",
+                    "side": "bottom",
+                    "type": "power_in",
+                    "width_dbu": 65800.0
+                  }
+                ],
+                "source": "pad-frame spec sha256 ba4df38900f86a102fc688ce24a1e464b13ce5e3e427aa7674d0a2812e128153",
+                "source_type": "pad_frame_spec",
+                "version": "1.0"
+              },
+              "pins_sha256": "34d940dba99bc4a3c6ed0ff4f1a4fe01900f611021576926c6c859f597c192ed"
+            },
+            "format": "chiplet_kicad.pad_domains",
+            "interconnect": {
+              "body_diameter_um": 44.0,
+              "fab_anchor": "ihp_cupillar_anchor",
+              "manifest_sha256": "149be8718c59cb42e24bba0e0abb42c4e84fa3a4c30bde6fc181e02662983e61",
+              "method": "cupillar_opt1",
+              "passiv_opening_um": 35.0,
+              "tm2_enclosure_um": 7.5
+            },
+            "version": 1
+          }
+        }
+      },
+      "U2": {
+        "at_mm": [
+          2.182,
+          -0.38
+        ],
+        "rotation_deg": 0.0,
+        "layer": "F.Cu",
+        "gds_file": "../../../../dies/PAD_FRAME_R/layout.gds",
+        "gds_sha256": "3ba2845013c5475411298a6016db49c6db4c663b0fe25229747e8e44bfb8d3d9",
+        "pads_sha256": "e110da101e87282d96f7e8ecd962990860e52fb02d514569d402793aafbeaeb8",
+        "properties": {
+          "orientation": "flip_chip",
+          "connection": "cupillar_opt1",
+          "die_thickness_um": "750",
+          "pad_domains": {
+            "attachments": [
+              {
+                "pad_index": 0,
+                "pad_number": "d2d[0]"
+              },
+              {
+                "pad_index": 1,
+                "pad_number": "d2d[1]"
+              },
+              {
+                "pad_index": 2,
+                "pad_number": "d2d[2]"
+              },
+              {
+                "pad_index": 3,
+                "pad_number": "d2d[3]"
+              },
+              {
+                "pad_index": 4,
+                "pad_number": "VDD"
+              },
+              {
+                "pad_index": 5,
+                "pad_number": "ext[0]"
+              },
+              {
+                "pad_index": 6,
+                "pad_number": "ext[1]"
+              },
+              {
+                "pad_index": 7,
+                "pad_number": "VSS"
+              }
+            ],
+            "carrier": {
+              "diameter_um": 50.0,
+              "frame": "die_local_gds_y_up",
+              "kicad_layer": "F.Cu",
+              "layer": "TopMetal2",
+              "shape": "circle",
+              "tech_sha256": "998ac0cdd5a8127fce1f715ae7bf33d30af154efa67a89276c789a16ab3085cf"
+            },
+            "component": "U2",
+            "die": {
+              "frame": "die_local_gds_y_up",
+              "pin_list": {
+                "chiplet_name": "PAD_FRAME_R",
+                "coordinate_frame": "die-local DEF frame, Y up; the flip-chip footprint mirrors X",
+                "dbu_um": 0.001,
+                "die_bbox_dbu": {
+                  "x_max": 800000.0,
+                  "x_min": 0.0,
+                  "y_max": 600000.0,
+                  "y_min": 0.0
+                },
+                "gds_source": "layout.gds",
+                "geometry": "pin centre and size are the Passiv (9/0) opening of the bond pad master placed at the frame spec's pad centre; electrode_dbu is its TopMetal2 plate",
+                "identity": {
+                  "alias": "the pad name; a pad frame gives each pad a port of its own",
+                  "alias_rule": "coupon contact assigner: nearest die edge; sides right, top, left, bottom; ascending along the edge; repeated port labels gain _0, _1, ... in that order",
+                  "electrical": "port, net, direction and role as the frame spec states them; no circuit stands behind them",
+                  "primary": "the pad name the frame spec gives"
+                },
+                "pins": [
+                  {
+                    "alias": "d2d[0]",
+                    "center_x_dbu": 695000.0,
+                    "center_y_dbu": 150000.0,
+                    "direction": "INPUT",
+                    "electrode_dbu": [
+                      660000,
+                      115000,
+                      730000,
+                      185000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "d2d[0]",
+                    "net": "d2d[0]",
+                    "ordinal": 0,
+                    "pad_index": 0,
+                    "port": "d2d[0]",
+                    "role": "SIGNAL",
+                    "side": "right",
+                    "type": "input",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "d2d[1]",
+                    "center_x_dbu": 695000.0,
+                    "center_y_dbu": 250000.0,
+                    "direction": "INPUT",
+                    "electrode_dbu": [
+                      660000,
+                      215000,
+                      730000,
+                      285000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "d2d[1]",
+                    "net": "d2d[1]",
+                    "ordinal": 0,
+                    "pad_index": 1,
+                    "port": "d2d[1]",
+                    "role": "SIGNAL",
+                    "side": "right",
+                    "type": "input",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "d2d[2]",
+                    "center_x_dbu": 695000.0,
+                    "center_y_dbu": 350000.0,
+                    "direction": "INPUT",
+                    "electrode_dbu": [
+                      660000,
+                      315000,
+                      730000,
+                      385000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "d2d[2]",
+                    "net": "d2d[2]",
+                    "ordinal": 0,
+                    "pad_index": 2,
+                    "port": "d2d[2]",
+                    "role": "SIGNAL",
+                    "side": "right",
+                    "type": "input",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "d2d[3]",
+                    "center_x_dbu": 695000.0,
+                    "center_y_dbu": 450000.0,
+                    "direction": "INPUT",
+                    "electrode_dbu": [
+                      660000,
+                      415000,
+                      730000,
+                      485000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "d2d[3]",
+                    "net": "d2d[3]",
+                    "ordinal": 0,
+                    "pad_index": 3,
+                    "port": "d2d[3]",
+                    "role": "SIGNAL",
+                    "side": "right",
+                    "type": "input",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "VDD",
+                    "center_x_dbu": 400000.0,
+                    "center_y_dbu": 495000.0,
+                    "direction": "INOUT",
+                    "electrode_dbu": [
+                      365000,
+                      460000,
+                      435000,
+                      530000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "VDD",
+                    "net": "VDD",
+                    "ordinal": 0,
+                    "pad_index": 4,
+                    "port": "VDD",
+                    "role": "POWER",
+                    "side": "top",
+                    "type": "power_in",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "ext[0]",
+                    "center_x_dbu": 105000.0,
+                    "center_y_dbu": 250000.0,
+                    "direction": "INOUT",
+                    "electrode_dbu": [
+                      70000,
+                      215000,
+                      140000,
+                      285000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "ext[0]",
+                    "net": "ext[0]",
+                    "ordinal": 0,
+                    "pad_index": 5,
+                    "port": "ext[0]",
+                    "role": "SIGNAL",
+                    "side": "left",
+                    "type": "bidirectional",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "ext[1]",
+                    "center_x_dbu": 105000.0,
+                    "center_y_dbu": 350000.0,
+                    "direction": "INOUT",
+                    "electrode_dbu": [
+                      70000,
+                      315000,
+                      140000,
+                      385000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "ext[1]",
+                    "net": "ext[1]",
+                    "ordinal": 0,
+                    "pad_index": 6,
+                    "port": "ext[1]",
+                    "role": "SIGNAL",
+                    "side": "left",
+                    "type": "bidirectional",
+                    "width_dbu": 65800.0
+                  },
+                  {
+                    "alias": "VSS",
+                    "center_x_dbu": 400000.0,
+                    "center_y_dbu": 105000.0,
+                    "direction": "INOUT",
+                    "electrode_dbu": [
+                      365000,
+                      70000,
+                      435000,
+                      140000
+                    ],
+                    "height_dbu": 65800.0,
+                    "name": "VSS",
+                    "net": "VSS",
+                    "ordinal": 0,
+                    "pad_index": 7,
+                    "port": "VSS",
+                    "role": "GROUND",
+                    "side": "bottom",
+                    "type": "power_in",
+                    "width_dbu": 65800.0
+                  }
+                ],
+                "source": "pad-frame spec sha256 dc39f0b4a2fdc944ba6a8001180f689ee8f8853a72eb123df1d7dec5222d65be",
+                "source_type": "pad_frame_spec",
+                "version": "1.0"
+              },
+              "pins_sha256": "645c1740a0da1735ee1c65e9da06e4670968601e91b3c71b81ca11a899a8b838"
+            },
+            "format": "chiplet_kicad.pad_domains",
+            "interconnect": {
+              "body_diameter_um": 44.0,
+              "fab_anchor": "ihp_cupillar_anchor",
+              "manifest_sha256": "149be8718c59cb42e24bba0e0abb42c4e84fa3a4c30bde6fc181e02662983e61",
+              "method": "cupillar_opt1",
+              "passiv_opening_um": 35.0,
+              "tm2_enclosure_um": 7.5
+            },
+            "version": 1
+          }
+        }
+      }
+    },
+    "io_pads": {
+      "J1": {
+        "at_mm": [
+          0.14,
+          -0.625
+        ],
+        "rotation_deg": 0.0,
+        "layer": "F.Cu",
+        "pads_sha256": "6b30f561c15164d8e38a52b1b2b9aabe359e988d955db4d84010b57836d30599",
+        "properties": {
+          "io_class": "wire_bond",
+          "io_pad_size_um": "80x80",
+          "io_pad_id": "J_U1_ext[0]"
+        }
+      },
+      "J2": {
+        "at_mm": [
+          0.14,
+          -0.775
+        ],
+        "rotation_deg": 0.0,
+        "layer": "F.Cu",
+        "pads_sha256": "bc972ab79d1a468deb38dbe2c71f5496ab3f049df920ffccd925979e9f15eb95",
+        "properties": {
+          "io_class": "wire_bond",
+          "io_pad_size_um": "80x80",
+          "io_pad_id": "J_U1_ext[1]"
+        }
+      },
+      "J3": {
+        "at_mm": [
+          2.46,
+          -0.625
+        ],
+        "rotation_deg": 0.0,
+        "layer": "F.Cu",
+        "pads_sha256": "a74b71c4d3d59e054f642bdf58edb292c9de800606aa2283d03681a364f5c779",
+        "properties": {
+          "io_class": "wire_bond",
+          "io_pad_size_um": "80x80",
+          "io_pad_id": "J_U2_ext[0]"
+        }
+      },
+      "J4": {
+        "at_mm": [
+          2.46,
+          -0.775
+        ],
+        "rotation_deg": 0.0,
+        "layer": "F.Cu",
+        "pads_sha256": "95e3a29d3e8ad79eb0561b9ebfe7cfa1c0029ad01925d45045abff68751a640a",
+        "properties": {
+          "io_class": "wire_bond",
+          "io_pad_size_um": "80x80",
+          "io_pad_id": "J_U2_ext[1]"
+        }
+      },
+      "J5": {
+        "at_mm": [
+          1.3,
+          -1.26
+        ],
+        "rotation_deg": 0.0,
+        "layer": "F.Cu",
+        "pads_sha256": "eee30476944cc01bf55b1cd842661fcd4a9f1d12b51d68d0e783069fae70ffe2",
+        "properties": {
+          "io_class": "wire_bond",
+          "io_pad_size_um": "80x80",
+          "io_pad_id": "J_VDD"
+        }
+      },
+      "J6": {
+        "at_mm": [
+          1.3,
+          -0.14
+        ],
+        "rotation_deg": 0.0,
+        "layer": "F.Cu",
+        "pads_sha256": "902983e9c108efd9f5d633e83fcdb19f46f1d2f70ff8960847cc6dee88e6f451",
+        "properties": {
+          "io_class": "wire_bond",
+          "io_pad_size_um": "80x80",
+          "io_pad_id": "J_VSS"
+        }
+      }
+    },
+    "sheet_nets": {},
+    "widths": {},
+    "grid_um": 0.005,
+    "version": 6,
+    "features": [
+      "pad_domains",
+      "sheet",
+      "widths"
+    ]
+  },
+  "sheet": {
+    "form": {
+      "path": "<WORK>/system.connectivity.json",
+      "sha256": "46b1cbe24e4f367093291d95354fcef2d01d5069b3426d834ad4f4c47af5b3f4"
+    },
+    "libraries": {
+      "chiplet_carrier.pretty/EXT_PAD_80um.kicad_mod": "e72cfe0a68ea4d72502349c3bbd35303b1f924f4f45fbae9458fb2e1a63619f0",
+      "chiplet_dies.pretty/PAD_FRAME_L.kicad_mod": "d7166873aa0c550256590b25fbfbfe653d39f03c342300443b505af751f0df29",
+      "chiplet_dies.pretty/PAD_FRAME_R.kicad_mod": "b8d556b150b1f8f5763c8c6a06a3c3e349ab62b9f221a3bb7b2876422fcf6400",
+      "fp-lib-table": "52a93dfd4d0ee1e108c8497b9e50bc76e81dbc31eab97ec2274b4c457f8da99a"
+    }
+  }
+}

@@ -1,0 +1,200 @@
+format_version: '1.0'
+assembly:
+  name: cf_typical_03_from_schematic
+  description: 'Two ihp-sg13g2 pad frames, stand-ins for dies not designed yet, drawn
+    on a KiCad sheet and flipped onto an IntM4TM2 carrier: four die-to-die lanes,
+    two rails, six wire-bond pads'
+  units: um
+technologies:
+  intm4tm2:
+    description: IHP 130nm IntM4TM2 aluminium BEOL interposer
+    layer_properties: ${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp
+    stackup: ${CHIPLET_STUDIO_ROOT}/configs/stackups/intm4tm2.yaml
+    dbu: 0.001
+  sg13g2:
+    description: IHP SG13G2 130nm BiCMOS die
+    layer_properties: ${PDK_ROOT}/ihp-sg13g2/libs.tech/klayout/tech/sg13g2.lyp
+    stackup: ${CHIPLET_STUDIO_ROOT}/configs/stackups/ihp-sg13g2.yaml
+    dbu: 0.001
+components:
+- id: interposer
+  type: interposer
+  technology: intm4tm2
+  anchor: bbox_center
+  top_cell: CF_CARRIER
+  position:
+    x: 1300.0
+    y: 700.0
+    z: 0.0
+  dimensions:
+    width: 2600.0
+    height: 1400.0
+    thickness: 10.8103
+  attachment_surface_z: 10.8103
+  io_pads:
+  - id: J_VDD
+    io_class: wire_bond
+    net: VDD
+    position:
+      x: 1300.0
+      y: 1260.0
+    size:
+      x: 80.0
+      y: 80.0
+    layer: TopMetal2
+  - id: J_VSS
+    io_class: wire_bond
+    net: VSS
+    position:
+      x: 1300.0
+      y: 140.0
+    size:
+      x: 80.0
+      y: 80.0
+    layer: TopMetal2
+  - id: J_U1_ext[0]
+    io_class: wire_bond
+    net: U1_ext[0]
+    position:
+      x: 140.0
+      y: 625.0
+    size:
+      x: 80.0
+      y: 80.0
+    layer: TopMetal2
+  - id: J_U1_ext[1]
+    io_class: wire_bond
+    net: U1_ext[1]
+    position:
+      x: 140.0
+      y: 775.0
+    size:
+      x: 80.0
+      y: 80.0
+    layer: TopMetal2
+  - id: J_U2_ext[0]
+    io_class: wire_bond
+    net: U2_ext[0]
+    position:
+      x: 2460.0
+      y: 625.0
+    size:
+      x: 80.0
+      y: 80.0
+    layer: TopMetal2
+  - id: J_U2_ext[1]
+    io_class: wire_bond
+    net: U2_ext[1]
+    position:
+      x: 2460.0
+      y: 775.0
+    size:
+      x: 80.0
+      y: 80.0
+    layer: TopMetal2
+- id: U1
+  type: die
+  technology: sg13g2
+  anchor: bbox_center
+  orientation: flip_chip
+  connection: cupillar_opt1
+  top_cell: PAD_FRAME_L
+  position:
+    x: 780.0
+    y: 680.0
+    z: 54.8103
+  dimensions:
+    width: 800.0
+    height: 600.0
+    thickness: 750.0
+  rotation:
+    z: 0.0
+- id: U2
+  type: die
+  technology: sg13g2
+  anchor: bbox_center
+  orientation: flip_chip
+  connection: cupillar_opt1
+  top_cell: PAD_FRAME_R
+  position:
+    x: 1782.0
+    y: 680.0
+    z: 54.8103
+  dimensions:
+    width: 800.0
+    height: 600.0
+    thickness: 750.0
+  rotation:
+    z: 0.0
+netlist:
+  nets:
+  - name: lane0
+    connections:
+    - component: U1
+      pin: d2d[0]
+      layer: TopMetal2
+    - component: U2
+      pin: d2d[0]
+      layer: TopMetal2
+  - name: lane1
+    connections:
+    - component: U1
+      pin: d2d[1]
+      layer: TopMetal2
+    - component: U2
+      pin: d2d[1]
+      layer: TopMetal2
+  - name: lane2
+    connections:
+    - component: U1
+      pin: d2d[2]
+      layer: TopMetal2
+    - component: U2
+      pin: d2d[2]
+      layer: TopMetal2
+  - name: lane3
+    connections:
+    - component: U1
+      pin: d2d[3]
+      layer: TopMetal2
+    - component: U2
+      pin: d2d[3]
+      layer: TopMetal2
+  - name: U1_ext[0]
+    connections:
+    - component: U1
+      pin: ext[0]
+      layer: TopMetal2
+  - name: U1_ext[1]
+    connections:
+    - component: U1
+      pin: ext[1]
+      layer: TopMetal2
+  - name: U2_ext[0]
+    connections:
+    - component: U2
+      pin: ext[0]
+      layer: TopMetal2
+  - name: U2_ext[1]
+    connections:
+    - component: U2
+      pin: ext[1]
+      layer: TopMetal2
+  - name: VDD
+    class: power
+    connections:
+    - component: U1
+      pin: VDD
+      layer: TopMetal2
+    - component: U2
+      pin: VDD
+      layer: TopMetal2
+  - name: VSS
+    class: ground
+    connections:
+    - component: U1
+      pin: VSS
+      layer: TopMetal2
+    - component: U2
+      pin: VSS
+      layer: TopMetal2
