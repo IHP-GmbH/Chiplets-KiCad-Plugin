@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "chiplet_name": "U2",
+  "dbu_um": 0.001,
+  "pins": [
+    {
+      "name": "d2d[0]",
+      "type": "input",
+      "side": "right",
+      "pad_index": 0,
+      "center_x_dbu": -695000.0,
+      "center_y_dbu": 150000.0,
+      "width_dbu": 65800.0,
+      "height_dbu": 65800.0
+    },
+    {
+      "name": "d2d[1]",
+      "type": "input",
+      "side": "right",
+      "pad_index": 1,
+      "center_x_dbu": -695000.0,
+      "center_y_dbu": 250000.0,
+      "width_dbu": 65800.0,
+      "height_dbu": 65800.0
+    },
+    {
+      "name": "d2d[2]",
+      "type": "input",
+      "side": "right",
+      "pad_index": 2,
+      "center_x_dbu": -695000.0,
+      "center_y_dbu": 350000.0,
+      "width_dbu": 65800.0,
+      "height_dbu": 65800.0
+    },
+    {
+      "name": "d2d[3]",
+      "type": "input",
+      "side": "right",
+      "pad_index": 3,
+      "center_x_dbu": -695000.0,
+      "center_y_dbu": 450000.0,
+      "width_dbu": 65800.0,
+      "height_dbu": 65800.0
+    },
+    {
+      "name": "VDD",
+      "type": "power_in",
+      "side": "top",
+      "pad_index": 4,
+      "center_x_dbu": -400000.0,
+      "center_y_dbu": 495000.0,
+      "width_dbu": 65800.0,
+      "height_dbu": 65800.0
+    },
+    {
+      "name": "ext[0]",
+      "type": "bidirectional",
+      "side": "left",
+      "pad_index": 5,
+      "center_x_dbu": -105000.0,
+      "center_y_dbu": 250000.0,
+      "width_dbu": 65800.0,
+      "height_dbu": 65800.0
+    },
+    {
+      "name": "ext[1]",
+      "type": "bidirectional",
+      "side": "left",
+      "pad_index": 6,
+      "center_x_dbu": -105000.0,
+      "center_y_dbu": 350000.0,
+      "width_dbu": 65800.0,
+      "height_dbu": 65800.0
+    },
+    {
+      "name": "VSS",
+      "type": "power_in",
+      "side": "bottom",
+      "pad_index": 7,
+      "center_x_dbu": -400000.0,
+      "center_y_dbu": 105000.0,
+      "width_dbu": 65800.0,
+      "height_dbu": 65800.0
+    }
+  ]
+}
