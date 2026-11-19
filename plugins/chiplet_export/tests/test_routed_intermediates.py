@@ -291,13 +291,12 @@ def test_refuses_a_carrier_the_board_path_refuses(tmp_path, edit, match):
 
 
 def _method_specs(**change):
-    attachment = documents()[0]["devices"][0]["pad_domains"]["interconnect"]
-    spec = {"fab_anchor": attachment["fab_anchor"],
-            "body_diameter_um": attachment["body_diameter_um"],
-            "fab_params": {"passiv_opening_um": attachment["passiv_opening_um"],
-                           "tm2_enclosure_um": attachment["tm2_enclosure_um"]}}
-    spec.update(change)
-    return {attachment["method"]: spec}
+    """The manifest's methods, as the board preflight passes them, with
+    ``change`` applied to the method the fixture's archives name."""
+    methods = copy.deepcopy(manifest_snapshot().methods)
+    method = documents()[0]["devices"][0]["pad_domains"]["interconnect"]["method"]
+    methods[method].update(change)
+    return methods
 
 
 def test_an_archive_is_held_against_the_manifest_method(tmp_path):

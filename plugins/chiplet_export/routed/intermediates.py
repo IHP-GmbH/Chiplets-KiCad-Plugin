@@ -206,8 +206,10 @@ def facts_from_documents(document, chiplet, io_pads, *, board_name,
 def die_pin_lists(document, chiplet, method_specs=None):
     """{ref: bump sidecar} as write_die_pin_lists writes it, in devices[] order.
 
-    ``method_specs`` is what the board preflight holds each archive against
-    (connection_method_specs); given, an attachment that differs is refused.
+    ``method_specs`` is what the board preflight holds each archive against:
+    the interconnect manifest's methods (InterconnectManifestSnapshot.methods,
+    as validate_board_pad_domains takes them). Given, an attachment that
+    differs is refused.
     """
     result = {}
     for device, component in _device_components(document, chiplet):
