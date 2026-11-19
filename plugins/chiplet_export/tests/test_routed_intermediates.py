@@ -72,7 +72,7 @@ def assert_same_bytes(name, actual, expected):
 
 
 def assert_count_floor():
-    """J3: an emptied or truncated oracle fails here, before any comparison."""
+    """An emptied or truncated oracle fails here, before any comparison."""
     pins = [p for p in oracle.PIN_LISTS if (ORACLE / p).is_file()]
     assert pins == ["U1_pins.json", "U2_pins.json"]
     for name in pins:
@@ -111,7 +111,7 @@ def test_count_floor():
 
 def test_the_oracle_and_this_host_read_one_connection_library():
     """The connection_stacks block is the shared emitter's, from whatever
-    manifest the host has. If this fails, J1's .chiplet comparison is about
+    manifest the host has. If this fails, the .chiplet comparison is about
     the manifest, not about the routed path."""
     block = emit_connection_stacks_block(manifest_snapshot())
     assert block and block in oracle_bytes(oracle.CHIPLET).decode("utf-8"), (
@@ -120,7 +120,7 @@ def test_the_oracle_and_this_host_read_one_connection_library():
 
 
 def test_the_routed_path_writes_the_board_paths_bytes(tmp_path):
-    """J1 (a, b, c, d)."""
+    """The .chiplet, the pin lists, the connections and the thicknesses."""
     assert_count_floor()
     out, result = run_routed(tmp_path)
     normalise = lambda data: oracle.normalise(data, INPUTS)  # noqa: E731
@@ -152,7 +152,7 @@ def test_the_pure_functions_return_what_write_intermediates_wrote(tmp_path):
 
 
 def test_the_routed_io_pads_are_the_board_paths(tmp_path):
-    """J6: the projector's manifest is the board sidecar, entry for entry."""
+    """The projector's manifest is the board sidecar, entry for entry."""
     routed = io_pads_manifest.read(str(IO_PADS), frame="gds_bbox_corner_um")
     board = json.loads(oracle_bytes(oracle.IO_PADS))["io_pads"]
     assert len(routed) == len(board) == 6
@@ -199,7 +199,7 @@ def test_a_position_rounds_to_the_boards_nanometer():
     assert facts.dies[1].x_iu in (2232333, 2232334)
 
 
-# --- J7: refusals, each before any file is written --------------------------
+# --- refusals, each before any file is written -----------------------------
 
 def _variant(tmp_path, name, edit):
     data = json.loads(DOCUMENT.read_text())
@@ -260,7 +260,69 @@ def test_refuses_an_archive_that_names_another_die(tmp_path):
     _assert_refused_unwritten(tmp_path, "device U1: .*component differs", document=doc)
 
 
-# --- J4: no pcbnew, no kicad-cli ---------------------------------------------
+def test_refuses_a_die_of_the_chiplet_left_unplaced(tmp_path):
+    doc = _variant(tmp_path, "drop.json", lambda d: d["devices"].pop(1))
+    _assert_refused_unwritten(tmp_path, "die U2 of the .chiplet has no device",
+                              document=doc)
+
+
+def test_refuses_an_outline_off_the_frames_origin(tmp_path):
+    def shift(d):
+        d["outline"] = [[x + 1000.0, y] for x, y in d["outline"]]
+    doc = _variant(tmp_path, "shift.json", shift)
+    _assert_refused_unwritten(tmp_path, r"lower-left is \(1000, 0\)", document=doc)
+
+
+def _io_pads_variant(tmp_path, edit):
+    data = json.loads(IO_PADS.read_text())
+    edit(data["io_pads"])
+    path = tmp_path / "io_pads.json"
+    path.write_text(json.dumps(data))
+    return str(path)
+
+
+@pytest.mark.parametrize("edit, match", [
+    (lambda pads: pads[0].update(io_class="bogus"), "io_class 'bogus'"),
+    (lambda pads: pads[0].update(layer="Metal1"), "is on 'Metal1'"),
+    (lambda pads: pads[1].update(ref=pads[0]["ref"]), "is listed twice"),
+], ids=["io-class", "layer", "duplicate-ref"])
+def test_refuses_a_carrier_the_board_path_refuses(tmp_path, edit, match):
+    _assert_refused_unwritten(tmp_path, match, io_pads=_io_pads_variant(tmp_path, edit))
+
+
+def _method_specs(**change):
+    attachment = documents()[0]["devices"][0]["pad_domains"]["interconnect"]
+    spec = {"fab_anchor": attachment["fab_anchor"],
+            "body_diameter_um": attachment["body_diameter_um"],
+            "fab_params": {"passiv_opening_um": attachment["passiv_opening_um"],
+                           "tm2_enclosure_um": attachment["tm2_enclosure_um"]}}
+    spec.update(change)
+    return {attachment["method"]: spec}
+
+
+def test_an_archive_is_held_against_the_manifest_method(tmp_path):
+    out, _result = run_routed(tmp_path, method_specs=_method_specs())
+    assert (out / oracle.CHIPLET).is_file()
+    _assert_refused_unwritten(tmp_path / "b", "body_diameter_um differs from selected",
+                              method_specs=_method_specs(body_diameter_um=45.0))
+
+
+def test_refuses_a_missing_pin_list_folder(tmp_path):
+    with pytest.raises(RoutedRefused, match="pin list folder"):
+        run_routed(tmp_path, pins_dir=str(tmp_path / "absent"))
+    assert not (tmp_path / "out" / oracle.CHIPLET).exists()
+
+
+def test_a_negative_zero_rotation_is_written_as_zero():
+    document, chiplet, io_pads = documents()
+    document = copy.deepcopy(document)
+    document["devices"][0]["rotation_deg"] = -0.0
+    facts = facts_from_documents(document, chiplet, io_pads,
+                                 board_name=oracle.BOARD_NAME)
+    assert str(facts.dies[0].rotation_deg) == "0.0"
+
+
+# --- no pcbnew, no kicad-cli ------------------------------------------------
 
 NO_BOARD_CHILD = r'''
 import json, os, sys
@@ -290,7 +352,7 @@ print(json.dumps({"pcbnew": seen, "loaded": "pcbnew" in sys.modules,
 
 
 def test_the_routed_path_imports_no_pcbnew_and_runs_no_kicad_cli(tmp_path):
-    """J4. The recorder sees an import attempt even where pcbnew is not
+    """The recorder sees an import attempt even where pcbnew is not
     installed, so this holds on a plain host and in the KiCad image alike."""
     import os
     import subprocess

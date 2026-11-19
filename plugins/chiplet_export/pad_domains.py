@@ -248,18 +248,21 @@ def _bump_sidecar(ref, pins):
     return {"version": 1, "chiplet_name": ref, "dbu_um": 0.001, "pins": pins}
 
 
-def archive_pin_list(archive, reference, method, orientation):
+def archive_pin_list(archive, reference, method, orientation, method_specs=None):
     """The bump sidecar footprint_pin_list writes, from the archive alone.
 
     ``archive`` is the CHIPLET_PAD_DOMAINS text, or its parsed object, as a
     document carries it. With no footprint there are no pads to hold the
     archive against: footprint_pin_list does that on a board. Raises
-    PadDomainError for an archive decode_domains refuses or an orientation
-    outside flip_chip and face_up.
+    PadDomainError for an archive decode_domains refuses, an orientation
+    outside flip_chip and face_up, or, given ``method_specs``, an attachment
+    that differs from the selected manifest method (as footprint_pin_list).
     """
     if not isinstance(archive, str):
         archive = json.dumps(archive)
     doc = decode_domains(archive, reference, method)
+    if method_specs is not None:
+        _check_method_source(doc["interconnect"], method_specs)
     if orientation not in ("flip_chip", "face_up"):
         raise PadDomainError("Carrier footprint requires canonical ORIENTATION")
     mx = -1 if orientation == "flip_chip" else 1

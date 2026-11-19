@@ -19,16 +19,15 @@ import pcbnew
 
 from .connection_stacks import (
     emit_connection_stacks_block,
-    emit_interconnect_block,
     validate_adapter_id,
     validate_interconnect_ids,
 )
-from ._yaml import escape_yaml_dq, yaml_scalar
 from ._technology import technology_id
-from ._units import _size_um, parse_thickness_um  # noqa: F401
+from ._units import _size_um, parse_thickness_um
+# IO_CLASSES and IO_PAD_LAYER stay importable from here for existing callers.
 from .intermediate_chiplet import (  # noqa: F401
-    DEFAULT_INTERPOSER_ADAPTER, INTERPOSER_TECH_ID, IO_PAD_LAYER, CarrierFacts,
-    ChipletFacts, DieFacts, FrameFacts, emit_intermediate_chiplet,
+    DEFAULT_INTERPOSER_ADAPTER, INTERPOSER_TECH_ID, IO_CLASSES, IO_PAD_LAYER,
+    CarrierFacts, ChipletFacts, DieFacts, FrameFacts, emit_intermediate_chiplet,
 )
 
 # is_cmim, CMIM_MODEL and die_role live next to the DIE_OUTLINE_LAYER rule so
@@ -117,12 +116,6 @@ def carrier_identities(carriers, report):
         named.append((ident, net))
     return named
 
-
-#: The io_pad usage classes, the closed vocabulary of both the .chiplet and
-#: io_pads.json. The .chiplet reader throws on any other (IOPad.cpp
-#: string_to_io_class) and the finalizer does not normalize them on the
-#: no-sidecar path, so a typo is refused at export, as the C++ exporter does.
-IO_CLASSES = ("wire_bond", "flipped_bump", "tsv_bump")
 
 def io_pad_size_um(fp):
     """A carrier's pad size in micrometers, to the nanometer: IO_PAD_SIZE_UM

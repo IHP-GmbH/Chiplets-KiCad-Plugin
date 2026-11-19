@@ -31,6 +31,12 @@ DEFAULT_INTERPOSER_ADAPTER = "intm4tm2"
 #: The PDK layer the worker draws every io_pad on, as both files name it.
 IO_PAD_LAYER = "TopMetal2"
 
+#: The io_pad usage classes, the closed vocabulary of both the .chiplet and
+#: io_pads.json. The .chiplet reader throws on any other (IOPad.cpp
+#: string_to_io_class) and the finalizer does not normalize them on the
+#: no-sidecar path, so a typo is refused at export, as the C++ exporter does.
+IO_CLASSES = ("wire_bond", "flipped_bump", "tsv_bump")
+
 
 def iu_to_um(iu):
     """Internal units to micrometers. Mirrors iu2um() in the C++ exporter."""

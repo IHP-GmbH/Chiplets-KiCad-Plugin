@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Unit parsing shared by the board path and the routed path, without pcbnew.
 
-chiplet_writer re-exports both names, so its callers keep importing them
-from there.
+chiplet_writer imports both, and callers that import them from there keep
+working.
 """
 
 import math

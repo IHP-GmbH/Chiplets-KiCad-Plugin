@@ -92,8 +92,14 @@ def check_document(document, *, on_warn=None):
     outline = document.get("outline")
     if not isinstance(outline, list) or len(outline) < 3:
         raise RoutedRefused("%s outline needs at least three points" % ARTIFACT)
-    for i, point in enumerate(outline):
-        _point(point, "outline[%d]" % i)
+    points = [_point(point, "outline[%d]" % i) for i, point in enumerate(outline)]
+    # The io_pads manifest's gds_bbox_corner_um frame and this one share an
+    # origin only because this frame puts it at the outline's lower-left.
+    corner = (min(x for x, _y in points), min(y for _x, y in points))
+    if any(round(value * 1000.0) != 0 for value in corner):
+        raise RoutedRefused(
+            "%s outline's lower-left is (%g, %g); frame %s has its origin there"
+            % (ARTIFACT, corner[0], corner[1], FRAME))
     interposer = document.get("interposer")
     if not isinstance(interposer, dict):
         raise RoutedRefused("%s has no interposer object" % ARTIFACT)

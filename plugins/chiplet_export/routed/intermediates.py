@@ -13,7 +13,8 @@ What each one equals on the board path (pipeline/orchestrator.py):
 - the no-fill sidecar: none beyond the one the caller already passes.
 
 Every input is checked, and every archive decoded, before the first file is
-written.
+written. An I/O error while writing can still leave the .chiplet without its
+pin lists; the caller writes into a fresh folder.
 """
 
 import json
@@ -28,8 +29,9 @@ from ..writers.connection_stacks import (
     emit_connection_stacks_block, validate_adapter_id, validate_interconnect_ids,
 )
 from ..writers.intermediate_chiplet import (
-    DEFAULT_INTERPOSER_ADAPTER, INTERPOSER_TECH_ID, IU_PER_UM, CarrierFacts,
-    ChipletFacts, DieFacts, FrameFacts, emit_intermediate_chiplet,
+    DEFAULT_INTERPOSER_ADAPTER, INTERPOSER_TECH_ID, IO_CLASSES, IO_PAD_LAYER,
+    IU_PER_UM, CarrierFacts, ChipletFacts, DieFacts, FrameFacts,
+    emit_intermediate_chiplet,
 )
 from ..writers._units import _size_um, parse_thickness_um
 from .document import RoutedRefused, check_chiplet_binding, read_document
@@ -37,10 +39,12 @@ from .document import RoutedRefused, check_chiplet_binding, read_document
 #: The stroke interposer-pnr draws the board outline with (kicad_export.py,
 #: the Edge.Cuts gr_rect). The board path's frame is the outline's bounding
 #: box, which KiCad grows by half that stroke on every side; the intermediate
-#: frame of this path is grown the same, so both write the same coordinates.
+#: frame of this path is grown the same, so both write the same coordinates to
+#: the nanometer.
 BOARD_EDGE_STROKE_UM = 100.0
 
-#: The frame of the routed io_pads manifest: the document's own.
+#: The frame of the routed io_pads manifest. Its origin is the document's
+#: (the outline's lower-left corner, which check_document holds at 0, 0).
 IO_PADS_FRAME = "gds_bbox_corner_um"
 
 
@@ -57,7 +61,8 @@ def normalize_180(degrees):
         value += 360.0
     while value > 180.0:
         value -= 360.0
-    return value
+    # -0.0 + 0.0 is 0.0: KiCad never stores a negative zero.
+    return value + 0.0
 
 
 def _components(chiplet):
@@ -68,7 +73,8 @@ def _components(chiplet):
 
 
 def _device_components(document, chiplet):
-    """[(device, component)] in devices[] order; every ref must be a component."""
+    """[(device, component)] in devices[] order. Every ref must be a component,
+    and every die of the .chiplet a device."""
     components = _components(chiplet)
     pairs = []
     for device in document["devices"]:
@@ -77,6 +83,12 @@ def _device_components(document, chiplet):
             raise RoutedRefused(
                 "device %s is no component of the .chiplet" % device["ref"])
         pairs.append((device, component))
+    placed = {device["ref"] for device in document["devices"]}
+    missing = sorted(str(ident) for ident, component in components.items()
+                     if component.get("type") == "die" and ident not in placed)
+    if missing:
+        raise RoutedRefused("die %s of the .chiplet has no device in the routed "
+                            "geometry" % ", ".join(missing))
     return pairs
 
 
@@ -101,6 +113,16 @@ def _check_carrier(pad, index):
         if type(value) not in (int, float) or not math.isfinite(value):
             raise RoutedRefused("%s (%s) %s must be a finite number, not %r"
                                 % (where, pad["ref"], key, value))
+    # The board path refuses the same (io_pad_size_um); the .chiplet reader
+    # throws on any other class.
+    if pad["io_class"] not in IO_CLASSES:
+        raise RoutedRefused("io_pad %s has io_class %r, not one of %s"
+                            % (pad["ref"], pad["io_class"], ", ".join(IO_CLASSES)))
+    # The emitter writes every carrier on IO_PAD_LAYER; another layer would be
+    # written as that one without a word.
+    if pad.get("layer", IO_PAD_LAYER) != IO_PAD_LAYER:
+        raise RoutedRefused("io_pad %s is on %r; the .chiplet carries io_pads on %s"
+                            % (pad["ref"], pad["layer"], IO_PAD_LAYER))
 
 
 def _frame(document):
@@ -156,9 +178,12 @@ def facts_from_documents(document, chiplet, io_pads, *, board_name,
             front=True,
             rotation_deg=normalize_180(device["rotation_deg"])))
 
-    carriers = []
+    carriers, seen = [], set()
     for index, pad in enumerate(io_pads):
         _check_carrier(pad, index)
+        if pad["ref"] in seen:
+            raise RoutedRefused("io_pad %s is listed twice" % pad["ref"])
+        seen.add(pad["ref"])
         size = _size_um(pad["size_x_um"], pad["size_y_um"])
         if size is None:
             raise RoutedRefused("io_pad %s has no size above zero" % pad["ref"])
@@ -178,15 +203,19 @@ def facts_from_documents(document, chiplet, io_pads, *, board_name,
         dies=tuple(dies))
 
 
-def die_pin_lists(document, chiplet):
-    """{ref: bump sidecar} as write_die_pin_lists writes it, in devices[] order."""
+def die_pin_lists(document, chiplet, method_specs=None):
+    """{ref: bump sidecar} as write_die_pin_lists writes it, in devices[] order.
+
+    ``method_specs`` is what the board preflight holds each archive against
+    (connection_method_specs); given, an attachment that differs is refused.
+    """
     result = {}
     for device, component in _device_components(document, chiplet):
         ref = device["ref"]
         try:
             result[ref] = archive_pin_list(device["pad_domains"], ref,
                                            _connection(component),
-                                           _orientation(device))
+                                           _orientation(device), method_specs)
         except PadDomainError as exc:
             raise RoutedRefused("device %s: %s" % (ref, exc)) from exc
     return result
@@ -220,7 +249,8 @@ def die_thicknesses(document, chiplet):
 
 @dataclass(frozen=True)
 class RoutedIntermediates:
-    """What write_intermediates wrote, as the orchestrator's overrides take it."""
+    """What write_intermediates wrote: the board path's pre-worker
+    intermediates, for a caller to hand to the workers in their place."""
     chiplet: str
     pin_lists: Dict[str, str]
     die_connections: Dict[str, str]
@@ -234,14 +264,14 @@ def write_intermediates(document_path, chiplet_path, io_pads_path, *,
                         interconnect_manifest=None,
                         interposer_adapter=DEFAULT_INTERPOSER_ADAPTER,
                         interconnect_adapter="", interposer_lyp="",
-                        cmim_devices_json=None, on_warn=None):
+                        cmim_devices_json=None, method_specs=None, on_warn=None):
     """Write the intermediate .chiplet to ``chiplet_output`` and one
     ``<ref>_pins.json`` per device into ``pins_dir``.
 
     Refuses (RoutedRefused), before any file is written: a document this
     reader does not read, a .chiplet other than the one it binds, a device
     that is no .chiplet component or whose archive does not decode, an io_pads
-    manifest in another frame, and any CMIM sidecar.
+    manifest in another frame, a missing ``pins_dir``, and any CMIM sidecar.
     """
     if cmim_devices_json:
         raise RoutedRefused(
@@ -267,10 +297,12 @@ def write_intermediates(document_path, chiplet_path, io_pads_path, *,
         interconnect_manifest=interconnect_manifest,
         interposer_adapter=interposer_adapter,
         interconnect_adapter=interconnect_adapter, interposer_lyp=interposer_lyp)
-    pin_lists = die_pin_lists(document, chiplet)
+    pin_lists = die_pin_lists(document, chiplet, method_specs)
     connections = die_connections(document, chiplet)
     thicknesses = die_thicknesses(document, chiplet)
     stacks = emit_connection_stacks_block(interconnect_manifest)
+    if not os.path.isdir(pins_dir):
+        raise RoutedRefused("the pin list folder %s does not exist" % pins_dir)
 
     emit_intermediate_chiplet(facts, chiplet_output, stacks)
     paths = {}
