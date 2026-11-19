@@ -71,7 +71,8 @@ def test_kicad_writer_literal_is_pinned():
     # emit `format_version: "1.0"` verbatim. The plugin writer builds YAML from
     # board state (a lossy, from-scratch writer), so it stamps the supported
     # version rather than echoing any input. If the format baseline ever moves,
-    # move BOTH writers and this pin together.
-    src = (CHIPLET_EXPORT_ROOT / "writers" / "chiplet_writer.py").read_text(
+    # move BOTH writers and this pin together. The plugin's emitter is
+    # writers/intermediate_chiplet.py; chiplet_writer only reads the board.
+    src = (CHIPLET_EXPORT_ROOT / "writers" / "intermediate_chiplet.py").read_text(
         encoding="utf-8")
     assert 'f.write(\'format_version: "1.0"\\n\\n\')' in src

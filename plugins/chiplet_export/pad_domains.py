@@ -188,6 +188,14 @@ def archived_die_dimensions(footprint):
     return _die_dimensions(doc["die"]["pin_list"])
 
 
+def archive_die_dimensions(archive, reference, method):
+    """archived_die_dimensions from the archive alone, as archive_pin_list
+    takes it."""
+    if not isinstance(archive, str):
+        archive = json.dumps(archive)
+    return _die_dimensions(decode_domains(archive, reference, method)["die"]["pin_list"])
+
+
 def _check_method_source(attachment, method_specs):
     method = attachment["method"]
     source = _object(method_specs.get(method), "selected manifest method " + method)
@@ -213,6 +221,56 @@ def _pads_by_name(footprint, pcbnew):
         py = _number(-local.y / (pcbnew.PCB_IU_PER_MM / 1000.0), "pad local Y")
         result.setdefault(str(pad.GetNumber()), []).append((pad, px, py))
     return result
+
+
+def _bump_pin(pin, mx, dbu):
+    """One source pin in the bump reader's frame: footprint-local, mirrored
+    by ``mx``, in fixed nm."""
+    # The bump reader uses fixed nm, not PinList.dbu_um. Convert only
+    # known geometry fields; do not copy unknown geometry in a new frame.
+    converted = {key: pin[key] for key in ("name", "type", "side", "pad_index")
+                 if key in pin}
+    converted.setdefault("type", "passive")
+    scale = dbu / 0.001
+    for key in ("center_x_dbu", "center_y_dbu", "width_dbu", "height_dbu"):
+        converted[key] = pin[key] * scale * (mx if key == "center_x_dbu" else 1)
+        _number(converted[key], "normalized " + key)
+    if pin.get("polygon_points_dbu") is not None:
+        converted["polygon_points_dbu"] = [[mx * a * scale, b * scale]
+                                           for a, b in pin["polygon_points_dbu"]]
+        for point in converted["polygon_points_dbu"]:
+            for value in point:
+                _number(value, "normalized polygon coordinate")
+    return converted
+
+
+def _bump_sidecar(ref, pins):
+    return {"version": 1, "chiplet_name": ref, "dbu_um": 0.001, "pins": pins}
+
+
+def archive_pin_list(archive, reference, method, orientation):
+    """The bump sidecar footprint_pin_list writes, from the archive alone.
+
+    ``archive`` is the CHIPLET_PAD_DOMAINS text, or its parsed object, as a
+    document carries it. With no footprint there are no pads to hold the
+    archive against: footprint_pin_list does that on a board. Raises
+    PadDomainError for an archive decode_domains refuses or an orientation
+    outside flip_chip and face_up.
+    """
+    if not isinstance(archive, str):
+        archive = json.dumps(archive)
+    doc = decode_domains(archive, reference, method)
+    if orientation not in ("flip_chip", "face_up"):
+        raise PadDomainError("Carrier footprint requires canonical ORIENTATION")
+    mx = -1 if orientation == "flip_chip" else 1
+    source = doc["die"]["pin_list"]
+    try:
+        return _bump_sidecar(reference, [_bump_pin(pin, mx, source["dbu_um"])
+                                         for pin in source["pins"]])
+    except (TypeError, ValueError, OverflowError) as exc:
+        if isinstance(exc, PadDomainError):
+            raise
+        raise PadDomainError("Cannot convert the archived pin list: %s" % exc) from exc
 
 
 def footprint_pin_list(footprint, pcbnew, method_specs=None):
@@ -257,23 +315,8 @@ def footprint_pin_list(footprint, pcbnew, method_specs=None):
                 raise PadDomainError("Physical pin %s/%s no longer has its carrier landing geometry" %
                                      (ref, pin["pad_index"]))
             candidates.remove(matched[0])
-            # The bump reader uses fixed nm, not PinList.dbu_um. Convert only
-            # known geometry fields; do not copy unknown geometry in a new frame.
-            converted = {key: pin[key] for key in ("name", "type", "side", "pad_index")
-                         if key in pin}
-            converted.setdefault("type", "passive")
-            scale = dbu / 0.001
-            for key in ("center_x_dbu", "center_y_dbu", "width_dbu", "height_dbu"):
-                converted[key] = pin[key] * scale * (mx if key == "center_x_dbu" else 1)
-                _number(converted[key], "normalized " + key)
-            if pin.get("polygon_points_dbu") is not None:
-                converted["polygon_points_dbu"] = [[mx * a * scale, b * scale]
-                                                   for a, b in pin["polygon_points_dbu"]]
-                for point in converted["polygon_points_dbu"]:
-                    for value in point:
-                        _number(value, "normalized polygon coordinate")
-            pins.append(converted)
-        return {"version": 1, "chiplet_name": ref, "dbu_um": 0.001, "pins": pins}
+            pins.append(_bump_pin(pin, mx, dbu))
+        return _bump_sidecar(ref, pins)
     except PadDomainError:
         raise
     except (SnapshotError, AttributeError, TypeError, ValueError, OverflowError) as exc:
