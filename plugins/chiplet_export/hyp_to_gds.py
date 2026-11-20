@@ -837,6 +837,9 @@ class RoutedGeometryParser:
         #: (net board name, drawn record) per via, in self.vias order: the
         #: cut arrays the via table cross-check holds against the engine's.
         self.drawn_vias: List[Tuple[str, Dict]] = []
+        #: {ref: (x, y)} each device's origin in micrometres as the document
+        #: writes it: what the .chiplet's die positions are finalized from.
+        self.device_origins_um: Dict[str, Tuple[float, float]] = {}
 
     def parse(self) -> None:
         on_warn = lambda note: print(f"Warning: {note}", file=sys.stderr)  # noqa: E731
@@ -851,6 +854,7 @@ class RoutedGeometryParser:
                 PerimeterSegment(x1=x1 * m, y1=y1 * m, x2=x2 * m, y2=y2 * m))
         for device in doc["devices"]:
             x, y = device["origin"]
+            self.device_origins_um[device["ref"]] = (float(x), float(y))
             self.devices.append(Device(
                 ref=device["ref"], layer=metals[-1],
                 gds_file=files[device["ref"]]["layout"],
@@ -859,8 +863,9 @@ class RoutedGeometryParser:
                 self.pins.append(Pin(x=None, y=None, padstack_index=None,
                                      ref="%s.%s" % (device["ref"], pad["pad_number"])))
         if self.io_pads_path:
-            with open(self.io_pads_path, encoding="utf-8") as f:
-                carriers = json.load(f).get("io_pads") or []
+            carriers = _io_pads_manifest.read(
+                self.io_pads_path, on_warn=on_warn,
+                frame=_io_pads_manifest.CANONICAL_FRAME)
             for pad in carriers:
                 self.pins.append(Pin(x=None, y=None, padstack_index=None,
                                      ref=str(pad.get("ref", ""))))
@@ -954,6 +959,69 @@ def check_routed_via_table(generator: "GDSGenerator",
                 "%s: %s draws %d x %d cuts on a %g pad, the engine's %s table "
                 "gives %d" % (where, cut, drawn["k"], drawn["k"], max(drawn["pad"]),
                               kind, k))
+
+
+#: The bbox guard's id: the message a reader searches for.
+BBOX_OFF_ORIGIN = "interposer-bbox-off-origin"
+
+
+class BboxOffOrigin(Exception):
+    """The composed interposer's bbox lower-left is not the origin, so the
+    routed geometry's frame and the GDS's differ; nothing may be finalized
+    against it."""
+
+    def lines(self) -> List[str]:
+        return ["[%s] %s" % (BBOX_OFF_ORIGIN, self)]
+
+
+def check_bbox_at_origin(layout: "db.Layout", top: "db.Cell") -> None:
+    """Refuse (BboxOffOrigin) a top cell whose bbox lower-left is not (0, 0)
+    in integer dbu, exactly.
+
+    On the routed path the io pads and die origins are written in the frame
+    whose origin is the outline's lower-left, and pass into the .chiplet
+    without a shift. That holds only while the composed interposer's bbox
+    starts there too, so the run checks it rather than assuming it. The
+    message names both lower-left corners and the layer and cell of the
+    shape lying farthest outside the origin.
+    """
+    box = top.bbox()
+    if box.empty() or (box.left, box.bottom) == (0, 0):
+        return
+    dbu = layout.dbu
+    outline = layout.find_layer(*GDSGenerator.PRBOUNDARY_LAYER)
+    outline_box = top.bbox(outline) if outline is not None else db.Box()
+    worst = None
+    for index in layout.layer_indexes():
+        it = top.begin_shapes_rec(index)
+        while not it.at_end():
+            shape_box = it.shape().bbox().transformed(it.trans())
+            reach = max(-shape_box.left, -shape_box.bottom)
+            if worst is None or reach > worst[0]:
+                worst = (reach, layout.get_info(index), it.cell().name, shape_box)
+            it.next()
+
+    def corner(b):
+        return "(%d, %d) dbu" % (b.left, b.bottom) if not b.empty() else "none"
+    detail = ("; farthest outside: a shape on %s in cell %s, lower-left (%d, %d) dbu"
+              % (worst[1], worst[2], worst[3].left, worst[3].bottom)
+              if worst is not None and worst[0] > 0 else "")
+    raise BboxOffOrigin(
+        "the interposer's bbox lower-left is %s, the outline's lower-left %s "
+        "(dbu %g um); the routed geometry's frame has its origin at (0, 0) and "
+        "nothing it writes is shifted%s" % (corner(box), corner(outline_box), dbu,
+                                             detail))
+
+
+def check_written_bbox_at_origin(gds_path: str, cell_name: str) -> None:
+    """check_bbox_at_origin on the GDS at ``gds_path``: after the fill, which
+    rewrites the file in place where the in-memory check cannot see it."""
+    layout = db.Layout()
+    layout.read(gds_path)
+    top = layout.cell(cell_name) if cell_name else None
+    if top is None:
+        top = layout.top_cell()
+    check_bbox_at_origin(layout, top)
 
 
 # Fraction of trace elements on unmapped layers above which the conversion
@@ -4251,7 +4319,9 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                         io_pad_refs: Optional[Iterable[str]] = None,
                         system_chiplet: Optional[Dict] = None,
                         die_layouts: Optional[Dict[
-                            str, '_die_layouts.DieLayout']] = None) -> bool:
+                            str, '_die_layouts.DieLayout']] = None,
+                        device_origins_um: Optional[Dict[
+                            str, Tuple[float, float]]] = None) -> bool:
     """
     Update .chiplet file with interposer GDS path, dimensions, position,
     correct z-values for dies, and top_cell names from GDS files.
@@ -4333,6 +4403,13 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                  assembly_view_layout). Both files are checked against the
                  contract first (resolve_die_layouts). None leaves every
                  die's layout as the board gives it.
+        device_origins_um: {die id: (x, y)} the routed geometry's device
+                 origins (--routed-geometry). Given, the run is the routed
+                 path's: the bbox lower-left must be (0, 0) at the dbu, the
+                 io pads (gds_bbox_corner_um) pass through unshifted with
+                 their own layer, and each die is placed at its origin as
+                 written. None is the board path: pads and dies are shifted
+                 by the bbox lower-left and the pads drawn on TopMetal2.
 
     Returns:
         True if successful, False otherwise.
@@ -4383,6 +4460,15 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
             except Exception as e:
                 print(f"Warning: Could not read interposer GDS bbox: {e}",
                       file=sys.stderr)
+
+    if device_origins_um is not None and bbox is not None \
+            and (round(bbox[0] * 1000.0), round(bbox[1] * 1000.0)) != (0, 0):
+        # The worker refused this before writing the GDS; a direct caller
+        # gets the same refusal, before the .chiplet is touched.
+        print("ERROR: [%s] the interposer's bbox lower-left is (%g, %g) um; "
+              "the routed path shifts nothing into the .chiplet"
+              % (BBOX_OFF_ORIGIN, bbox[0], bbox[1]), file=sys.stderr)
+        return False
 
     try:
         # Guarded read (H-B): delegate to the vendored reference loader rather
@@ -4556,7 +4642,13 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     # pad in the canonical frame. If bbox is None we
                     # cannot rebase; fall back to pass-through and
                     # warn so the leak is visible in the log.
-                    if bbox is not None:
+                    # On the routed path the pads are already in it: the
+                    # bbox lower-left is the origin (checked above), and
+                    # each pad keeps the layer its manifest gives.
+                    routed = device_origins_um is not None
+                    if routed:
+                        gds_left, gds_bottom = 0.0, 0.0
+                    elif bbox is not None:
                         gds_left, gds_bottom = bbox[0], bbox[1]
                     else:
                         gds_left, gds_bottom = 0.0, 0.0
@@ -4576,13 +4668,19 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                                 'x': float(p.get('size_x_um', 0.0)),
                                 'y': float(p.get('size_y_um', 0.0)),
                             },
-                            'layer': 'TopMetal2',
+                            'layer': (str(p['layer']) if routed
+                                      else 'TopMetal2'),
                         }
                         for i, p in enumerate(io_pads)
                     ]
-                    print(f"  Injected {len(io_pads)} io_pads under interposer "
-                          f"(re-anchored to GDS-bbox-corner: "
-                          f"shift = ({-gds_left:+.2f}, {-gds_bottom:+.2f}) um)")
+                    if routed:
+                        print(f"  Injected {len(io_pads)} io_pads under "
+                              f"interposer (gds_bbox_corner_um, as written)")
+                    else:
+                        print(f"  Injected {len(io_pads)} io_pads under "
+                              f"interposer (re-anchored to GDS-bbox-corner: "
+                              f"shift = ({-gds_left:+.2f}, {-gds_bottom:+.2f}) "
+                              f"um)")
 
                 updated = True
                 break
@@ -4745,7 +4843,20 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
             # always match the GDS routing bbox; the residual shift
             # (typically a few hundred microns) shows up in Chiplet
             # Studio as the die floating off the cu-pillars.
-            if devices is not None and bbox is not None:
+            if device_origins_um is not None:
+                # The routed path: the document's origin, as written, in
+                # the frame whose origin the bbox lower-left is.
+                ref = component.get('id', '')
+                if ref in device_origins_um:
+                    new_x, new_y = device_origins_um[ref]
+                    old = component.get('position', {})
+                    print(f"  {ref}: re-anchored x/y "
+                          f"({old.get('x', 0):.2f},{old.get('y', 0):.2f}) -> "
+                          f"({new_x:.2f},{new_y:.2f}) [routed geometry origin]")
+                    component.setdefault('position', {})
+                    component['position']['x'] = new_x
+                    component['position']['y'] = new_y
+            elif devices is not None and bbox is not None:
                 gds_left, gds_bottom = bbox[0], bbox[1]
                 device_map = {dev.ref: dev for dev in devices
                               if getattr(dev, 'gds_file', '')}
@@ -6265,6 +6376,14 @@ def _report_refusal(what: str, exc: Exception) -> None:
         print("  " + line, file=sys.stderr)
 
 
+def _report_bbox_refusal(exc: "BboxOffOrigin") -> None:
+    print("", file=sys.stderr)
+    for line in exc.lines():
+        print("ERROR: " + line, file=sys.stderr)
+    print("  Refusing to export: no layout, sidecar or .chiplet was written.",
+          file=sys.stderr)
+
+
 def refuse_touching_nets(copper: Dict[Tuple[str, str], List[db.Polygon]],
                          dbu: float) -> None:
     """Refuse two nets' traces that touch on one layer.
@@ -6421,7 +6540,8 @@ def convert_hyp_to_gds(
             # Strict here; the generator then loads the same keys from the
             # same file, and the cut arrays are held against that table.
             load_via_table(tech_json_path)
-        except (RoutedGeometryRefused, ViaTableRefused, OSError, ValueError) as exc:
+        except (RoutedGeometryRefused, ViaTableRefused, IoPadsRefused,
+                OSError, ValueError) as exc:
             _report_refusal("Routed geometry", exc)
             print("  Refusing to export: no layout, sidecar or .chiplet was "
                   "written.", file=sys.stderr)
@@ -6469,7 +6589,9 @@ def convert_hyp_to_gds(
             head_io_pads = _io_pads_manifest.read(
                 io_pads_json,
                 on_warn=lambda note: print(f"Warning: {note}",
-                                           file=sys.stderr))
+                                           file=sys.stderr),
+                frame=(_io_pads_manifest.CANONICAL_FRAME
+                       if routed_geometry_path else _io_pads_manifest.FRAME))
         except IoPadsRefused as exc:
             print("", file=sys.stderr)
             for line in exc.lines():
@@ -7021,6 +7143,16 @@ def convert_hyp_to_gds(
                                             ring.top, ring.width(),
                                             ring.height()))
 
+    # On the routed path nothing is shifted into the .chiplet's frame, which
+    # holds only while the composed bbox starts at the origin: checked here,
+    # in memory, before the GDS or a sidecar exists.
+    if routed_geometry_path:
+        try:
+            check_bbox_at_origin(generator.layout, generator.top_cell)
+        except BboxOffOrigin as exc:
+            _report_bbox_refusal(exc)
+            return False
+
     # Write interposer GDS (routing + cu-pillars, without chiplet dies). With
     # the fill on, the sidecars wait for it: the boundary manifest binds the
     # digest of the final bytes, and the fill rewrites the file in place.
@@ -7040,6 +7172,15 @@ def convert_hyp_to_gds(
             output_path, cell_name, fill_mode, _filler_layers(layer_map))
         if fill_result["status"] == "error":
             return False
+        # The fill drew on the file, where the check above could not see:
+        # again, before the sidecars, and a refused GDS is not left behind.
+        if routed_geometry_path:
+            try:
+                check_written_bbox_at_origin(output_path, cell_name)
+            except BboxOffOrigin as exc:
+                os.remove(output_path)
+                _report_bbox_refusal(exc)
+                return False
         generator.write_sidecars(output_path)
         report = fill_result.get("report") or {}
         if isinstance(report, dict):
@@ -7099,7 +7240,9 @@ def convert_hyp_to_gds(
                            outline_reader=outline_reader,
                            io_pad_refs=head_io_pad_refs,
                            system_chiplet=system_chiplet,
-                           die_layouts=head_die_layouts):
+                           die_layouts=head_die_layouts,
+                           device_origins_um=getattr(
+                               parser, "device_origins_um", None)):
             print(f"ERROR: failed to finalize chiplet file "
                   f"'{chiplet_file_path}'.", file=sys.stderr)
             return False
@@ -7374,10 +7517,16 @@ Examples:
              "the KiCad plugin export writes it: external I/O pad locations "
              "in planner net names (never inverted here). Its schema, version "
              "and frame are required: schema chiplet-io-pad-manifest, "
-             "version 1.x, frame board_absolute_ynegated_um. A file without "
-             "them (a bare pad list), another frame (gds_bbox_corner_um is "
-             "never converted), another major version, or an unreadable file "
-             "exits 1 before anything is written. Each entry is rendered in "
+             "version 1.x, and frame board_absolute_ynegated_um with a HYP "
+             "file, gds_bbox_corner_um with --routed-geometry (interposer-"
+             "pnr's projector). A file without them (a bare pad list), the "
+             "other frame (never converted), another major version, or an "
+             "unreadable file exits 1 before anything is written. With "
+             "--routed-geometry the pads and die origins reach the .chiplet "
+             "unshifted, so the composed interposer's bbox lower-left must be "
+             "(0, 0) exactly, before the write and after any fill; otherwise "
+             "the run exits 1 [interposer-bbox-off-origin] and leaves no GDS "
+             "or sidecar. Each entry is rendered in "
              "the interposer GDS based on its io_class field (wire_bond now; "
              "flipped_bump and tsv_bump reserved). When combined with "
              "--update-chiplet-file, the placed pads are also injected under "

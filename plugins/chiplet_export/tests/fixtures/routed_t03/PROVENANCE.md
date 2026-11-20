@@ -67,3 +67,9 @@ HYPParser reads it, and the routed geometry must give the same model. Its
 `{BOARD}` header and `GDS_FILE` paths are the container's; the test resolves
 a `GDS_FILE` against the staged document's folder and compares layouts by
 sha256, never by path text.
+
+`inputs/board-path.chiplet` is the finalized .chiplet of the same golden run,
+`goldens/out/export/cf_typical_03_from_schematic.draft.chiplet`, copied byte
+for byte: sha256 `706b10aaf6d51d1d3ab6cb374efc700a8b56971eec8e0da050acb1579efe54da`, the digest the seal
+lists for it. The routed finalize test compares its dies' positions and
+anchors and its interposer io pads with what the routed path writes.
