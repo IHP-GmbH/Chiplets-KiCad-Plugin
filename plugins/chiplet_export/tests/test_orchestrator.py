@@ -25,6 +25,8 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT.parent))
 
+from chiplet_export.carrier_profile import (  # noqa: E402
+    FabParamsRefused, method_fab_params)
 from chiplet_export.pipeline import orchestrator  # noqa: E402
 from chiplet_export.pipeline.orchestrator import (  # noqa: E402
     DEFAULT_INTERPOSER_ADAPTER,
@@ -622,9 +624,13 @@ class _StubManifestReader(object):
             raise ValueError("manifest declares no schema_version")
         return data
 
-    def fab_params(self, method_id, manifest):
-        # As interconnect_pdk's reader before 1.2: the entry as written.
-        return dict(manifest["methods"][method_id]["fab_params"])
+    SUPPORTED_SCHEMA_VERSION = "1.2"
+    FabParamsRefused = FabParamsRefused
+
+    def fab_params(self, method_id, manifest, *, where=None):
+        # As interconnect_pdk's reader from 1.2 on, which the plugin requires:
+        # the rule chiplet-spec 1.25.0 states, here the plugin's own copy of it.
+        return method_fab_params(method_id, manifest["methods"], where=where)
 
 
 @pytest.fixture
@@ -1616,10 +1622,13 @@ def test_explicit_catalogue_a_cannot_mix_with_default_catalogue_b(
         def list_methods(self, manifest=None):
             return list(self._selected(manifest)["methods"])
 
-        def fab_params(self, method_id, manifest):
+        SUPPORTED_SCHEMA_VERSION = "1.2"
+        FabParamsRefused = FabParamsRefused
+
+        def fab_params(self, method_id, manifest, *, where=None):
             # The plugin hands the reader the selected methods, not a copy.
             assert manifest["methods"] is manifest_a["methods"]
-            return dict(manifest["methods"][method_id]["fab_params"])
+            return method_fab_params(method_id, manifest["methods"], where=where)
 
         def adapter_for(self, method_id, manifest=None):
             return self._selected(manifest)["methods"][method_id]["adapter"]

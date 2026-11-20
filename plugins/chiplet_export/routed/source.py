@@ -178,11 +178,13 @@ class RoutedSource(ExportSource):
 
     # The preflights the body calls, before any output exists.
 
-    def validate_pad_domains(self, methods, *, load_layer_map):
+    def validate_pad_domains(self, methods, *, load_layer_map, load_top_metal=None):
         """{ref: method} of every device, after its carrier layer check: the
         archive's carrier.layer must be the document's top metal, the one
         every carrier pad lands on, and resolve in the worker LYP. The LYP is
-        loaded at the first device, so its refusal is a refusal too."""
+        loaded at the first device, so its refusal is a refusal too.
+        ``load_top_metal`` is the board path's: the document names its own
+        stack."""
         from ..pad_domains import PadDomainError
         from ..layer_map import LayerMapError
         prepared = self.prepared

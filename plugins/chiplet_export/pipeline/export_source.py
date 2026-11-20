@@ -77,9 +77,10 @@ class BoardSource(ExportSource):
 
     # Preflights, before any output exists.
 
-    def validate_pad_domains(self, methods, *, load_layer_map):
+    def validate_pad_domains(self, methods, *, load_layer_map, load_top_metal=None):
         return _module("pad_domains").validate_board_pad_domains(
-            self.board, methods, load_layer_map=load_layer_map)
+            self.board, methods, load_layer_map=load_layer_map,
+            load_top_metal=load_top_metal)
 
     def preflight_die_outline_layers(self, declared):
         return _module("die_outline").preflight_die_outline_layers(

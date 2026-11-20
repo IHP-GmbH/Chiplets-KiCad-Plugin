@@ -1823,25 +1823,33 @@ def run_export(board, options, plugin_dir,
     # Carrier metadata is a physical contract, not an optional extraction hint.
     # Check it before output creation, including explicit pin/GDS overrides.
     from ..pad_domains import PadDomainError, validate_export_pad_sources
-    from ..layer_map import LayerMap, resolve_lyp_path
+    from ..layer_map import LayerMap, require_carrier_package, resolve_lyp_path
     import dataclasses
 
     effective_lyp = options.lyp_override
+    worker_start = Path(plugin_dir) / "hyp_to_gds.py"
+
+    def carrier_env():
+        # The manifest root selected from the board is also pinned in the
+        # worker environment. Path variables must see that same selection.
+        # (Not worker_env: that name is the environment dict further down.)
+        return build_worker_env(dataclasses.replace(
+            options, interconnect_pdk_root=interconnect_manifest.root))
 
     def load_carrier_layer_map():
         nonlocal effective_lyp
-        # The manifest root selected from the board is also pinned in the
-        # worker environment. Path variables must see that same selection.
-        worker_options = dataclasses.replace(
-            options, interconnect_pdk_root=interconnect_manifest.root)
         effective_lyp = resolve_lyp_path(
-            options.lyp_override or None, env=build_worker_env(worker_options),
-            start=Path(plugin_dir) / "hyp_to_gds.py")
+            options.lyp_override or None, env=carrier_env(), start=worker_start)
         return LayerMap(effective_lyp, strict=True)
+
+    def load_carrier_top_metal():
+        # The package the worker discovers, with the worker's environment.
+        return require_carrier_package(env=carrier_env(), start=worker_start).top_metal()
 
     try:
         domain_methods = source.validate_pad_domains(
-            interconnect_manifest.methods, load_layer_map=load_carrier_layer_map)
+            interconnect_manifest.methods, load_layer_map=load_carrier_layer_map,
+            load_top_metal=load_carrier_top_metal)
         validate_export_pad_sources(
             domain_methods, method_overrides=options.die_connections,
             default_method=options.connection_type,
