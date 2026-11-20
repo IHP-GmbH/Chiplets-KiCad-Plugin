@@ -20,8 +20,8 @@ def test_each_token_names_its_metal(token, metal):
 
 
 @pytest.mark.parametrize("token, message", [
-    ("TopMetal2", "no metal layer for 'TopMetal2' in the routed stack"),
-    (None, "no metal layer for None in the routed stack"),
+    ("TopMetal2", "'TopMetal2' is not a KiCad copper layer name (F.Cu, B.Cu or In<n>.Cu)"),
+    (None, "None is not a KiCad copper layer name (F.Cu, B.Cu or In<n>.Cu)"),
     ("In4.Cu", "the routed stack of 4 metals has no In4.Cu"),
 ])
 def test_a_token_the_stack_does_not_have_is_refused(token, message):
