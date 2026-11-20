@@ -2,8 +2,8 @@
 """routed_inputs.py, the worker-tier read of the routed path's three inputs,
 and the CLI tier's call of it (routed.source.read_in_worker).
 
-The report must carry every input unchanged and every warning the reads give,
-the vendored reader's own included; a report the CLI cannot trust, and a
+The report must carry every input unchanged and every version warning the
+reads give, the vendored reader's own included, and no other; a report the CLI cannot trust, and a
 script that fails, is refused, never read as inputs.
 """
 
@@ -103,3 +103,23 @@ def test_the_report_is_versioned():
             "format": routed_inputs.FORMAT, "version": routed_inputs.VERSION + 1,
             "warnings": [], "refused": "why"}))
 
+
+def test_a_warning_that_is_not_a_version_warning_stays_out_of_the_report(
+        tmp_path, monkeypatch):
+    """The worker's interpreter may warn about anything (a deprecation in a
+    package the reader loads); only the readers' version warnings are the
+    export's."""
+    import warnings
+    real = routed_inputs.read_inputs
+
+    def noisy(*args, **kwargs):
+        warnings.warn("unrelated", RuntimeWarning)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(routed_inputs, "read_inputs", noisy)
+    # In this process the reader warns once per version; start afresh.
+    routed_inputs.vendored.chiplet_format_io()._reset_version_warnings()
+    chiplet, document = _newer_chiplet(tmp_path)
+    with pytest.warns(RuntimeWarning, match="unrelated"):
+        report = routed_inputs.report(str(document), str(chiplet), str(IO_PADS),
+                                      "gds_bbox_corner_um")
+    assert len(report["warnings"]) == 1 and "'1.9' is newer" in report["warnings"][0]

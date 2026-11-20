@@ -1778,6 +1778,9 @@ def run_export(board, options, plugin_dir,
         source.preflight(interconnect_manifest, worker_python=worker_python,
                          cancel_event=cancel_event)
     except SourceRefused as exc:
+        # A Cancel while the source read its inputs is a cancel, not a refusal.
+        if cancel_event is not None and cancel_event.is_set():
+            return ExportResult(cancelled=True)
         return ExportResult(error="Routed geometry refused: %s" % exc)
     except WorkerPythonNotFoundError as exc:
         return ExportResult(error=str(exc))

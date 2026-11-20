@@ -15,8 +15,9 @@ Run as a script::
     python routed_inputs.py DOCUMENT CHIPLET IO_PADS IO_PADS_FRAME
 
 prints one JSON report on stdout: ``inputs`` (the document, the .chiplet and
-the io pads, as read) or ``refused`` (why not), and ``warnings`` (every
-warning the reads gave, in order). Exit 0 whenever the report was printed.
+the io pads, as read) or ``refused`` (why not), and ``warnings`` (the
+version warnings the reads gave, in order). Exit 0 whenever the report was
+printed.
 
 The module also holds the report's reader, so the writer and the reader share
 one copy. It imports only the standard library and stdlib-only siblings at
@@ -85,12 +86,14 @@ def _carried(value, path):
 
 
 def report(document_path, chiplet_path, io_pads_path, io_pads_frame):
-    """The report document. Every warning the reads give is in it, the
-    vendored reader's own (a newer .chiplet format minor) included."""
-    # Every read warns through the warnings channel when given no on_warn,
-    # so catching it keeps all of them, in order.
+    """The report document. Every version warning the reads give is in it,
+    in order, the vendored reader's own (a newer .chiplet format minor)
+    included; any other warning goes to stderr, as it would unrecorded."""
+    # Every read gives its version warnings to the warnings channel when it
+    # is given no on_warn; the filters stay the interpreter's, so a run that
+    # turns warnings into errors refuses here as it would in process.
+    version_warning = vendored.chiplet_format_io().ContractVersionWarning
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
         try:
             inputs = read_inputs(document_path, chiplet_path, io_pads_path,
                                  io_pads_frame=io_pads_frame)
@@ -98,7 +101,13 @@ def report(document_path, chiplet_path, io_pads_path, io_pads_frame):
                 inputs, (document_path, chiplet_path, io_pads_path))]}
         except InputsRefused as exc:
             body = {"refused": str(exc)}
-    messages = [str(warning.message) for warning in caught]
+    messages = []
+    for warning in caught:
+        if issubclass(warning.category, version_warning):
+            messages.append(str(warning.message))
+        else:
+            warnings.showwarning(warning.message, warning.category,
+                                 warning.filename, warning.lineno)
     return dict(format=FORMAT, version=VERSION, warnings=messages, **body)
 
 
