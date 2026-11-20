@@ -14,18 +14,18 @@ import warnings
 
 if __package__:
     from .board_snapshot import SnapshotError, _properties, _require_simple_pad
-    from .carrier_profile import MANIFEST_WHERE, FabParamsRefused, method_fab_params
+    from .carrier_profile import PAD_PARAMETERS, FabParamsRefused, method_fab_params
 else:
     from board_snapshot import SnapshotError, _properties, _require_simple_pad
-    from carrier_profile import MANIFEST_WHERE, FabParamsRefused, method_fab_params
+    from carrier_profile import PAD_PARAMETERS, FabParamsRefused, method_fab_params
 
 
 PROPERTY = "CHIPLET_PAD_DOMAINS"
 #: The archive's two pad parameters by archive version, as interposer-pnr
 #: writes them: version 2 (from interconnect methods 1.2 on) holds the neutral
 #: names, version 1 the IntM4TM2 ones. An archive never holds both.
-PAD_PARAMETER_KEYS = {1: ("passiv_opening_um", "tm2_enclosure_um"),
-                      2: ("passivation_opening_um", "pad_metal_enclosure_um")}
+PAD_PARAMETER_KEYS = {1: tuple(old for _new, old, _words in PAD_PARAMETERS),
+                      2: tuple(new for new, _old, _words in PAD_PARAMETERS)}
 #: The board path's refusal of an archive without a KiCad layer (a version 2
 #: archive of a technology package with no KiCad view), as interposer-pnr's.
 NO_KICAD_VIEW = ("%s: this technology package has no KiCad view (carrier.kicad_layer "
@@ -240,7 +240,7 @@ def _check_method_source(doc, method_specs):
     source = _object(method_specs.get(method), "selected manifest method " + method)
     _object(source.get("fab_params"), "selected manifest fab_params")
     try:
-        fab = method_fab_params(method, method_specs, where=MANIFEST_WHERE)
+        fab = method_fab_params(method, method_specs)
     except FabParamsRefused as exc:
         raise PadDomainError(str(exc)) from exc
     expected = {"fab_anchor": source.get("fab_anchor"),

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
-from ..carrier_profile import MANIFEST_WHERE, FabParamsRefused, method_fab_params
+from ..carrier_profile import FabParamsRefused, method_fab_params
 from ..connection_methods import refused_landings, resolve_die_methods
 from ..layer_map import (
     PATH_VAR_MARKERS, CarrierPackageRefused, read_carrier_package,
@@ -675,14 +675,18 @@ def _preflight_fab_params(methods: Dict[str, dict], named) -> None:
     """
     reader = _interconnect_reader()
     for method in sorted({m for m in named if m in methods}):
-        if _states_fab_params(methods[method]):
-            method_fab_params(method, methods, where=MANIFEST_WHERE, reader=reader)
+        _stated_fab_params(method, methods, reader)
 
 
-def _states_fab_params(method) -> bool:
-    """Whether a manifest method states pad parameters, the methods
-    chiplet-spec's load_method_pitches holds to method_fab_params."""
-    return isinstance(method, dict) and "fab_params" in method
+def _stated_fab_params(method_id: str, methods: Dict[str, dict], reader) -> dict:
+    """method_fab_params for a manifest method that states pad parameters,
+    {} for one that states none: the methods chiplet-spec's
+    load_method_pitches holds to the rule. A method the export draws a
+    landing for needs them, and its readers refuse their absence."""
+    method = methods[method_id]
+    if not (isinstance(method, dict) and "fab_params" in method):
+        return {}
+    return method_fab_params(method_id, methods, reader=reader)
 
 
 def _load_interconnect_methods(interconnect_root: str = "",
@@ -735,9 +739,7 @@ def derive_interconnect_methods(chiplet_path: str,
         # A method that states pad parameters is read by method_fab_params,
         # which the export preflight already ran (_preflight_fab_params); one
         # that states none is left to the adapter below, as before.
-        fab_params = (method_fab_params(connection, methods_db, where=MANIFEST_WHERE,
-                                        reader=_interconnect_reader())
-                      if _states_fab_params(method) else {})
+        fab_params = _stated_fab_params(connection, methods_db, _interconnect_reader())
         try:
             spacing = float(method["pitch_rules"]["IXN_spacing"])
             pitch = float(method["pitch_rules"]["IXN_pitch"])
@@ -869,9 +871,7 @@ def connection_method_specs(interconnect_root: str = "",
         spec: dict = {}
         pitch_rules = entry.get("pitch_rules") or {}
         try:
-            fab_params = (method_fab_params(method_id, methods, where=MANIFEST_WHERE,
-                                            reader=reader)
-                          if _states_fab_params(entry) else {})
+            fab_params = _stated_fab_params(method_id, methods, reader)
         except FabParamsRefused:
             fab_params = {}  # no single opening to show; the export refuses it
         for key, source, name in (
@@ -1849,17 +1849,22 @@ def run_export(board, options, plugin_dir,
     except PadDomainError as exc:
         return ExportResult(error="Carrier pad domains refused: %s" % exc)
 
-    # Every method the .chiplet will name: the die connections the export
-    # uses (as the worker reads them below) and the default method.
-    named = options.die_connections
-    if not named:
+    # Per-die connection methods: an explicit options map wins; otherwise
+    # the board's per-footprint CONNECTION fields are the source of truth.
+    # Dies without an entry use connection_type. Read once: the preflight
+    # below and the worker get the same map (logged where the run uses it).
+    effective_die_conns = options.die_connections
+    die_conns_read_error = None
+    if not effective_die_conns:
         try:
-            named = source.read_die_connections()
-        except Exception:
-            named = {}  # the read warns where the run uses it
+            effective_die_conns = source.read_die_connections()
+        except Exception as exc:
+            effective_die_conns = {}
+            die_conns_read_error = exc
     try:
         _preflight_fab_params(interconnect_manifest.methods,
-                              list(named.values()) + [options.connection_type])
+                              list(effective_die_conns.values())
+                              + [options.connection_type])
     except FabParamsRefused as exc:
         return ExportResult(error="Interconnect PDK source refused: %s" % exc)
 
@@ -2104,16 +2109,11 @@ def run_export(board, options, plugin_dir,
                 _log("Auto-extracted die bumps for cu-pillars: %s"
                      % ", ".join(sorted(effective_pad_locs)))
 
-        # Per-die connection methods: an explicit options map wins;
-        # otherwise the board's per-footprint CONNECTION fields are the
-        # source of truth. Dies without an entry use connection_type.
-        effective_die_conns = options.die_connections
-        if not effective_die_conns:
-            try:
-                effective_die_conns = source.read_die_connections()
-            except Exception as exc:
-                effective_die_conns = {}
-                _log("Warning: per-die connection read failed: %s" % exc)
+        # Per-die connection methods, read before the preflight.
+        if not options.die_connections:
+            if die_conns_read_error is not None:
+                _log("Warning: per-die connection read failed: %s"
+                     % die_conns_read_error)
             if effective_die_conns:
                 _log("Per-die connections from " + source.field_origin + ": %s"
                      % ", ".join("%s=%s" % (r, m) for r, m
@@ -2615,9 +2615,17 @@ def run_export(board, options, plugin_dir,
                                 ixn_methods_sidecar,
                                 ", ".join(sorted(derived_methods)),
                             ))
+                    except FabParamsRefused as exc:
+                        # The preflight refuses this before any output; were
+                        # a method to reach here unchecked, the DRC is refused,
+                        # never run against the assembly-global pad size.
+                        _log("Assembly DRC REFUSED: %s" % exc)
+                        assembly_drc_exit = 1
+                        assembly_drc_refused = True
                     except Exception as exc:
                         _log("Warning: per-method interconnect derivation "
                              "failed: %s" % exc)
+                if adk_runner and not assembly_drc_refused:
                     # DRC report + its scratch run dir live under reports/ so they
                     # stay out of the layout/ subdir and the output-dir root. The
                     # report's parent must exist before KLayout writes it (run_drc

@@ -183,7 +183,7 @@ class RoutedSource(ExportSource):
         archive's carrier.layer must be the document's top metal, the one
         every carrier pad lands on, and resolve in the worker LYP. The LYP is
         loaded at the first device, so its refusal is a refusal too."""
-        from ..pad_domains import PadDomainError, check_carrier_layer
+        from ..pad_domains import PadDomainError
         from ..layer_map import LayerMapError
         prepared = self.prepared
         top = prepared.document["stack"][-1]["metal"]
@@ -199,7 +199,7 @@ class RoutedSource(ExportSource):
                         "only." % (carrier["layer"], top))
                 if layer_map is None:
                     layer_map = load_layer_map()
-                check_carrier_layer(carrier, top, layer_map)
+                layer_map.get_layer(top)  # the top metal resolves in the LYP
             except (LayerMapError, KeyError, TypeError, PadDomainError) as exc:
                 raise PadDomainError("%s carrier layer: %s" % (ref, exc)) from exc
         return dict(prepared.die_connections)

@@ -1022,14 +1022,21 @@ def test_the_landing_is_drawn_from_the_manifest_the_checks_read(monkeypatch):
         manifest["methods"]["cupillar_opt1"]["body_diameter_um"])
 
 
-def test_a_method_without_fab_params_refuses_the_export(
+def test_a_readers_fab_params_refusal_refuses_the_export(
         tmp_path, capsys, monkeypatch):
+    """interconnect_pdk's reader from 1.2 on refuses a method's pad
+    parameters with its own FabParamsRefused; the worker stops on it and
+    prints the reader's text."""
     use_sibling_checkouts("INTERPOSER_PDK_ROOT", "INTERCONNECT_PDK_ROOT")
     im = h._import_interconnect_manifest()
 
-    def no_fab_params(method, *args, **kwargs):
-        raise KeyError("%s declares no fab_params" % method)
-    monkeypatch.setattr(im, "fab_params", no_fab_params)
+    class Refused(Exception):
+        pass
+
+    def refuse(method, *args, **kwargs):
+        raise Refused("PACKAGE_METHODS_FAB_PARAMS_DISAGREE: %s refused" % method)
+    monkeypatch.setattr(im, "FabParamsRefused", Refused, raising=False)
+    monkeypatch.setattr(im, "fab_params", refuse)
     hyp = tmp_path / "nofab.hyp"
     hyp.write_text(MIXED_HYP)
     out = tmp_path / "nofab_interposer.gds"
@@ -1040,7 +1047,8 @@ def test_a_method_without_fab_params_refuses_the_export(
         connection_type="cupillar_opt1")
     assert ok is False
     assert ("Cannot draw carrier landing for cupillar_opt1: "
-            "'cupillar_opt1 declares no fab_params'") in capsys.readouterr().err
+            "PACKAGE_METHODS_FAB_PARAMS_DISAGREE: cupillar_opt1 refused"
+            ) in capsys.readouterr().err
 
 
 def test_the_methods_command_agrees_with_the_worker_on_the_live_pdks():

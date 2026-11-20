@@ -44,7 +44,7 @@ class FabParamsRefused(Exception):
     """
 
 
-def method_fab_params(method, method_specs, *, where, reader=None):
+def method_fab_params(method, method_specs, *, where=MANIFEST_WHERE, reader=None):
     """``method``'s fab_params, its pad parameters under the 1.2 names.
 
     With ``reader`` (interconnect_pdk's interconnect_manifest) the dict is the
@@ -54,7 +54,10 @@ def method_fab_params(method, method_specs, *, where, reader=None):
     chiplet-spec 1.25.0's rule (technology_package.method_fab_params) is
     applied here, with its two texts, so a refusal does not depend on which
     reader discovery found; on a 1.2 reader's dict it changes nothing.
-    ``where`` names the manifest in the refusal. A method that is not an
+    The reader is asked first so every read goes through interconnect_pdk's
+    own (and a 1.2 reader's refusal keeps its text); the rule is applied
+    again because an older reader does not refuse. ``where`` names the
+    manifest in the refusal. A method that is not an
     object, or has no fab_params object, reads as one without pad parameters
     (MISSING), with or without a reader. Raises KeyError for an unknown
     method, as the reader does, and FabParamsRefused.
