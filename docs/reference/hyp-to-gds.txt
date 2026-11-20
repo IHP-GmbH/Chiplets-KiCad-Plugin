@@ -1,5 +1,5 @@
-usage: hyp_to_gds.py [-h] [-o OUTPUT] [-l LYP] [-c CELL]
-                     [--tech-json JSON_FILE] [--with-chiplets]
+usage: hyp_to_gds.py [-h] [--routed-geometry DOC] [-o OUTPUT] [-l LYP]
+                     [-c CELL] [--tech-json JSON_FILE] [--with-chiplets]
                      [--complete-output PATH]
                      [--update-chiplet-file CHIPLET_FILE]
                      [--pad-locations REF=FILE[,REF=FILE,...]]
@@ -14,15 +14,23 @@ usage: hyp_to_gds.py [-h] [-o OUTPUT] [-l LYP] [-c CELL]
                      [--fill-mode {single-pass,closure}] [--seal-ring]
                      [--annotate-boundaries] [--grid-nm GRID_NM]
                      [--boundary-viz-layer LAYER/DATATYPE]
-                     hyp_file
+                     [hyp_file]
 
 Convert KiCad HYP files to GDS format
 
 positional arguments:
-  hyp_file              Input HYP file path
+  hyp_file              Input HYP file path (or --routed-geometry instead)
 
 options:
   -h, --help            show this help message and exit
+  --routed-geometry DOC
+                        Read interposer-pnr's routed-geometry.json instead of
+                        a .hyp: the same drawing, from the document's stack,
+                        nets, vias and devices. The die layouts and pin lists
+                        it binds are checked against their sha256, and its via
+                        arrays against the via table (--tech-json, else the
+                        built-in one); a mismatch is refused before anything
+                        is written
   -o OUTPUT, --output OUTPUT
                         Output GDS file path (default: <input>.gds)
   -l LYP, --lyp LYP     KLayout LYP layer properties file (default: the

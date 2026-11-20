@@ -71,6 +71,11 @@ except ImportError:  # Standalone worker script.
     import io_pads_manifest as _io_pads_manifest
     import vendored as _vendored
 IoPadsRefused = _io_pads_manifest.IoPadsRefused
+try:
+    from . import routed_document as _routed_document
+except ImportError:  # Standalone worker script.
+    import routed_document as _routed_document
+RoutedGeometryRefused = _routed_document.DocumentRefused
 
 
 def _vendored_cfio():
@@ -783,6 +788,172 @@ class HYPParser:
                 gds_file=gds_file
             )
             self.devices.append(device)
+
+
+class RoutedGeometryParser:
+    """HYPParser's model, read from interposer-pnr's routed geometry
+    (--routed-geometry) instead of a .hyp.
+
+    It fills the fields HYPParser.parse() fills, in the units and order the
+    board path's .hyp gives them, so nothing downstream of the parse tells the
+    two apart (tests/test_routed_model.py holds the two models equal on the
+    typical_03 golden):
+
+    - units METRIC (metres): the document's micrometres times 1e-6;
+    - perimeter from ``outline``, closed, in outline order;
+    - stackup top to bottom: ``stack[].metal`` reversed;
+    - devices in document order, at ``origin`` (no pin centroid), with the
+      layout the document binds after its sha256 check; ``layer`` is the top
+      metal, where the board places every die footprint. ``mirrored`` is not
+      a parser field: the composer reads flip from the .chiplet, which the
+      export wrote from it;
+    - nets sorted by ``board_name`` (the .hyp orders its NET blocks by the
+      board's net name); within a net its segments in document order, then
+      its drawn vias in document order;
+    - one padstack per distinct (layers, cut, pad), first seen;
+    - pins are refs only (die pads from ``pad_domains``, carriers from the
+      --io-pads manifest), with no position: they feed the standalone-pad
+      check and draw nothing.
+
+    Every refusal (RoutedGeometryRefused) comes from parse(), before anything
+    is drawn or written.
+    """
+
+    UM_TO_M = 1e-6
+
+    def __init__(self, document_path: str, io_pads_path: str = ""):
+        self.hyp_path = document_path  # the input the run log names
+        self.io_pads_path = io_pads_path or ""
+        self.segments: List[TraceSegment] = []
+        self.arcs: List[TraceArc] = []  # a routed document carries none
+        self.vias: List[Via] = []
+        self.padstacks: Dict[int, Padstack] = {}
+        self.devices: List[Device] = []
+        self.pins: List[Pin] = []
+        self.units: str = "METRIC"
+        self.stackup_layers: List[str] = []
+        self.perimeter_segments: List[PerimeterSegment] = []
+        self.board_path: str = ""
+        #: (net board name, drawn record) per via, in self.vias order: the
+        #: cut arrays the via table cross-check holds against the engine's.
+        self.drawn_vias: List[Tuple[str, Dict]] = []
+
+    def parse(self) -> None:
+        on_warn = lambda note: print(f"Warning: {note}", file=sys.stderr)  # noqa: E731
+        doc = _routed_document.read_document(self.hyp_path, on_warn=on_warn)
+        files = _routed_document.bound_files(doc, self.hyp_path)
+        m = self.UM_TO_M
+        metals = _routed_document.stack_metals(doc)
+        self.stackup_layers = list(reversed(metals))
+        outline = doc["outline"]
+        for (x1, y1), (x2, y2) in zip(outline, outline[1:] + outline[:1]):
+            self.perimeter_segments.append(
+                PerimeterSegment(x1=x1 * m, y1=y1 * m, x2=x2 * m, y2=y2 * m))
+        for device in doc["devices"]:
+            x, y = device["origin"]
+            self.devices.append(Device(
+                ref=device["ref"], layer=metals[-1],
+                gds_file=files[device["ref"]]["layout"],
+                x=x * m, y=y * m, rotation=float(device["rotation_deg"])))
+            for pad in (device["pad_domains"].get("attachments") or []):
+                self.pins.append(Pin(x=None, y=None, padstack_index=None,
+                                     ref="%s.%s" % (device["ref"], pad["pad_number"])))
+        if self.io_pads_path:
+            with open(self.io_pads_path, encoding="utf-8") as f:
+                carriers = json.load(f).get("io_pads") or []
+            for pad in carriers:
+                self.pins.append(Pin(x=None, y=None, padstack_index=None,
+                                     ref=str(pad.get("ref", ""))))
+        stacks: Dict[Tuple, int] = {}
+        for net in sorted(doc["nets"], key=lambda n: n["board_name"]):
+            name = net["board_name"]
+            for seg in net["segments"]:
+                self.segments.append(TraceSegment(
+                    net_name=name, x1=seg["x0"] * m, y1=seg["y0"] * m,
+                    x2=seg["x1"] * m, y2=seg["y1"] * m,
+                    width=seg["width"] * m, layer=seg["layer"]))
+            for drawn in net["drawn"]:
+                layers = (drawn["top_layer"], drawn["bottom_layer"])
+                key = (layers, drawn["cut"], tuple(drawn["pad"]))
+                if key not in stacks:
+                    stacks[key] = len(stacks)
+                    self.padstacks[stacks[key]] = Padstack(
+                        index=stacks[key], drill=drawn["cut"] * m,
+                        layers=list(layers), pad_width=drawn["pad"][0] * m,
+                        pad_height=drawn["pad"][1] * m)
+                self.vias.append(Via(net_name=name, x=drawn["x"] * m,
+                                     y=drawn["y"] * m,
+                                     padstack_index=stacks[key]))
+                self.drawn_vias.append((name, drawn))
+
+
+#: The engine's via table entry for the cut between two adjacent metals.
+_VIA_TYPE_OF_CUT = {"Via4": "Vn", "TopVia1": "TV1", "TopVia2": "TV2"}
+
+
+class ViaTableRefused(Exception):
+    """A drawn via's cut array is not the one the engine's via table gives."""
+
+
+def load_via_table(tech_json_path: Optional[str]) -> Dict:
+    """The via table the routed path holds its document against: the
+    built-in one without --tech-json, else the file's, where a missing or
+    unreadable file or a missing key is refused (ViaTableRefused), never the
+    warning fallback of _load_via_params."""
+    if tech_json_path is None:
+        return {k: dict(v) for k, v in GDSGenerator._DEFAULT_VIA_PARAMS.items()}
+    try:
+        with open(tech_json_path, "r") as f:
+            rules = json.load(f).get("rules")
+    except (OSError, ValueError, AttributeError) as exc:
+        raise ViaTableRefused("cannot read the via table in --tech-json %s: %s"
+                              % (tech_json_path, exc)) from exc
+    if not isinstance(rules, dict):
+        raise ViaTableRefused("--tech-json %s has no rules object" % tech_json_path)
+    names = {"Vn": ("Vn_a", "Vn_b", "Vn_c1"), "TV1": ("TV1_a", "TV1_b", "TV1_d"),
+             "TV2": ("TV2_a", "TV2_b", "TV2_d")}
+    missing = [key for keys in names.values() for key in keys if key not in rules]
+    if missing:
+        raise ViaTableRefused("--tech-json %s has no %s"
+                              % (tech_json_path, ", ".join(missing)))
+    return {kind: {"size": rules[a], "sep": rules[b], "enc": rules[c]}
+            for kind, (a, b, c) in names.items()}
+
+
+def check_routed_via_table(generator: "GDSGenerator",
+                           drawn_vias: List[Tuple[str, Dict]]) -> None:
+    """Refuse (ViaTableRefused) a drawn via whose cut, enclosure, pitch or
+    cut count is not what the engine's table gives for its pad, compared at
+    the layout's dbu. The engine then draws exactly the document's arrays."""
+    dbu = generator.layout.dbu
+    table = generator.PDK_VIA_PARAMS
+
+    def q(value):
+        return int(round(value / dbu))
+
+    for net, drawn in drawn_vias:
+        cut = GDSGenerator.VIA_LAYERS.get((drawn["bottom_layer"], drawn["top_layer"]))
+        kind = _VIA_TYPE_OF_CUT.get(cut)
+        where = "net %s via %s at (%g, %g)" % (net, drawn["via"], drawn["x"], drawn["y"])
+        if kind is None or kind not in table:
+            raise ViaTableRefused("%s: the engine has no via table entry for %s to %s"
+                                  % (where, drawn["bottom_layer"], drawn["top_layer"]))
+        rule = table[kind]
+        want = {"cut": rule["size"], "enclosure": rule["enc"],
+                "pitch": rule["size"] + rule["sep"]}
+        for key, value in want.items():
+            if key == "pitch" and drawn["pitch"] is None:
+                continue
+            if q(drawn[key]) != q(value):
+                raise ViaTableRefused(
+                    "%s: %s %s is %g, the engine's %s table gives %g"
+                    % (where, cut, key, drawn[key], kind, value))
+        k = generator._calculate_via_array(max(drawn["pad"]), kind)
+        if k != drawn["k"]:
+            raise ViaTableRefused(
+                "%s: %s draws %d x %d cuts on a %g pad, the engine's %s table "
+                "gives %d" % (where, cut, drawn["k"], drawn["k"], max(drawn["pad"]),
+                              kind, k))
 
 
 # Fraction of trace elements on unmapped layers above which the conversion
@@ -6163,6 +6334,7 @@ def convert_hyp_to_gds(
     seal_ring: bool = False,
     system_chiplet_path: Optional[str] = None,
     die_layouts_json: Optional[str] = None,
+    routed_geometry_path: Optional[str] = None,
 ) -> bool:
     """
     Main conversion function.
@@ -6223,7 +6395,7 @@ def convert_hyp_to_gds(
     Returns:
         True if conversion was successful
     """
-    print(f"Converting: {hyp_path} -> {output_path}")
+    print(f"Converting: {routed_geometry_path or hyp_path} -> {output_path}")
 
     # Gate: do the text grammar and the YAML parser agree about this document's
     # top-level keys? The GUI tier decided block ownership from the raw text
@@ -6241,9 +6413,22 @@ def convert_hyp_to_gds(
     layer_map = LayerMap(lyp_path)
     print(f"Loaded {layer_map}")
 
-    # Parse HYP file
-    parser = HYPParser(hyp_path)
-    parser.parse()
+    # Parse the HYP file, or read the routed geometry into the same model.
+    if routed_geometry_path:
+        parser = RoutedGeometryParser(routed_geometry_path, io_pads_json or "")
+        try:
+            parser.parse()
+            # Strict here; the generator then loads the same keys from the
+            # same file, and the cut arrays are held against that table.
+            load_via_table(tech_json_path)
+        except (RoutedGeometryRefused, ViaTableRefused, OSError, ValueError) as exc:
+            _report_refusal("Routed geometry", exc)
+            print("  Refusing to export: no layout, sidecar or .chiplet was "
+                  "written.", file=sys.stderr)
+            return False
+    else:
+        parser = HYPParser(hyp_path)
+        parser.parse()
 
     print(f"Parsed {len(parser.segments)} trace segments")
     print(f"Parsed {len(parser.arcs)} trace arcs")
@@ -6442,6 +6627,17 @@ def convert_hyp_to_gds(
                              tech_json_path, annotate_boundaries=annotate_boundaries,
                              boundary_viz_layer=boundary_viz_layer,
                              grid_nm=grid_nm)
+
+    if routed_geometry_path:
+        # The routed path draws the document's cut arrays: held against the
+        # engine's table here, before anything is drawn.
+        try:
+            check_routed_via_table(generator, parser.drawn_vias)
+        except ViaTableRefused as exc:
+            _report_refusal("Routed geometry", exc)
+            print("  Refusing to export: no layout, sidecar or .chiplet was "
+                  "written.", file=sys.stderr)
+            return False
 
     if generator._pcells_available:
         print("PDK PCells available - using via_stack PCell for vias")
@@ -7044,8 +7240,17 @@ Examples:
     )
 
     parser.add_argument(
-        "hyp_file",
-        help="Input HYP file path"
+        "hyp_file", nargs="?", default=None,
+        help="Input HYP file path (or --routed-geometry instead)"
+    )
+    parser.add_argument(
+        "--routed-geometry", default=None, metavar="DOC",
+        help="Read interposer-pnr's routed-geometry.json instead of a .hyp: "
+             "the same drawing, from the document's stack, nets, vias and "
+             "devices. The die layouts and pin lists it binds are checked "
+             "against their sha256, and its via arrays against the via table "
+             "(--tech-json, else the built-in one); a mismatch is refused "
+             "before anything is written"
     )
     parser.add_argument(
         "-o", "--output",
@@ -7272,6 +7477,9 @@ Examples:
              "IHP SG13G2's fab range). Ignored unless --annotate-boundaries."
     )
     args = parser.parse_args()
+    if (args.hyp_file is None) == (args.routed_geometry is None):
+        parser.error("give either a HYP file or --routed-geometry, not both "
+                     "and not neither")
 
     # Report a manifest refusal recorded while the parser was built. Here and
     # not there: --help has now had its chance to print, argv exists, and no
@@ -7289,24 +7497,25 @@ Examples:
     # Expand ${VAR} ecosystem-root references in every path argument
     # (env -> sibling-checkout walk -> loud failure). Plain absolute or
     # relative paths pass through untouched.
-    for _attr in ("hyp_file", "output", "tech_json",
+    for _attr in ("hyp_file", "routed_geometry", "output", "tech_json",
                   "complete_output", "update_chiplet_file",
                   "cupillar_gds", "io_pads", "cmim_devices", "nofill_regions"):
         setattr(args, _attr, _expand_path_vars(getattr(args, _attr)))
 
+    source = args.hyp_file or args.routed_geometry
     # Determine output path (interposer-only GDS)
     if args.output:
         output_path = args.output
     else:
-        base = Path(args.hyp_file).stem
-        output_path = str(Path(args.hyp_file).parent / f"{base}_interposer.gds")
+        base = Path(source).stem
+        output_path = str(Path(source).parent / f"{base}_interposer.gds")
 
     # Determine complete output path (with chiplets)
     if args.complete_output:
         complete_output_path = args.complete_output
     else:
-        base = Path(args.hyp_file).stem
-        complete_output_path = str(Path(args.hyp_file).parent / f"{base}_complete.gds")
+        base = Path(source).stem
+        complete_output_path = str(Path(source).parent / f"{base}_complete.gds")
 
     # Parse pad locations: "U1=file1.json,U2=file2.json" -> dict
     pad_locations = None
@@ -7398,7 +7607,8 @@ Examples:
 
     # Run conversion
     success = convert_hyp_to_gds(
-        hyp_path=args.hyp_file,
+        hyp_path=args.hyp_file or "",
+        routed_geometry_path=args.routed_geometry,
         output_path=output_path,
         lyp_path=args.lyp,
         cell_name=args.cell,

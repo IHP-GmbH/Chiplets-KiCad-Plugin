@@ -58,3 +58,12 @@ sha256 the routed geometry binds and `inputs/export.json` records. The board
 names them `../../../../dies/PAD_FRAME_L/layout.gds` and
 `../../../../dies/PAD_FRAME_R/layout.gds`; tests that read them stage the
 document four folders below a copy of `dies/`.
+
+`inputs/board-path.hyp` is the board path's .hyp from the sealed typical_03
+golden run, `goldens/out/export/cf_typical_03_from_schematic.draft.hyp`,
+copied byte for byte: sha256 `68119e97df4db9bd48ade14eee98a60889e04cb48d81664291c7f8c467a3d5ac`, the digest the seal
+lists for it. It is the oracle of the routed model test: the worker's
+HYPParser reads it, and the routed geometry must give the same model. Its
+`{BOARD}` header and `GDS_FILE` paths are the container's; the test resolves
+a `GDS_FILE` against the staged document's folder and compares layouts by
+sha256, never by path text.

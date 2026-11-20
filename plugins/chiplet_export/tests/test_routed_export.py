@@ -7,16 +7,14 @@ output exists. KiCad is not imported anywhere on this path: in process a
 pcbnew import fails the case, and one case runs the whole CLI in a child
 process that records any pcbnew import and any kicad-cli call.
 
-The routed geometry names its die layouts by the board's GDS_FILE text,
-four folders up, and its pin lists under ``<RUN>``; ``staged`` lays the
-fixture out that way in a temporary folder.
+The fixture is staged as a run (routed_t03_stage) so the layouts and pin
+lists the routed geometry binds resolve.
 """
 
 import importlib.abc
 import importlib.util
 import json
 import os
-import shutil
 import subprocess
 import sys
 import types
@@ -34,16 +32,13 @@ from chiplet_export.writers.connection_stacks import (  # noqa: E402
     InterconnectManifestSnapshot, _manifest_reader,
 )
 
+from .routed_t03_stage import CHIPLET, DOCUMENT, IO_PADS  # noqa: E402
+from .routed_t03_stage import stage as staged  # noqa: E402
+
 PLUGIN_ROOT = PLUGINS / "chiplet_export"
 CLI_SOURCE = PLUGIN_ROOT / "chiplet_export_cli.py"
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "routed_t03"
-INPUTS = FIXTURE / "inputs"
-DOCUMENT = INPUTS / "routed-geometry.json"
-CHIPLET = INPUTS / "design.chiplet"
-IO_PADS = INPUTS / "routed-io-pads.json"
 NAME = "cf_typical_03_from_schematic"
 WORKER = "/worker/hyp_to_gds.py"
-DIES = {"U1": "PAD_FRAME_L", "U2": "PAD_FRAME_R"}
 ADAPTERS = ["--interposer-adapter", "intm4tm2", "--interconnect-adapter", "ihp_cupillar"]
 
 try:
@@ -55,26 +50,6 @@ except ImportError:
 needs_manifest = pytest.mark.skipif(
     not _HAVE_MANIFEST,
     reason="interconnect_pdk manifest not discoverable on this checkout")
-
-
-def staged(tmp_path, edit=None):
-    """The fixture laid out as a run: dies/ at the root, the document four
-    folders below it, ``<RUN>`` resolved. ``edit(document)`` may change the
-    document first. Returns the document's path."""
-    root = tmp_path / "run"
-    for die in DIES.values():
-        (root / "dies" / die).mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(FIXTURE / "dies" / die / "layout.gds",
-                        root / "dies" / die / "layout.gds")
-        shutil.copyfile(INPUTS / "pins" / ("%s.pins.json" % die),
-                        root / "dies" / die / "pins.json")
-    document = json.loads(DOCUMENT.read_text().replace("<RUN>", str(root)))
-    if edit is not None:
-        edit(document)
-    path = root / "a" / "b" / "c" / "pnr" / "routed-geometry.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, indent=2) + "\n")
-    return path
 
 
 class _NoKiCad(importlib.abc.MetaPathFinder):
