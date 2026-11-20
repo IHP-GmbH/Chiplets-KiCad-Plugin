@@ -14,11 +14,24 @@ import warnings
 
 if __package__:
     from .board_snapshot import SnapshotError, _properties, _require_simple_pad
+    from .carrier_profile import PAD_PARAMETERS, FabParamsRefused, method_fab_params
 else:
     from board_snapshot import SnapshotError, _properties, _require_simple_pad
+    from carrier_profile import PAD_PARAMETERS, FabParamsRefused, method_fab_params
 
 
 PROPERTY = "CHIPLET_PAD_DOMAINS"
+#: The archive's two pad parameters by archive version, as interposer-pnr
+#: writes them: version 2 (from interconnect methods 1.2 on) holds the neutral
+#: names, version 1 the IntM4TM2 ones. An archive never holds both.
+PAD_PARAMETER_KEYS = {1: tuple(old for _new, old, _words in PAD_PARAMETERS),
+                      2: tuple(new for new, _old, _words in PAD_PARAMETERS)}
+#: The board path's refusal of an archive without a KiCad layer (a version 2
+#: archive of a technology package with no KiCad view), as interposer-pnr's.
+NO_KICAD_VIEW = ("%s: this technology package has no KiCad view (carrier.kicad_layer "
+                 "is not set), so the KiCad board cannot be written. Add kicad_template "
+                 "and a kicad_copper_layer for every routing layer.")
+_KICAD_COPPER = re.compile(r"(?:F|B|In[1-9][0-9]*)\.Cu")
 POSITION_TOL_UM = 0.002  # 1 nm export/API quantization; not a design tolerance.
 
 
@@ -97,8 +110,9 @@ def decode_domains(text, reference, method):
         doc = _object(json.loads(text, object_pairs_hook=_unique_object), PROPERTY)
     except (TypeError, json.JSONDecodeError) as exc:
         raise PadDomainError("Invalid %s JSON" % PROPERTY) from exc
+    version = doc.get("version")
     if (doc.get("format") != "chiplet_kicad.pad_domains"
-            or type(doc.get("version")) is not int or doc["version"] != 1):
+            or type(version) is not int or version not in PAD_PARAMETER_KEYS):
         raise PadDomainError("Unsupported carrier pad-domain format/version")
     if doc.get("component") != reference:
         raise PadDomainError("Carrier pad-domain component differs from reference")
@@ -118,18 +132,32 @@ def decode_domains(text, reference, method):
     # the selected manifest method (_check_method_source).
     if not isinstance(attachment.get("fab_anchor"), str) or not attachment["fab_anchor"]:
         raise PadDomainError("interconnect.fab_anchor must be a nonempty string")
-    for key in ("body_diameter_um", "passiv_opening_um", "tm2_enclosure_um"):
+    opening, enclosure = PAD_PARAMETER_KEYS[version]
+    for other, keys in PAD_PARAMETER_KEYS.items():
+        for key in keys:
+            if other != version and key in attachment:
+                # interposer-pnr's text, word for word (its pad_domains.py).
+                raise PadDomainError("%s: interconnect.%s is not a key of pad domain version %d"
+                                     % (reference, key, version))
+    for key in ("body_diameter_um", opening, enclosure):
         _number(attachment.get(key), "interconnect." + key, positive=True)
     diameter = _number(carrier.get("diameter_um"), "carrier.diameter_um", True)
-    expected = attachment["passiv_opening_um"] + 2 * attachment["tm2_enclosure_um"]
+    expected = attachment[opening] + 2 * attachment[enclosure]
     if not math.isfinite(expected) or not math.isclose(diameter, expected, rel_tol=0, abs_tol=1e-9):
         raise PadDomainError("Carrier diameter differs from the explicit fabrication profile")
-    layer = carrier.get("kicad_layer")
-    # TopMetal2 is the only landing this profile accepts. It is a declared
-    # supported profile, not a generic process/layer translation.
-    if (carrier.get("shape") != "circle" or carrier.get("layer") != "TopMetal2"
-            or not isinstance(layer, str)
-            or re.fullmatch(r"(?:F|B|In[1-9][0-9]*)\.Cu", layer) is None):
+    if version == 1:
+        # Version 1 lands on TopMetal2 only and always names its KiCad layer:
+        # a declared supported profile, not a generic layer translation.
+        layer_ok = carrier.get("layer") == "TopMetal2" and "kicad_layer" in carrier
+    else:
+        # Version 2 names the technology's own metal, held by the physical
+        # check (check_carrier_layer); without a KiCad view it has no
+        # kicad_layer, which only the board path needs (carrier_kicad_layer).
+        layer_ok = isinstance(carrier.get("layer"), str) and bool(carrier["layer"])
+    kicad_layer = carrier.get("kicad_layer")
+    if (carrier.get("shape") != "circle" or not layer_ok
+            or ("kicad_layer" in carrier and (not isinstance(kicad_layer, str)
+                                              or _KICAD_COPPER.fullmatch(kicad_layer) is None))):
         raise PadDomainError("Unsupported carrier shape/layer profile")
     pin_list = _object(die.get("pin_list"), "die.pin_list")
     _pin_list_version(pin_list.get("version"))
@@ -172,6 +200,14 @@ def decode_domains(text, reference, method):
     return doc
 
 
+def carrier_kicad_layer(doc, reference):
+    """The KiCad copper layer a decoded archive lands on, for the board path;
+    PadDomainError naming ``reference`` when it has none."""
+    if "kicad_layer" not in doc["carrier"]:
+        raise PadDomainError(NO_KICAD_VIEW % reference)
+    return doc["carrier"]["kicad_layer"]
+
+
 def archived_die_dimensions(footprint):
     """Marked die dimensions in um, or None for the historical courtyard path.
 
@@ -196,14 +232,22 @@ def archive_die_dimensions(archive, reference, method):
     return _die_dimensions(decode_domains(archive, reference, method)["die"]["pin_list"])
 
 
-def _check_method_source(attachment, method_specs):
+def _check_method_source(doc, method_specs):
+    """Hold a decoded archive's interconnect to the selected manifest method.
+    The manifest's pad parameters are method_fab_params' reading, under the
+    1.2 names; the archive's are named by its own version (PAD_PARAMETER_KEYS)."""
+    attachment = doc["interconnect"]
     method = attachment["method"]
     source = _object(method_specs.get(method), "selected manifest method " + method)
-    fab = _object(source.get("fab_params"), "selected manifest fab_params")
+    _object(source.get("fab_params"), "selected manifest fab_params")
+    try:
+        fab = method_fab_params(method, method_specs)
+    except FabParamsRefused as exc:
+        raise PadDomainError(str(exc)) from exc
     expected = {"fab_anchor": source.get("fab_anchor"),
-                "body_diameter_um": source.get("body_diameter_um"),
-                "passiv_opening_um": fab.get("passiv_opening_um"),
-                "tm2_enclosure_um": fab.get("tm2_enclosure_um")}
+                "body_diameter_um": source.get("body_diameter_um")}
+    for key, manifest_key in zip(PAD_PARAMETER_KEYS[doc["version"]], PAD_PARAMETER_KEYS[2]):
+        expected[key] = fab[manifest_key]
     for key, value in expected.items():
         if key != "fab_anchor":
             _number(value, "selected manifest " + key, positive=True)
@@ -262,7 +306,7 @@ def archive_pin_list(archive, reference, method, orientation, method_specs=None)
         archive = json.dumps(archive)
     doc = decode_domains(archive, reference, method)
     if method_specs is not None:
-        _check_method_source(doc["interconnect"], method_specs)
+        _check_method_source(doc, method_specs)
     if orientation not in ("flip_chip", "face_up"):
         raise PadDomainError("Carrier footprint requires canonical ORIENTATION")
     mx = -1 if orientation == "flip_chip" else 1
@@ -287,14 +331,14 @@ def footprint_pin_list(footprint, pcbnew, method_specs=None):
             raise PadDomainError("Carrier pad-domain footprint requires GDS_FILE")
         doc = decode_domains(props[PROPERTY], ref, props.get("CONNECTION"))
         if method_specs is not None:
-            _check_method_source(doc["interconnect"], method_specs)
+            _check_method_source(doc, method_specs)
         orientation = props.get("ORIENTATION")
         if orientation not in ("flip_chip", "face_up"):
             raise PadDomainError("Carrier footprint requires canonical ORIENTATION")
         mx = -1 if orientation == "flip_chip" else 1
         source = doc["die"]["pin_list"]
         dbu = source["dbu_um"]
-        copper_layer = _copper_layer(doc["carrier"]["kicad_layer"], pcbnew)
+        copper_layer = _copper_layer(carrier_kicad_layer(doc, ref), pcbnew)
         by_name = _pads_by_name(footprint, pcbnew)
         if sum(map(len, by_name.values())) != len(source["pins"]):
             raise PadDomainError("Carrier pad count differs from original PinList")
@@ -327,14 +371,14 @@ def footprint_pin_list(footprint, pcbnew, method_specs=None):
 
 
 def check_carrier_layer(carrier, actual_name, layer_map):
-    """Refuse a carrier whose copper layer is not the layer it names.
+    """Refuse a carrier whose landing layer is not the layer it names.
 
-    ``actual_name`` is the name the assembly gives the carrier's
-    ``kicad_layer`` (a board's layer name, or the routed document's metal at
-    that position); it must map, through ``layer_map``, to the layer
+    ``actual_name`` is the name the assembly gives the layer the carrier
+    lands on (the board's name for its ``kicad_layer``, or the routed
+    document's top metal); it must map, through ``layer_map``, to the layer
     ``carrier.layer`` names.
     """
-    token = carrier["kicad_layer"]
+    token = carrier.get("kicad_layer", carrier["layer"])
     if not isinstance(actual_name, str) or not actual_name:
         raise PadDomainError("Cannot inspect the current board layer name for " + token)
     actual = layer_map.get_layer(actual_name)
@@ -371,10 +415,10 @@ def validate_board_pad_domains(board, method_specs, *, load_layer_map=None):
                 domains = decode_domains(
                     _properties(footprint)[PROPERTY], reference,
                     footprint.GetFieldText("CONNECTION"))
-                carrier = domains["carrier"]
-                token = carrier["kicad_layer"]
+                token = carrier_kicad_layer(domains, reference)
                 check_carrier_layer(
-                    carrier, board.GetLayerName(_copper_layer(token, pcbnew)), layer_map)
+                    domains["carrier"], board.GetLayerName(_copper_layer(token, pcbnew)),
+                    layer_map)
             except (LayerMapError, KeyError, AttributeError, TypeError, OSError, RuntimeError,
                     PadDomainError) as exc:
                 raise PadDomainError("%s carrier layer: %s" % (reference, exc)) from exc
