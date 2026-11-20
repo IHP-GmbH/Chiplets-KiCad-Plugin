@@ -168,5 +168,16 @@ def test_a_carrier_off_the_top_metal_is_refused_naming_both():
         _routed(stack, document()["carrier"]).validate_pad_domains(
             {}, load_layer_map=_LayerMap)
     assert str(exc.value) == (
-        "U1 carrier layer: carrier.layer 'TopMetal2' is not the routed stack's top "
-        "metal 'TopMetal3'; the routed path lands carrier pads on the top metal only")
+        "U1 carrier layer: carrier.layer is 'TopMetal2', but the top metal of the "
+        "routed stack is 'TopMetal3'. The routed path lands carrier pads on the top "
+        "metal only.")
+
+
+def test_a_layer_map_refusal_is_a_pad_domain_refusal():
+    from chiplet_export.layer_map import LayerMapError
+
+    def refused():
+        raise LayerMapError("Cannot read LYP 'x.lyp': gone")
+
+    with pytest.raises(PadDomainError, match=r"^U1 carrier layer: Cannot read LYP"):
+        _routed(STACK, document()["carrier"]).validate_pad_domains({}, load_layer_map=refused)

@@ -622,6 +622,10 @@ class _StubManifestReader(object):
             raise ValueError("manifest declares no schema_version")
         return data
 
+    def fab_params(self, method_id, manifest):
+        # As interconnect_pdk's reader before 1.2: the entry as written.
+        return dict(manifest["methods"][method_id]["fab_params"])
+
 
 @pytest.fixture
 def stub_reader(monkeypatch):
@@ -644,11 +648,11 @@ def _write_fake_interconnect_root(tmp_path):
         "methods": {
             "method_x": {
                 "pitch_rules": {"IXN_spacing": 40.0, "IXN_pitch": 75.0},
-                "fab_params": {"passiv_opening_um": 35.0},
+                "fab_params": {"passiv_opening_um": 35.0, "tm2_enclosure_um": 7.5},
             },
             "method_y": {
                 "pitch_rules": {"IXN_spacing": 15.0, "IXN_pitch": 50.0},
-                "fab_params": {"passiv_opening_um": 35.0},
+                "fab_params": {"passiv_opening_um": 35.0, "tm2_enclosure_um": 7.5},
             },
         },
     }), encoding="utf-8")
@@ -1562,7 +1566,7 @@ def test_explicit_catalogue_a_cannot_mix_with_default_catalogue_b(
             "height": 11.0, "diameter": 22.0,
         }]},
         "pitch_rules": {"IXN_spacing": 31.0, "IXN_pitch": 71.0},
-        "fab_params": {"passiv_opening_um": 41.0},
+        "fab_params": {"passiv_opening_um": 41.0, "tm2_enclosure_um": 7.5},
     }
     method_b = {
         "description": "stack from B",
@@ -1572,7 +1576,7 @@ def test_explicit_catalogue_a_cannot_mix_with_default_catalogue_b(
             "height": 99.0, "diameter": 99.0,
         }]},
         "pitch_rules": {"IXN_spacing": 91.0, "IXN_pitch": 191.0},
-        "fab_params": {"passiv_opening_um": 81.0},
+        "fab_params": {"passiv_opening_um": 81.0, "tm2_enclosure_um": 7.5},
     }
     manifest_a = {
         "schema_version": "1.0",
@@ -1611,6 +1615,11 @@ def test_explicit_catalogue_a_cannot_mix_with_default_catalogue_b(
 
         def list_methods(self, manifest=None):
             return list(self._selected(manifest)["methods"])
+
+        def fab_params(self, method_id, manifest):
+            # The plugin hands the reader the selected methods, not a copy.
+            assert manifest["methods"] is manifest_a["methods"]
+            return dict(manifest["methods"][method_id]["fab_params"])
 
         def adapter_for(self, method_id, manifest=None):
             return self._selected(manifest)["methods"][method_id]["adapter"]

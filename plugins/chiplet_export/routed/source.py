@@ -181,21 +181,24 @@ class RoutedSource(ExportSource):
     def validate_pad_domains(self, methods, *, load_layer_map):
         """{ref: method} of every device, after its carrier layer check: the
         archive's carrier.layer must be the document's top metal, the one
-        every carrier pad lands on, and resolve in the worker LYP."""
+        every carrier pad lands on, and resolve in the worker LYP. The LYP is
+        loaded at the first device, so its refusal is a refusal too."""
         from ..pad_domains import PadDomainError, check_carrier_layer
         from ..layer_map import LayerMapError
         prepared = self.prepared
         top = prepared.document["stack"][-1]["metal"]
-        layer_map = load_layer_map()
+        layer_map = None
         for device in prepared.document["devices"]:
             ref = device["ref"]
             carrier = device["pad_domains"]["carrier"]
             try:
                 if carrier["layer"] != top:
                     raise PadDomainError(
-                        "carrier.layer %r is not the routed stack's top metal %r; the "
-                        "routed path lands carrier pads on the top metal only"
-                        % (carrier["layer"], top))
+                        "carrier.layer is '%s', but the top metal of the routed stack "
+                        "is '%s'. The routed path lands carrier pads on the top metal "
+                        "only." % (carrier["layer"], top))
+                if layer_map is None:
+                    layer_map = load_layer_map()
                 check_carrier_layer(carrier, top, layer_map)
             except (LayerMapError, KeyError, TypeError, PadDomainError) as exc:
                 raise PadDomainError("%s carrier layer: %s" % (ref, exc)) from exc

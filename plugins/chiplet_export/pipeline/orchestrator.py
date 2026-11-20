@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
+from ..carrier_profile import MANIFEST_WHERE, FabParamsRefused, method_fab_params
 from ..connection_methods import refused_landings, resolve_die_methods
 from ..layer_map import (
     PATH_VAR_MARKERS, CarrierPackageRefused, read_carrier_package,
@@ -662,6 +663,28 @@ def _preflight_interconnect_manifest(interconnect_root: str = "", board=None):
     return snapshot
 
 
+def _preflight_fab_params(methods: Dict[str, dict], named) -> None:
+    """Refuse, before any output, a method the export names whose pad
+    parameters have no single reading (method_fab_params, FabParamsRefused).
+
+    The DRC sidecar reads the same parameters after the worker, where a
+    refusal would come too late and a skip would hand the method to the
+    assembly-global adapter. An id the manifest does not know, or a method
+    that states no pad parameters, is left to that adapter, as
+    derive_interconnect_methods leaves it.
+    """
+    reader = _interconnect_reader()
+    for method in sorted({m for m in named if m in methods}):
+        if _states_fab_params(methods[method]):
+            method_fab_params(method, methods, where=MANIFEST_WHERE, reader=reader)
+
+
+def _states_fab_params(method) -> bool:
+    """Whether a manifest method states pad parameters, the methods
+    chiplet-spec's load_method_pitches holds to method_fab_params."""
+    return isinstance(method, dict) and "fab_params" in method
+
+
 def _load_interconnect_methods(interconnect_root: str = "",
                                board=None) -> Dict[str, dict]:
     """Compatibility projection of the authoritative manifest snapshot.
@@ -709,10 +732,16 @@ def derive_interconnect_methods(chiplet_path: str,
         method = methods_db.get(connection)
         if not method:
             continue
+        # A method that states pad parameters is read by method_fab_params,
+        # which the export preflight already ran (_preflight_fab_params); one
+        # that states none is left to the adapter below, as before.
+        fab_params = (method_fab_params(connection, methods_db, where=MANIFEST_WHERE,
+                                        reader=_interconnect_reader())
+                      if _states_fab_params(method) else {})
         try:
             spacing = float(method["pitch_rules"]["IXN_spacing"])
             pitch = float(method["pitch_rules"]["IXN_pitch"])
-            pad_size = float(method["fab_params"]["passiv_opening_um"])
+            pad_size = float(fab_params["passivation_opening_um"])
         except (KeyError, TypeError, ValueError):
             continue  # malformed manifest entry: leave it to the adapter
         if not (spacing > 0 and pitch > 0 and pad_size > 0):
@@ -832,17 +861,23 @@ def connection_method_specs(interconnect_root: str = "",
     labels degrade to bare ids.
     """
     specs: Dict[str, dict] = {}
-    for method_id, entry in _load_interconnect_methods(
-            interconnect_root, board=board).items():
+    methods = _load_interconnect_methods(interconnect_root, board=board)
+    reader = _interconnect_reader()
+    for method_id, entry in methods.items():
         if not isinstance(entry, dict):
             continue
         spec: dict = {}
         pitch_rules = entry.get("pitch_rules") or {}
-        fab_params = entry.get("fab_params") or {}
+        try:
+            fab_params = (method_fab_params(method_id, methods, where=MANIFEST_WHERE,
+                                            reader=reader)
+                          if _states_fab_params(entry) else {})
+        except FabParamsRefused:
+            fab_params = {}  # no single opening to show; the export refuses it
         for key, source, name in (
                 ("pitch", pitch_rules, "IXN_pitch"),
                 ("spacing", pitch_rules, "IXN_spacing"),
-                ("opening", fab_params, "passiv_opening_um"),
+                ("opening", fab_params, "passivation_opening_um"),
                 ("diameter", entry, "body_diameter_um"),
         ):
             try:
@@ -1813,6 +1848,20 @@ def run_export(board, options, plugin_dir,
             pad_locations=options.pad_locations, cupillar_gds=options.cupillar_gds)
     except PadDomainError as exc:
         return ExportResult(error="Carrier pad domains refused: %s" % exc)
+
+    # Every method the .chiplet will name: the die connections the export
+    # uses (as the worker reads them below) and the default method.
+    named = options.die_connections
+    if not named:
+        try:
+            named = source.read_die_connections()
+        except Exception:
+            named = {}  # the read warns where the run uses it
+    try:
+        _preflight_fab_params(interconnect_manifest.methods,
+                              list(named.values()) + [options.connection_type])
+    except FabParamsRefused as exc:
+        return ExportResult(error="Interconnect PDK source refused: %s" % exc)
 
     # Every die the worker sizes declares the layer its own GDS draws the die
     # outline on (die_outline.py). Checked here, for every die at once and

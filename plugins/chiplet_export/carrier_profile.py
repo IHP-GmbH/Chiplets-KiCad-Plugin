@@ -24,21 +24,88 @@ def _positive_number(value, label):
     return result
 
 
+#: A method's two pad parameters: the name each has from interconnect
+#: methods 1.2 on, the 1.x name every 1.x registry keeps beside it, and the
+#: words a refusal uses for it.
+PAD_PARAMETERS = (("passivation_opening_um", "passiv_opening_um", "passivation opening"),
+                  ("pad_metal_enclosure_um", "tm2_enclosure_um", "pad metal enclosure"))
+
+
+#: The manifest a refusal names: its file name, as interconnect_pdk's reader
+#: names a manifest handed to it as a dict, so both give one text.
+MANIFEST_WHERE = "interconnect_methods.json"
+
+
+class FabParamsRefused(Exception):
+    """A method's pad parameters have no single reading.
+
+    Deliberately not a KeyError, TypeError or ValueError: the handlers around
+    a manifest read take those to mean "malformed entry, skip it".
+    """
+
+
+def method_fab_params(method, method_specs, *, where, reader=None):
+    """``method``'s fab_params, its pad parameters under the 1.2 names.
+
+    With ``reader`` (interconnect_pdk's interconnect_manifest) the dict is the
+    reader's ``fab_params``; without one, the method's own entry. A reader
+    from interconnect methods 1.2 on refuses a method whose two names of one
+    parameter disagree; an older one returns the entry as written. Either way
+    chiplet-spec 1.25.0's rule (technology_package.method_fab_params) is
+    applied here, with its two texts, so a refusal does not depend on which
+    reader discovery found; on a 1.2 reader's dict it changes nothing.
+    ``where`` names the manifest in the refusal. A method that is not an
+    object, or has no fab_params object, reads as one without pad parameters
+    (MISSING), with or without a reader. Raises KeyError for an unknown
+    method, as the reader does, and FabParamsRefused.
+    """
+    spec = method_specs[method]
+    fab_params = spec.get("fab_params") if isinstance(spec, dict) else None
+    if reader is not None and isinstance(fab_params, dict):
+        refused = getattr(reader, "FabParamsRefused", ())
+        try:
+            fab_params = reader.fab_params(method, {"methods": method_specs})
+        except refused as exc:
+            raise FabParamsRefused(str(exc)) from exc
+    params = dict(fab_params) if isinstance(fab_params, dict) else {}
+    for new, old, words in PAD_PARAMETERS:
+        if old not in params:
+            if new in params:
+                raise FabParamsRefused(
+                    "PACKAGE_METHODS_FAB_PARAMS_MISSING: %s: method %s has no "
+                    "fab_params.%s. Interconnect methods 1.x keeps the old name beside "
+                    "%s, so that readers older than 1.2 still find it. Add it with the "
+                    "same value." % (where, method, old, new))
+            raise FabParamsRefused(
+                "PACKAGE_METHODS_FAB_PARAMS_MISSING: %s: method %s has no %s: "
+                "fab_params.%s and %s are both missing. Add both, with the same value."
+                % (where, method, words, old, new))
+        if new in params and params[new] != params[old]:
+            raise FabParamsRefused(
+                "PACKAGE_METHODS_FAB_PARAMS_DISAGREE: %s: method %s gives %s %s and %s "
+                "%s. Since interconnect methods 1.2 these are two names for one value, "
+                "so the file has no single reading. Make them equal."
+                % (where, method, old, params[old], new, params[new]))
+        params[new] = params[old]
+    return params
+
+
 def resolve_carrier_profile(method, fab_params, body_diameter_um, pdk_table):
     """Return explicit (opening, enclosure) in um, or refuse an unsafe profile.
 
     ``pdk_table`` is the loaded generator's own table, not a copied PDK rule,
     and empty for a pad cell whose opening always comes from the method.
     No table/default value substitutes for a missing manifest parameter.
+    ``fab_params`` is method_fab_params' dict: the 1.2 names are read.
     """
     if not isinstance(fab_params, dict):
         raise ValueError("%s: fab_params must be a mapping" % method)
     opening = _positive_number(
-        fab_params.get("passiv_opening_um"),
-        "%s: fab_params.passiv_opening_um" % method)
+        fab_params.get("passivation_opening_um"),
+        "%s: fab_params.passivation_opening_um" % method)
     enclosure = _positive_number(
-        fab_params.get("tm2_enclosure_um"),
-        "%s: fab_params.tm2_enclosure_um" % method)
+        fab_params.get("pad_metal_enclosure_um"),
+        "%s: fab_params.pad_metal_enclosure_um" % method)
     body = _positive_number(body_diameter_um, "%s: body diameter" % method)
     option = pdk_table.get(body)
     if option is not None and opening != option["passiv_opening"]:

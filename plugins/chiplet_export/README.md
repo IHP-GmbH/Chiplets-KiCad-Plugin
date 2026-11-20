@@ -894,8 +894,9 @@ Routed footprints carry `CHIPLET_PAD_DOMAINS` version 1 or 2. Version 2 names
 the two pad parameters `passivation_opening_um` and `pad_metal_enclosure_um`
 (version 1: `passiv_opening_um` and `tm2_enclosure_um`; a record never holds
 both), and has no `carrier.kicad_layer` when the technology package has no
-KiCad view. Such a record still gives a routed layout; the board path refuses
-it by name, since it has no KiCad layer to put the landing on. Their electrical
+KiCad view; the board path refuses such a record by name, since it has no
+KiCad layer to put the landing on. The plugin draws a layout for IntM4TM2
+only, with circular landings on TopMetal2, whatever the version. Their electrical
 KiCad pads represent **carrier landings**, sized by the selected interconnect
 manifest's passivation opening plus twice its metal enclosure. Die pin openings
 are separate, non-electrical F.Fab artwork. Equal layer names in different dies
@@ -936,11 +937,11 @@ is then passed to the worker. Check the board's copper layer names and selected
 LYP when this check fails; changing a KiCad layer's name does not change its
 internal layer identifier. Unmarked exports retain the existing layer policy.
 
-The supported fabrication profile is circular landings: on TopMetal2 for a
-version 1 record, on the metal the record names for version 2, mapped to the
-canonical KiCad copper layer recorded by the producer when it records one. On
-the routed path the record's metal must be the routed stack's top metal, the
-one every carrier pad lands on, and resolve in the selected LYP. The record's anchor
+The supported fabrication profile is circular TopMetal2 landings on the
+IntM4TM2 interposer, mapped to the canonical KiCad copper layer recorded by
+the producer. A version 2 record names its metal rather than assuming
+TopMetal2; on the routed path that metal must be the routed stack's top metal,
+the one every carrier pad lands on, and resolve in the selected LYP. The record's anchor
 must be the selected manifest method's `fab_anchor`, and the worker draws a
 landing only when the UBM openings that anchor declares in the manifest's
 `fab_anchors` table are the ones the interposer PDK's pad cell for that
@@ -955,8 +956,10 @@ from pin locations. `connection_methods.py` runs that check for every method
 and prints the result as JSON; the dialog and chiplet-export use it to refuse
 such a die before the export stages anything. A pre-generated `--cupillar-gds` is merged as given; for
 marked boards the preflight refuses that override. For every method the
-landing diameter is `passiv_opening_um + 2 * tm2_enclosure_um` from the
-manifest. A solder bump's `body_diameter_um` is the ball, a 3D body only, and
+landing diameter is `passivation_opening_um + 2 * pad_metal_enclosure_um`
+from the manifest (each the 1.x name's value: a method whose two names of one
+parameter disagree, or that lacks the 1.x name, is refused by name before any
+output). A solder bump's `body_diameter_um` is the ball, a 3D body only, and
 neither number is derived from the other. The HYP
 writer deliberately exports the **carrier** padstack geometry; the die pin-list
 writer instead retains original die dimensions and physical indices. Its known

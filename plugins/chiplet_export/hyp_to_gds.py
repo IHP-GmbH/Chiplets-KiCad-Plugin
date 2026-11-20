@@ -27,10 +27,14 @@ from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 from urllib.parse import quote
 
 try:
-    from .carrier_profile import check_anchor_drawable, resolve_carrier_profile
+    from .carrier_profile import (
+        MANIFEST_WHERE, FabParamsRefused, check_anchor_drawable, method_fab_params,
+        resolve_carrier_profile)
     from .connection_methods import resolve_die_methods
 except ImportError:  # Standalone worker script, outside the GUI package.
-    from carrier_profile import check_anchor_drawable, resolve_carrier_profile
+    from carrier_profile import (
+        MANIFEST_WHERE, FabParamsRefused, check_anchor_drawable, method_fab_params,
+        resolve_carrier_profile)
     from connection_methods import resolve_die_methods
 
 try:
@@ -5836,9 +5840,10 @@ def _method_landing(bm, im, method, cell, manifest):
     else:
         params = bm.DrcParams.load(fab_anchor_id=cell.anchor)
     try:
-        opening, enclosure = resolve_carrier_profile(
-            method, im.fab_params(method, manifest), diameter, table)
-    except KeyError as exc:
+        opening, enclosure = resolve_carrier_profile(method, method_fab_params(
+            method, (manifest or im.load_manifest())["methods"],
+            where=MANIFEST_WHERE, reader=im), diameter, table)
+    except (KeyError, FabParamsRefused) as exc:
         raise ValueError(str(exc)) from exc
     try:
         pitch_rules = im.pitch_rules(method, manifest)

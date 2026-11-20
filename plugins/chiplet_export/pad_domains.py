@@ -14,8 +14,10 @@ import warnings
 
 if __package__:
     from .board_snapshot import SnapshotError, _properties, _require_simple_pad
+    from .carrier_profile import MANIFEST_WHERE, FabParamsRefused, method_fab_params
 else:
     from board_snapshot import SnapshotError, _properties, _require_simple_pad
+    from carrier_profile import MANIFEST_WHERE, FabParamsRefused, method_fab_params
 
 
 PROPERTY = "CHIPLET_PAD_DOMAINS"
@@ -231,16 +233,20 @@ def archive_die_dimensions(archive, reference, method):
 
 def _check_method_source(doc, method_specs):
     """Hold a decoded archive's interconnect to the selected manifest method.
-    The manifest names the pad parameters as interconnect methods 1.1 does;
-    the archive by its own version (PAD_PARAMETER_KEYS)."""
+    The manifest's pad parameters are method_fab_params' reading, under the
+    1.2 names; the archive's are named by its own version (PAD_PARAMETER_KEYS)."""
     attachment = doc["interconnect"]
     method = attachment["method"]
     source = _object(method_specs.get(method), "selected manifest method " + method)
-    fab = _object(source.get("fab_params"), "selected manifest fab_params")
+    _object(source.get("fab_params"), "selected manifest fab_params")
+    try:
+        fab = method_fab_params(method, method_specs, where=MANIFEST_WHERE)
+    except FabParamsRefused as exc:
+        raise PadDomainError(str(exc)) from exc
     expected = {"fab_anchor": source.get("fab_anchor"),
                 "body_diameter_um": source.get("body_diameter_um")}
-    for key, manifest_key in zip(PAD_PARAMETER_KEYS[doc["version"]], PAD_PARAMETER_KEYS[1]):
-        expected[key] = fab.get(manifest_key)
+    for key, manifest_key in zip(PAD_PARAMETER_KEYS[doc["version"]], PAD_PARAMETER_KEYS[2]):
+        expected[key] = fab[manifest_key]
     for key, value in expected.items():
         if key != "fab_anchor":
             _number(value, "selected manifest " + key, positive=True)
