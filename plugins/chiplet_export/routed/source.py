@@ -1,0 +1,191 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""The export's inputs from the routed documents: the routed-geometry
+document, the elaborated .chiplet and the routed io_pads manifest.
+
+RoutedSource supplies run_export what BoardSource supplies from a board, so
+the export composes from the routed documents through the same body. Every
+refusal is made in ``preflight``, before the export creates its output
+folder; the methods the body calls afterwards hand back what the preflight
+computed and refuse nothing, because the body turns most of their exceptions
+into warnings.
+
+No pcbnew, and no kicad-cli: nothing here or in what it imports loads KiCad.
+"""
+
+import os
+import re
+import shutil
+
+from ..pipeline.export_source import ExportSource
+from .document import RoutedRefused
+from .intermediates import (
+    DEFAULT_INTERPOSER_ADAPTER, prepare_intermediates, write_pin_lists,
+)
+
+#: The KiCad copper names a carrier archive gives its pad layer.
+_INNER = re.compile(r"^In([1-9][0-9]*)\.Cu$")
+
+
+def stack_layer_name(stack, token):
+    """The metal the routed document's ``stack`` (bottom to top) puts at the
+    KiCad copper layer ``token``: F.Cu is the top metal, B.Cu the bottom one,
+    In<n>.Cu the n-th below the top. The board names its copper layers this
+    way (interposer-pnr kicad_export writes F.Cu first)."""
+    metals = [entry.get("metal") if isinstance(entry, dict) else None
+              for entry in stack]
+    if token == "F.Cu":
+        index = len(metals) - 1
+    elif token == "B.Cu":
+        index = 0
+    else:
+        inner = _INNER.match(token or "")
+        if inner is None:
+            raise RoutedRefused("no copper layer %r in the routed stack" % token)
+        index = len(metals) - 1 - int(inner.group(1))
+    if not 0 <= index < len(metals) or not metals[index]:
+        raise RoutedRefused("the routed stack of %d metals has no %s"
+                            % (len(metals), token))
+    return metals[index]
+
+
+class RoutedSource(ExportSource):
+    """The export's inputs from the routed documents, without a board."""
+
+    #: The worker composes from the document; no .hyp is written or published.
+    writes_hyp = False
+    #: No KiCad project: discovery reads no project text variables.
+    discovery_board = None
+    origin = field_origin = "routed geometry"
+
+    def __init__(self, document, chiplet, io_pads, *, name,
+                 interposer_adapter="", interconnect_adapter=""):
+        """``interposer_adapter`` and ``interconnect_adapter`` are what the
+        intermediate .chiplet names (the board path reads them from the
+        project's text variables); an empty interposer adapter is the
+        default one."""
+        if not name:
+            raise RoutedRefused("the routed path needs the output name (--name)")
+        self._interposer_adapter = interposer_adapter or DEFAULT_INTERPOSER_ADAPTER
+        self._interconnect_adapter = interconnect_adapter
+        self.document_path = os.path.abspath(document)
+        self.chiplet_path = os.path.abspath(chiplet)
+        self.io_pads_path = os.path.abspath(io_pads)
+        self._name = name
+        self._prepared = None
+
+    @property
+    def routed_geometry(self):
+        return self.document_path
+
+    def name(self):
+        return self._name
+
+    def describe(self):
+        return ("Routed geometry: %s (the board is not opened)"
+                % self.document_path)
+
+    def preflight(self, interconnect_manifest, *, on_warn=None):
+        """Read and check the documents and compute every intermediate.
+
+        Refuses (RoutedRefused) what prepare_intermediates refuses, a document
+        with no stack, and a device reference the worker's flags cannot carry.
+        Writes nothing. (The die layouts the document binds are the worker's
+        to read and check.)
+        """
+        prepared = prepare_intermediates(
+            self.document_path, self.chiplet_path, self.io_pads_path,
+            board_name=self._name, interconnect_manifest=interconnect_manifest,
+            interposer_adapter=self._interposer_adapter,
+            interconnect_adapter=self._interconnect_adapter,
+            method_specs=interconnect_manifest.methods, on_warn=on_warn)
+        if not prepared.document.get("stack"):
+            raise RoutedRefused("the routed geometry names no stack")
+        # The worker's per-die flags carry every device reference.
+        from ..die_outline import _reference_problem
+        for device in prepared.document["devices"]:
+            problem = _reference_problem(device["ref"])
+            if problem:
+                raise RoutedRefused("device %r: %s" % (device["ref"], problem))
+        self._prepared = prepared
+
+    @property
+    def prepared(self):
+        if self._prepared is None:
+            raise RuntimeError("RoutedSource used before its preflight")
+        return self._prepared
+
+    # The preflights the body calls, before any output exists.
+
+    def validate_pad_domains(self, methods, *, load_layer_map):
+        """{ref: method} of every device, after its carrier layer check: the
+        document's metal at the archive's kicad_layer must map, through the
+        worker LYP, to the layer the archive names."""
+        from ..pad_domains import PadDomainError, check_carrier_layer
+        from ..layer_map import LayerMapError
+        prepared = self.prepared
+        stack = prepared.document["stack"]
+        layer_map = load_layer_map()
+        for device in prepared.document["devices"]:
+            ref = device["ref"]
+            carrier = device["pad_domains"]["carrier"]
+            try:
+                check_carrier_layer(
+                    carrier, stack_layer_name(stack, carrier["kicad_layer"]),
+                    layer_map)
+            except (LayerMapError, KeyError, TypeError, RoutedRefused,
+                    PadDomainError) as exc:
+                raise PadDomainError("%s carrier layer: %s" % (ref, exc)) from exc
+        return dict(prepared.die_connections)
+
+    def preflight_die_outline_layers(self, declared):
+        """Every die keeps its archived size: all are exempt, none is sized
+        from an outline layer. A declared outline layer is refused, as the
+        board path refuses one for a marked die."""
+        from ..die_outline import DieOutlineLayerRefused
+        if declared:
+            raise DieOutlineLayerRefused(
+                "outline layers were given for %s, but every die of the routed "
+                "geometry keeps its archived size" % ", ".join(sorted(declared)))
+        return {}, sorted(self.prepared.pin_lists)
+
+    def preflight_carriers(self, export_report):
+        """The routed io_pads manifest already carries the planner's names;
+        the preflight read and checked it."""
+        self.prepared
+
+    # The intermediates the worker reads.
+
+    def write_chiplet(self, path, *, interconnect_manifest, export_report):
+        from ..writers.intermediate_chiplet import emit_intermediate_chiplet
+        prepared = self.prepared
+        emit_intermediate_chiplet(prepared.facts, path, prepared.stacks)
+        return True
+
+    def write_io_pads_json(self, path, *, export_report):
+        """The routed io_pads manifest, as given, for the worker."""
+        shutil.copyfile(self.io_pads_path, path)
+        return len(self.prepared.io_pads)
+
+    def write_nofill_regions_json(self, path):
+        """None: the routed documents carry no no-fill region (flow-authored
+        keep-outs come as --nofill-regions on both paths)."""
+        return 0
+
+    def write_cmim_devices_json(self, path, *, skipped):
+        """None: the routed path draws no integrated capacitor."""
+        return 0
+
+    def write_die_pin_lists(self, pins_dir):
+        return write_pin_lists(self.prepared.pin_lists, pins_dir)
+
+    def read_die_connections(self):
+        return dict(self.prepared.die_connections)
+
+    def read_die_thicknesses(self):
+        return dict(self.prepared.die_thicknesses)
+
+    def list_die_refs(self):
+        return [device["ref"] for device in self.prepared.document["devices"]]
+
+    def body_thickness_um(self):
+        return self.prepared.document["interposer"]["body_thickness_um"]

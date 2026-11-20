@@ -21,6 +21,8 @@ chiplet-export --board BOARD --output-dir DIR
                [--insert-metal-fill] [--fill-mode {single-pass,closure}]
                [--seal-ring] [--system-chiplet CHIPLET]
                [--nofill-regions JSON] [--die-layouts JSON]
+chiplet-export --board BOARD --output-dir DIR --system-chiplet CHIPLET
+               --routed-geometry JSON --name NAME --io-pads JSON [...]
 ```
 
 `chiplet-export` is `chiplet_export_cli.py` (next to this file) run under a
@@ -33,13 +35,22 @@ its Nix tail shell provides the same command. From a checkout:
 python3 plugins/chiplet_export/chiplet_export_cli.py --board ... --output-dir ...
 ```
 
+The second form composes from the routed-geometry document the packaging
+flow's place-and-route row writes, instead of from the board. It never imports
+pcbnew, so any Python 3 runs it. The board must still exist but is not opened,
+and no `.hyp` is written: the worker reads the document.
+
 ## Flags
 
-`<board>` below is the board file's stem; it names every output.
+`<board>` below is the board file's stem, or `--name` with
+`--routed-geometry`; it names every output.
 
 | Flag | Value | Default | Effect |
 |------|-------|---------|--------|
 | `--board` | path | required | The assembly `.kicad_pcb`. A missing file, or one pcbnew cannot read, exits 2 with nothing created. Relative paths resolve against the current directory. |
+| `--routed-geometry` | path | none | Compose from this routed-geometry document instead of the board: the board is checked to exist, never opened. Needs `--name`, `--io-pads` and `--system-chiplet` (the `.chiplet` the document binds by digest; another one is refused with exit 1 and nothing created). Every die keeps its archived PinList size, and the routed path extracts no no-fill region and no MIM capacitor. |
+| `--name` | text | none | With `--routed-geometry`: the stem every output is named by. A usage error without it. |
+| `--io-pads` | path | none | With `--routed-geometry`: the routed io_pads manifest, in the interposer GDS frame; any other frame is refused with exit 1. A usage error without it. |
 | `--output-dir` | path | required | Where the outputs go (see *Outputs*). Created only once the board's preflights pass, so a refused board leaves nothing. |
 | `--require-drc` | flag | off | Accepted for older callers and changes nothing: the assembly DRC is required by default. Cannot be combined with `--allow-drc-fail`. |
 | `--allow-drc-fail` | flag | off | Exit 0 instead of 3 when the files were written but the assembly DRC did not pass; the last line says which outcome it let through. |
@@ -106,7 +117,7 @@ Under `--output-dir`:
 ```
 <board>.chiplet                          finalized assembly description
 <board>.chiplet.exportcontent.sha256     digest for the previous-export guard
-<board>.hyp                              the HyperLynx netlist the layout came from
+<board>.hyp                              the HyperLynx netlist the layout came from (not with --routed-geometry)
 MANIFEST.md                              every product, present or absent
 layout/<board>_interposer.gds            interposer layout (the .chiplet references it)
 layout/<board>_interposer.boundaries.json
@@ -160,7 +171,7 @@ Refusals and errors go to stderr.
 |-----:|---------|
 | 0 | The files were written and the assembly DRC PASSED (or did not pass, under `--allow-drc-fail`). |
 | 1 | Nothing trustworthy was written: a refused board, a failed worker, a `.chiplet` that could not be replaced, or a crash before the DRC. |
-| 2 | The board (or the `--system-chiplet`, `--export-report` or `--die-layouts` file) is missing, or KiCad cannot read the board; also a usage error. |
+| 2 | The board (or the `--system-chiplet`, `--export-report`, `--die-layouts`, `--routed-geometry` or `--io-pads` file) is missing, or KiCad cannot read the board; also a usage error. |
 | 3 | The files were written and the assembly DRC did not pass: FAILED, REFUSED or NOT RUN, a DRC stage that raised included. |
 
 A nonzero `run_drc.py` exit reads "failed or refused", because that exit

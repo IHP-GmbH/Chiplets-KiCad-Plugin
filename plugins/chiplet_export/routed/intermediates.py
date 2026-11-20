@@ -261,25 +261,32 @@ class RoutedIntermediates:
     cmim_devices: int = 0
 
 
-def write_intermediates(document_path, chiplet_path, io_pads_path, *,
-                        chiplet_output, pins_dir, board_name,
-                        interconnect_manifest=None,
-                        interposer_adapter=DEFAULT_INTERPOSER_ADAPTER,
-                        interconnect_adapter="", interposer_lyp="",
-                        cmim_devices_json=None, method_specs=None, on_warn=None):
-    """Write the intermediate .chiplet to ``chiplet_output`` and one
-    ``<ref>_pins.json`` per device into ``pins_dir``.
+@dataclass(frozen=True)
+class PreparedIntermediates:
+    """Everything write_intermediates writes, computed and checked, nothing
+    written yet: the documents as read, and the intermediates' contents."""
+    document: dict
+    chiplet: dict
+    io_pads: list
+    facts: object
+    stacks: str
+    pin_lists: Dict[str, dict]
+    die_connections: Dict[str, str]
+    die_thicknesses: Dict[str, float]
 
-    Refuses (RoutedRefused), before any file is written: a document this
-    reader does not read, a .chiplet other than the one it binds, a device
-    that is no .chiplet component or whose archive does not decode, an io_pads
-    manifest in another frame, a missing ``pins_dir``, and any CMIM sidecar.
+
+def prepare_intermediates(document_path, chiplet_path, io_pads_path, *,
+                          board_name, interconnect_manifest=None,
+                          interposer_adapter=DEFAULT_INTERPOSER_ADAPTER,
+                          interconnect_adapter="", interposer_lyp="",
+                          method_specs=None, on_warn=None):
+    """Read and check the three documents and compute the intermediates.
+
+    Refuses (RoutedRefused) everything write_intermediates refuses about its
+    inputs: a document this reader does not read, a .chiplet other than the
+    one it binds, a device that is no .chiplet component or whose archive does
+    not decode, and an io_pads manifest in another frame. Writes nothing.
     """
-    if cmim_devices_json:
-        raise RoutedRefused(
-            "a CMIM sidecar (%s) was given, but the routed path draws no "
-            "integrated capacitor; it is computed on the board path only"
-            % cmim_devices_json)
     document = read_document(document_path, on_warn=on_warn)
     check_chiplet_binding(document, chiplet_path)
     from .. import vendored as _vendored
@@ -299,20 +306,55 @@ def write_intermediates(document_path, chiplet_path, io_pads_path, *,
         interconnect_manifest=interconnect_manifest,
         interposer_adapter=interposer_adapter,
         interconnect_adapter=interconnect_adapter, interposer_lyp=interposer_lyp)
-    pin_lists = die_pin_lists(document, chiplet, method_specs)
-    connections = die_connections(document, chiplet)
-    thicknesses = die_thicknesses(document, chiplet)
-    stacks = emit_connection_stacks_block(interconnect_manifest)
-    if not os.path.isdir(pins_dir):
-        raise RoutedRefused("the pin list folder %s does not exist" % pins_dir)
+    return PreparedIntermediates(
+        document=document, chiplet=chiplet, io_pads=io_pads, facts=facts,
+        stacks=emit_connection_stacks_block(interconnect_manifest),
+        pin_lists=die_pin_lists(document, chiplet, method_specs),
+        die_connections=die_connections(document, chiplet),
+        die_thicknesses=die_thicknesses(document, chiplet))
 
-    emit_intermediate_chiplet(facts, chiplet_output, stacks)
+
+def write_pin_lists(pin_lists, pins_dir):
+    """One ``<ref>_pins.json`` per entry into ``pins_dir``; {ref: path}."""
     paths = {}
     for ref, sidecar in pin_lists.items():
         path = os.path.join(pins_dir, "%s_pins.json" % ref)
         with open(path, "w") as f:
             json.dump(sidecar, f, indent=2)
         paths[ref] = path
+    return paths
+
+
+def write_intermediates(document_path, chiplet_path, io_pads_path, *,
+                        chiplet_output, pins_dir, board_name,
+                        interconnect_manifest=None,
+                        interposer_adapter=DEFAULT_INTERPOSER_ADAPTER,
+                        interconnect_adapter="", interposer_lyp="",
+                        cmim_devices_json=None, method_specs=None, on_warn=None):
+    """Write the intermediate .chiplet to ``chiplet_output`` and one
+    ``<ref>_pins.json`` per device into ``pins_dir``.
+
+    Refuses (RoutedRefused), before any file is written: what
+    prepare_intermediates refuses, a missing ``pins_dir``, and any CMIM
+    sidecar.
+    """
+    if cmim_devices_json:
+        raise RoutedRefused(
+            "a CMIM sidecar (%s) was given, but the routed path draws no "
+            "integrated capacitor; it is computed on the board path only"
+            % cmim_devices_json)
+    prepared = prepare_intermediates(
+        document_path, chiplet_path, io_pads_path, board_name=board_name,
+        interconnect_manifest=interconnect_manifest,
+        interposer_adapter=interposer_adapter,
+        interconnect_adapter=interconnect_adapter, interposer_lyp=interposer_lyp,
+        method_specs=method_specs, on_warn=on_warn)
+    if not os.path.isdir(pins_dir):
+        raise RoutedRefused("the pin list folder %s does not exist" % pins_dir)
+
+    emit_intermediate_chiplet(prepared.facts, chiplet_output, prepared.stacks)
+    paths = write_pin_lists(prepared.pin_lists, pins_dir)
     return RoutedIntermediates(
-        chiplet=chiplet_output, pin_lists=paths, die_connections=connections,
-        die_thicknesses=thicknesses, io_pads=len(io_pads))
+        chiplet=chiplet_output, pin_lists=paths,
+        die_connections=prepared.die_connections,
+        die_thicknesses=prepared.die_thicknesses, io_pads=len(prepared.io_pads))

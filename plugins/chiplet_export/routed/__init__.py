@@ -14,12 +14,14 @@ writers.chiplet_writer, writers.hyperlynx_writer or pipeline.orchestrator.
 
 from .document import RoutedRefused, read_document
 from .intermediates import (
-    BOARD_EDGE_STROKE_UM, RoutedIntermediates, die_connections, die_pin_lists,
-    die_thicknesses, facts_from_documents, write_intermediates,
+    BOARD_EDGE_STROKE_UM, PreparedIntermediates, RoutedIntermediates,
+    die_connections, die_pin_lists, die_thicknesses, facts_from_documents,
+    prepare_intermediates, write_intermediates, write_pin_lists,
 )
 
 __all__ = [
-    "BOARD_EDGE_STROKE_UM", "RoutedIntermediates", "RoutedRefused",
-    "die_connections", "die_pin_lists", "die_thicknesses",
-    "facts_from_documents", "read_document", "write_intermediates",
+    "BOARD_EDGE_STROKE_UM", "PreparedIntermediates", "RoutedIntermediates",
+    "RoutedRefused", "die_connections", "die_pin_lists", "die_thicknesses",
+    "facts_from_documents", "prepare_intermediates", "read_document",
+    "write_intermediates", "write_pin_lists",
 ]

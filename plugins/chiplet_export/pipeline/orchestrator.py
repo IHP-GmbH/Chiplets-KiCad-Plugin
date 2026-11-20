@@ -975,12 +975,13 @@ def describe_die_thickness_gaps(die_refs: List[str],
 
 def describe_die_outline_layers(layers: Dict[str, Tuple[int, int]],
                                 exempt: List[str],
-                                from_dialog: bool = False) -> str:
+                                from_dialog: bool = False,
+                                origin: str = "board fields") -> str:
     """The export log's one line on how each die is sized, or "" for none.
 
     Sorted, so two runs of one board log the same line. ``from_dialog`` says
     the layers came from the export dialog's explicit map rather than from
-    the board's DIE_OUTLINE_LAYER fields.
+    the board's DIE_OUTLINE_LAYER fields (or what ``origin`` names).
     """
     parts = []
     if layers:
@@ -992,7 +993,7 @@ def describe_die_outline_layers(layers: Dict[str, Tuple[int, int]],
     if not parts:
         return ""
     return "Die outline layers (%s): %s" % (
-        "export dialog" if from_dialog else "board fields", "; ".join(parts))
+        "export dialog" if from_dialog else origin, "; ".join(parts))
 
 
 # An interposer's physical body (dimensions.thickness, from the KiCad board
@@ -1222,11 +1223,13 @@ def build_cli_args(hyp_to_gds_path: str,
                    board_name: str,
                    options: ExportOptions,
                    *,
-                   chiplet_update_path: str = "") -> List[str]:
+                   chiplet_update_path: str = "",
+                   routed_geometry: str = "") -> List[str]:
     """Construct argv for the hyp_to_gds.py subprocess.
 
-    The list starts with the script path and the positional hyp input,
-    then appends flags driven by `options`. Output paths are absolute: the
+    The list starts with the script path and the positional hyp input, or,
+    given ``routed_geometry`` (and no ``hyp_path``), ``--routed-geometry``
+    and that document; then appends flags driven by `options`. Output paths are absolute: the
     GDS layouts go under ``options.output_dir``'s ``layout/`` subdir, the
     .chiplet stays at the output-dir root.
 
@@ -1236,7 +1239,13 @@ def build_cli_args(hyp_to_gds_path: str,
     touches the canonical one.
     """
     out_dir = options.output_dir
-    args: List[str] = [hyp_to_gds_path, hyp_path]
+    if routed_geometry:
+        if hyp_path:
+            raise ValueError("the worker takes a .hyp or a routed-geometry "
+                             "document, not both")
+        args: List[str] = [hyp_to_gds_path, "--routed-geometry", routed_geometry]
+    else:
+        args = [hyp_to_gds_path, hyp_path]
 
     # Always: hyp_to_gds writes the interposer GDS unconditionally, and
     # without -o it lands next to the .hyp -- which lives in the workspace
@@ -1745,6 +1754,15 @@ def run_export(board, options, plugin_dir,
         return ExportResult(
             error="Interconnect PDK source refused: %s" % exc)
 
+    # A source that is not a board reads and checks all of its inputs here,
+    # before any output exists (a board's are checked by the preflights
+    # below, as they always were).
+    from .export_source import SourceRefused
+    try:
+        source.preflight(interconnect_manifest)
+    except SourceRefused as exc:
+        return ExportResult(error="Routed geometry refused: %s" % exc)
+
     # Carrier metadata is a physical contract, not an optional extraction hint.
     # Check it before output creation, including explicit pin/GDS overrides.
     from ..pad_domains import PadDomainError, validate_export_pad_sources
@@ -1875,28 +1893,36 @@ def run_export(board, options, plugin_dir,
             _log("Warning: " + INTERCONNECT_ABSENCE_WARNING)
         outline_line = describe_die_outline_layers(
             die_outline_layers, die_outline_exempt,
-            from_dialog=bool(options.die_outline_layers))
+            from_dialog=bool(options.die_outline_layers),
+            origin=source.field_origin)
         if outline_line:
             _log(outline_line)
-        hyp_path = os.path.join(tmpdir, "%s.hyp" % board_name)
+        source_line = source.describe()
+        if source_line:
+            _log(source_line)
+        # The worker composes from a .hyp the source writes, or, for a source
+        # that writes none, from its routed-geometry document.
+        hyp_path = ""
         chiplet_intermediate = os.path.join(tmpdir, "%s.chiplet" % board_name)
 
-        _log("Writing Hyperlynx ...")
-        try:
-            hyp_ok = source.write_hyperlynx(hyp_path)
-        except Exception as exc:
-            return ExportResult(
-                error="Hyperlynx writer crashed: %s\n%s"
-                      % (exc, traceback.format_exc()),
-            )
-        if not hyp_ok:
-            return ExportResult(
-                error=(
-                    "Hyperlynx writer aborted (most commonly: the "
-                    "board has no closed Edge.Cuts outline). Add a "
-                    "board outline, then retry."
-                ),
-            )
+        if source.writes_hyp:
+            hyp_path = os.path.join(tmpdir, "%s.hyp" % board_name)
+            _log("Writing Hyperlynx ...")
+            try:
+                hyp_ok = source.write_hyperlynx(hyp_path)
+            except Exception as exc:
+                return ExportResult(
+                    error="Hyperlynx writer crashed: %s\n%s"
+                          % (exc, traceback.format_exc()),
+                )
+            if not hyp_ok:
+                return ExportResult(
+                    error=(
+                        "Hyperlynx writer aborted (most commonly: the "
+                        "board has no closed Edge.Cuts outline). Add a "
+                        "board outline, then retry."
+                    ),
+                )
         _log("Writing intermediate .chiplet ...")
         try:
             chiplet_ok = source.write_chiplet(
@@ -1938,7 +1964,7 @@ def run_export(board, options, plugin_dir,
                 )
             if n_io:
                 effective_io_pads = io_pads_auto
-                _log("Auto-extracted %d io_pad(s) from board" % n_io)
+                _log("Auto-extracted %d io_pad(s) from %s" % (n_io, source.origin))
 
         # Auto-extract no-fill (keep-out) regions from the board's dedicated
         # NoMetFiller / <metal>.nofill layers so the worker carves them out of
@@ -1954,7 +1980,8 @@ def run_export(board, options, plugin_dir,
                 _log("Warning: no-fill region extraction failed: %s" % exc)
             if n_nofill:
                 effective_nofill = nofill_auto
-                _log("Auto-extracted %d no-fill region(s) from board" % n_nofill)
+                _log("Auto-extracted %d no-fill region(s) from %s"
+                     % (n_nofill, source.origin))
 
         # Auto-extract cap_cmim device metadata from the board so hyp_to_gds can
         # instantiate the real IntM4TM2 cmim PCell. A non-empty
@@ -1988,7 +2015,7 @@ def run_export(board, options, plugin_dir,
 
             if n_cmim:
                 effective_cmim_devices = cmim_auto
-                _log("Auto-extracted %d cmim device(s) from board" % n_cmim)
+                _log("Auto-extracted %d cmim device(s) from %s" % (n_cmim, source.origin))
 
         # Auto-extract die footprint pads so the Cu-pillar generator places
         # DRC-validated pillars under each flip-chip die (acts only when
@@ -2018,7 +2045,7 @@ def run_export(board, options, plugin_dir,
                 effective_die_conns = {}
                 _log("Warning: per-die connection read failed: %s" % exc)
             if effective_die_conns:
-                _log("Per-die connections from board fields: %s"
+                _log("Per-die connections from " + source.field_origin + ": %s"
                      % ", ".join("%s=%s" % (r, m) for r, m
                                  in sorted(effective_die_conns.items())))
 
@@ -2034,7 +2061,7 @@ def run_export(board, options, plugin_dir,
                 effective_die_thicks = {}
                 _log("Warning: per-die thickness read failed: %s" % exc)
             if effective_die_thicks:
-                _log("Per-die thickness (um) from board fields: %s"
+                _log("Per-die thickness (um) from " + source.field_origin + ": %s"
                      % ", ".join("%s=%s" % (r, t) for r, t
                                  in sorted(effective_die_thicks.items())))
 
@@ -2236,13 +2263,15 @@ def run_export(board, options, plugin_dir,
         # consume the exact .hyp the layout was generated from. Staged here,
         # after validation, so a validation failure leaves no partial
         # artifact (matching the .chiplet above).
-        hyp_final = os.path.join(options.output_dir, "%s.hyp" % board_name)
-        try:
-            shutil.copy2(hyp_path, hyp_final)
-            _log("Wrote Hyperlynx: %s" % hyp_final)
-        except OSError as exc:
-            _log("Warning: could not copy .hyp to output: %s" % exc)
-            hyp_final = ""
+        hyp_final = ""
+        if hyp_path:
+            hyp_final = os.path.join(options.output_dir, "%s.hyp" % board_name)
+            try:
+                shutil.copy2(hyp_path, hyp_final)
+                _log("Wrote Hyperlynx: %s" % hyp_final)
+            except OSError as exc:
+                _log("Warning: could not copy .hyp to output: %s" % exc)
+                hyp_final = ""
 
         effective_options = dataclasses.replace(
             options,
@@ -2265,7 +2294,8 @@ def run_export(board, options, plugin_dir,
             interconnect_pdk_root=interconnect_manifest.root)
 
         cli = build_cli_args(hyp_to_gds, hyp_path, board_name, effective_options,
-                             chiplet_update_path=chiplet_staging)
+                             chiplet_update_path=chiplet_staging,
+                             routed_geometry=source.routed_geometry)
         command = [worker_py] + cli
 
         # PDK-root overrides travel as environment variables (the discovery

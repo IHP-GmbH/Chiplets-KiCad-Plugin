@@ -21,10 +21,16 @@ NOT RUN). ``--allow-drc-fail`` turns 3 into 0 and says so on the last line;
 ``--require-drc`` is accepted and changes nothing, the DRC is required by
 default. The two flags are mutually exclusive.
 
-Headless: an export must run under a Python that can ``import pcbnew`` (the
-KiCad fork's interpreter); the worker python for hyp_to_gds.py is resolved
-separately via the pipeline discovery chain. ``--help`` and usage errors need
-no KiCad: pcbnew is imported once the arguments are parsed.
+Headless: an export from the board must run under a Python that can ``import
+pcbnew`` (the KiCad fork's interpreter); the worker python for hyp_to_gds.py is
+resolved separately via the pipeline discovery chain. ``--help`` and usage
+errors need no KiCad: pcbnew is imported once the arguments are parsed.
+
+With ``--routed-geometry`` the export composes from the routed-geometry
+document instead, with ``--name`` naming the outputs, ``--io-pads`` the routed
+io_pads manifest and ``--system-chiplet`` the .chiplet the document binds. The
+board must still exist, but is not opened: pcbnew is never imported, and no
+.hyp is written.
 
 The full reference (flags, inputs, environment, outputs, exit codes,
 examples) is CLI.md next to this file.
@@ -36,6 +42,7 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
 EXPORT_REPORT_FLAG = "--export-report"
+ROUTED_FLAG = "--routed-geometry"
 if str(PLUGIN_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT.parent))
 
@@ -61,7 +68,23 @@ def _build_parser():
     )
     parser.add_argument(
         "--board", required=True,
-        help="Path to the assembly .kicad_pcb to export.",
+        help="Path to the assembly .kicad_pcb to export. With "
+             "--routed-geometry it must exist, but is not opened.",
+    )
+    parser.add_argument(
+        ROUTED_FLAG, default="",
+        help="Compose from this routed-geometry document instead of the "
+             "board. Needs --name, --io-pads and --system-chiplet.",
+    )
+    parser.add_argument(
+        "--name", default="",
+        help="With --routed-geometry: the stem every output is named by "
+             "(the board file's stem on the board path).",
+    )
+    parser.add_argument(
+        "--io-pads", default="",
+        help="With --routed-geometry: the routed io_pads manifest, in the "
+             "interposer GDS frame.",
     )
     parser.add_argument(
         "--output-dir", required=True,
@@ -150,8 +173,38 @@ def _build_parser():
     return parser
 
 
+def _check_routed_args(parser, args):
+    """The routed flags come together, and only with --routed-geometry."""
+    if not args.routed_geometry:
+        stray = [flag for flag, value in (("--name", args.name),
+                                          ("--io-pads", args.io_pads)) if value]
+        if stray:
+            parser.error("%s only with %s" % (" and ".join(stray), ROUTED_FLAG))
+        return
+    missing = [flag for flag, value in (("--name", args.name),
+                                        ("--io-pads", args.io_pads),
+                                        ("--system-chiplet", args.system_chiplet))
+               if not value]
+    if missing:
+        parser.error("%s needs %s" % (ROUTED_FLAG, ", ".join(missing)))
+
+
+def _missing(label, path):
+    """Exit EXIT_BOARD naming a missing input, or None when it exists."""
+    if Path(path).is_file():
+        return None
+    sys.stderr.write(
+        "chiplet-export: %s not found: %s\n"
+        "  resolved from the current directory %s\n" % (label, path, Path.cwd()))
+    return EXIT_BOARD
+
+
 def main(argv=None):
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    _check_routed_args(parser, args)
+    if args.routed_geometry:
+        return _main_routed(args)
     # Here, not at the top: --help and a usage error need no KiCad.
     import pcbnew
 
@@ -201,6 +254,36 @@ def main(argv=None):
             "  The file exists but pcbnew returned no board. It may be from an "
             "incompatible KiCad version, or corrupt.\n" % board_path)
         return EXIT_BOARD
+    return _export(board, args, output_dir)
+
+
+def _main_routed(args):
+    """The routed path: no pcbnew, no .hyp; the board is checked, not opened."""
+    for label, path in (("board", args.board),
+                        ("routed-geometry document", args.routed_geometry),
+                        ("routed io_pads manifest", args.io_pads),
+                        ("System .chiplet", args.system_chiplet)):
+        code = _missing(label, path)
+        if code is not None:
+            return code
+    for label, path in (("die layouts sidecar", args.die_layouts),
+                        ("export report", args.export_report)):
+        if path:
+            code = _missing(label, path)
+            if code is not None:
+                return code
+    from chiplet_export.routed.source import RoutedSource
+    source = RoutedSource(args.routed_geometry, args.system_chiplet, args.io_pads,
+                          name=args.name,
+                          interposer_adapter=args.interposer_adapter,
+                          interconnect_adapter=args.interconnect_adapter)
+    output_dir = str(Path(args.output_dir).absolute())
+    print("chiplet-export: %s -> %s" % (args.board, output_dir))
+    print("  plugin_dir:  %s" % PLUGIN_ROOT)
+    return _export(source, args, output_dir)
+
+
+def _export(board_or_source, args, output_dir):
     options = ExportOptions(
         output_dir=output_dir,
         emit_chiplet=True,
@@ -232,7 +315,7 @@ def main(argv=None):
         if line:
             print("  | %s" % line)
 
-    result = run_export(board, options, str(PLUGIN_ROOT), on_log=on_log)
+    result = run_export(board_or_source, options, str(PLUGIN_ROOT), on_log=on_log)
 
     print()
     print("exit_code:           %d" % result.exit_code)

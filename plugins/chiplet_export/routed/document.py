@@ -13,6 +13,8 @@ import math
 
 from .. import vendored as _vendored
 
+from ..pipeline.export_source import SourceRefused
+
 SCHEMA = "routed-geometry"
 SUPPORTED_VERSION = "1.0"
 FRAME = "interposer_local_y_up_um"
@@ -21,7 +23,7 @@ FRAME = "interposer_local_y_up_um"
 ARTIFACT = "routed-geometry.json"
 
 
-class RoutedRefused(Exception):
+class RoutedRefused(SourceRefused):
     """The routed inputs cannot give the export's intermediates; nothing is
     written.
 

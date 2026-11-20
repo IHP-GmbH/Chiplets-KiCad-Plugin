@@ -326,6 +326,25 @@ def footprint_pin_list(footprint, pcbnew, method_specs=None):
         raise PadDomainError("Cannot inspect carrier pad-domain geometry: %s" % exc) from exc
 
 
+def check_carrier_layer(carrier, actual_name, layer_map):
+    """Refuse a carrier whose copper layer is not the layer it names.
+
+    ``actual_name`` is the name the assembly gives the carrier's
+    ``kicad_layer`` (a board's layer name, or the routed document's metal at
+    that position); it must map, through ``layer_map``, to the layer
+    ``carrier.layer`` names.
+    """
+    token = carrier["kicad_layer"]
+    if not isinstance(actual_name, str) or not actual_name:
+        raise PadDomainError("Cannot inspect the current board layer name for " + token)
+    actual = layer_map.get_layer(actual_name)
+    expected = layer_map.get_layer(carrier["layer"])
+    if actual != expected:
+        raise PadDomainError(
+            "%s board layer %r maps to %s, but carrier.layer %r maps to %s"
+            % (token, actual_name, actual, carrier["layer"], expected))
+
+
 def validate_board_pad_domains(board, method_specs, *, load_layer_map=None):
     """Validate marked footprints and return their authoritative method map.
 
@@ -354,15 +373,8 @@ def validate_board_pad_domains(board, method_specs, *, load_layer_map=None):
                     footprint.GetFieldText("CONNECTION"))
                 carrier = domains["carrier"]
                 token = carrier["kicad_layer"]
-                actual_name = board.GetLayerName(_copper_layer(token, pcbnew))
-                if not isinstance(actual_name, str) or not actual_name:
-                    raise PadDomainError("Cannot inspect the current board layer name for " + token)
-                actual = layer_map.get_layer(actual_name)
-                expected = layer_map.get_layer(carrier["layer"])
-                if actual != expected:
-                    raise PadDomainError(
-                        "%s board layer %r maps to %s, but carrier.layer %r maps to %s"
-                        % (token, actual_name, actual, carrier["layer"], expected))
+                check_carrier_layer(
+                    carrier, board.GetLayerName(_copper_layer(token, pcbnew)), layer_map)
             except (LayerMapError, KeyError, AttributeError, TypeError, OSError, RuntimeError,
                     PadDomainError) as exc:
                 raise PadDomainError("%s carrier layer: %s" % (reference, exc)) from exc

@@ -4,7 +4,8 @@
 run_export composes the same way whatever it composes from; what differs is
 where the stem, the pre-worker intermediates and the preflights come from. A
 source supplies exactly those. BoardSource reads them from a KiCad board, as
-the export always has.
+the export always has; routed.source.RoutedSource reads them from the routed
+documents.
 
 Every reader is looked up when it is called, through sys.modules, as the
 from-imports in run_export used to: callers and tests replace the writer
@@ -18,7 +19,35 @@ import importlib
 from pathlib import Path
 
 
-class BoardSource:
+class SourceRefused(Exception):
+    """A source's inputs cannot be exported; nothing is written."""
+
+
+class ExportSource:
+    """What every source supplies besides its readers (see BoardSource)."""
+
+    #: True when the worker composes from a .hyp the source writes (and the
+    #: export publishes); False when it composes from ``routed_geometry``.
+    writes_hyp = True
+    #: The routed-geometry document the worker reads instead of a .hyp.
+    routed_geometry = ""
+    #: What the run log says the intermediates were read from.
+    origin = "board"
+    field_origin = "board fields"
+
+    def preflight(self, interconnect_manifest, *, on_warn=None):
+        """Refuse inputs the export cannot use, before any output exists."""
+
+    def load_readers(self):
+        """Import what the readers need; a failure here comes before any
+        output exists."""
+
+    def describe(self):
+        """A line for the run log about where the inputs come from, or None."""
+        return None
+
+
+class BoardSource(ExportSource):
     """The export's inputs, read from a KiCad board (``pcbnew.BOARD``)."""
 
     def __init__(self, board):
@@ -98,7 +127,7 @@ class BoardSource:
 
 def export_source(source_or_board):
     """``source_or_board`` as a source: a board is wrapped in a BoardSource."""
-    if isinstance(source_or_board, BoardSource):
+    if isinstance(source_or_board, ExportSource):
         return source_or_board
     return BoardSource(source_or_board)
 
