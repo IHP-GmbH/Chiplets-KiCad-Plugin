@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """A version 2 record of a technology whose top metal is not TopMetal2.
 
-The fixture is one device's CHIPLET_PAD_DOMAINS record as interposer-pnr
-(bafa201797cae21f7930e92ee5b92ceb869e36a7) writes it for its frozen
-typical_03 routed fixture with the top metal renamed AlTop and no KiCad view
-(tests/test_routed_geometry.py, without_kicad_view_and_top_metal_named), so a
-version 2 record with no carrier.kicad_layer. The plugin decodes it; its board
+The fixture is one device's CHIPLET_PAD_DOMAINS record as interposer-pnr's
+routed-geometry writer writes it for its frozen typical_03 routed fixture with
+the top metal renamed AlTop and no KiCad view (its tests/test_routed_geometry.py,
+without_kicad_view_and_top_metal_named), so a version 2 record with no
+carrier.kicad_layer. Its sha256 below holds the bytes. The plugin decodes it; its board
 and layout remain IntM4TM2 only (README, carrier electrical pads).
 """
 
