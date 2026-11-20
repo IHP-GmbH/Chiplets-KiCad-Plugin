@@ -1690,6 +1690,10 @@ def run_export(board, options, plugin_dir,
                on_log=None, cancel_event=None) -> ExportResult:
     """End-to-end export driven by the dialog's Run button.
 
+    ``board`` is a KiCad board, or an export source (pipeline/export_source.py)
+    that supplies the stem, the intermediates and the preflights; a board is
+    read through a BoardSource.
+
     Sequence:
       1. Preflight a present interconnect PDK manifest, the carrier pad
          domains and the die outline layers (early refusals).
@@ -1721,6 +1725,10 @@ def run_export(board, options, plugin_dir,
     if not options.output_dir:
         return ExportResult(error="Output directory is empty.")
 
+    from .export_source import export_source
+    source = export_source(board)
+    discovery_board = source.discovery_board
+
     # This must precede directory creation, worker discovery, pcbnew-bound
     # writer imports, tmpdir creation and every subprocess. The GUI used to
     # reach the same reader only while deriving the optional IXN sidecar, then
@@ -1732,16 +1740,14 @@ def run_export(board, options, plugin_dir,
     # INTERCONNECT_PDK_ROOT, which build_worker_env pins for the same run.
     try:
         interconnect_manifest = _preflight_interconnect_manifest(
-            options.interconnect_pdk_root, board=board)
+            options.interconnect_pdk_root, board=discovery_board)
     except InterconnectSourceRefused as exc:
         return ExportResult(
             error="Interconnect PDK source refused: %s" % exc)
 
     # Carrier metadata is a physical contract, not an optional extraction hint.
     # Check it before output creation, including explicit pin/GDS overrides.
-    from ..pad_domains import (
-        PadDomainError, validate_board_pad_domains, validate_export_pad_sources,
-    )
+    from ..pad_domains import PadDomainError, validate_export_pad_sources
     from ..layer_map import LayerMap, resolve_lyp_path
     import dataclasses
 
@@ -1759,8 +1765,8 @@ def run_export(board, options, plugin_dir,
         return LayerMap(effective_lyp, strict=True)
 
     try:
-        domain_methods = validate_board_pad_domains(
-            board, interconnect_manifest.methods, load_layer_map=load_carrier_layer_map)
+        domain_methods = source.validate_pad_domains(
+            interconnect_manifest.methods, load_layer_map=load_carrier_layer_map)
         validate_export_pad_sources(
             domain_methods, method_overrides=options.die_connections,
             default_method=options.connection_type,
@@ -1774,14 +1780,12 @@ def run_export(board, options, plugin_dir,
     # for the runs whose worker resolves outlines, and after the carrier
     # preflight, whose message is the more specific one for a marked die. The
     # result is what the worker gets: the board is not read again for it.
-    from ..die_outline import (
-        DieOutlineLayerRefused, preflight_die_outline_layers,
-    )
+    from ..die_outline import DieOutlineLayerRefused
     die_outline_layers, die_outline_exempt = {}, []
     if worker_reads_die_outlines(options):
         try:
             die_outline_layers, die_outline_exempt = (
-                preflight_die_outline_layers(board, options.die_outline_layers))
+                source.preflight_die_outline_layers(options.die_outline_layers))
         except DieOutlineLayerRefused as exc:
             return ExportResult(error=str(exc))
         except PadDomainError as exc:
@@ -1794,17 +1798,11 @@ def run_export(board, options, plugin_dir,
     )
     from .runner import run_async
     from . import chiplet_merge
-    from ..writers.chiplet_writer import (
-        write_chiplet, write_io_pads_json, preflight_carriers,
-        write_cmim_devices_json,
-        write_nofill_regions_json,
-        write_die_pin_lists,
-        read_die_connections, read_die_thicknesses, list_die_refs,
-        _iu_to_um,
-    )
     from ..writers.connection_stacks import validate_interconnect_ids
-    from ..writers.hyperlynx_writer import write_hyperlynx
     from ..draft_net_names import BoardReportError, read_export_report
+    # Here, before any output exists: a source whose readers cannot load
+    # (no pcbnew for a board) fails the export before it creates anything.
+    source.load_readers()
 
     # The carriers both writers would refuse, by io_pad id or by net (a board
     # drawn against a sheet names its nets by the export report), are refused
@@ -1816,7 +1814,7 @@ def run_export(board, options, plugin_dir,
         return ExportResult(error="Export report refused: %s" % exc,
                             error_input="export_report")
     try:
-        preflight_carriers(board, export_report)
+        source.preflight_carriers(export_report)
     except BoardReportError as exc:
         return ExportResult(error="IO pad carriers refused: %s" % exc,
                             error_input="export_report")
@@ -1831,16 +1829,11 @@ def run_export(board, options, plugin_dir,
     except OSError as exc:
         return ExportResult(error="Cannot create output directory: %s" % exc)
 
-    board_file = ""
-    try:
-        board_file = board.GetFileName() or ""
-    except Exception:
-        pass
-    board_name = Path(board_file).stem or "board"
+    board_name = source.name()
 
     try:
         worker_py = (options.worker_python_override
-                     or find_worker_python(plugin_dir, board=board))
+                     or find_worker_python(plugin_dir, board=discovery_board))
     except WorkerPythonNotFoundError as exc:
         return ExportResult(error=str(exc))
 
@@ -1890,7 +1883,7 @@ def run_export(board, options, plugin_dir,
 
         _log("Writing Hyperlynx ...")
         try:
-            hyp_ok = write_hyperlynx(board, hyp_path)
+            hyp_ok = source.write_hyperlynx(hyp_path)
         except Exception as exc:
             return ExportResult(
                 error="Hyperlynx writer crashed: %s\n%s"
@@ -1906,8 +1899,7 @@ def run_export(board, options, plugin_dir,
             )
         _log("Writing intermediate .chiplet ...")
         try:
-            chiplet_ok = write_chiplet(
-                board,
+            chiplet_ok = source.write_chiplet(
                 chiplet_intermediate,
                 interconnect_manifest=interconnect_manifest,
                 export_report=export_report,
@@ -1938,7 +1930,7 @@ def run_export(board, options, plugin_dir,
             # The carriers passed preflight_carriers, so a failure here is
             # the writer's; the export stops rather than ship no pads.
             try:
-                n_io = write_io_pads_json(board, io_pads_auto, export_report=export_report)
+                n_io = source.write_io_pads_json(io_pads_auto, export_report=export_report)
             except Exception as exc:
                 return ExportResult(
                     error="IO pads writer crashed: %s\n%s"
@@ -1956,7 +1948,7 @@ def run_export(board, options, plugin_dir,
             nofill_auto = os.path.join(tmpdir,
                                        "%s_nofill_regions.json" % board_name)
             try:
-                n_nofill = write_nofill_regions_json(board, nofill_auto)
+                n_nofill = source.write_nofill_regions_json(nofill_auto)
             except Exception as exc:
                 n_nofill = 0
                 _log("Warning: no-fill region extraction failed: %s" % exc)
@@ -1972,8 +1964,8 @@ def run_export(board, options, plugin_dir,
             cmim_auto = os.path.join(tmpdir, "%s_cmim_devices.json" % board_name)
             cmim_skipped = []
             try:
-                n_cmim = write_cmim_devices_json(board, cmim_auto,
-                                                 skipped=cmim_skipped)
+                n_cmim = source.write_cmim_devices_json(cmim_auto,
+                                                        skipped=cmim_skipped)
             except Exception as exc:
                 n_cmim = 0
                 _log("Warning: CMIM auto-extraction failed: %s" % exc)
@@ -2005,7 +1997,7 @@ def run_export(board, options, plugin_dir,
         effective_pad_locs = options.pad_locations
         if not effective_pad_locs and not options.cupillar_gds:
             try:
-                effective_pad_locs = write_die_pin_lists(board, tmpdir)
+                effective_pad_locs = source.write_die_pin_lists(tmpdir)
             except PadDomainError as exc:
                 return ExportResult(error="Carrier pad domains refused: %s" % exc)
             except Exception as exc:
@@ -2021,7 +2013,7 @@ def run_export(board, options, plugin_dir,
         effective_die_conns = options.die_connections
         if not effective_die_conns:
             try:
-                effective_die_conns = read_die_connections(board)
+                effective_die_conns = source.read_die_connections()
             except Exception as exc:
                 effective_die_conns = {}
                 _log("Warning: per-die connection read failed: %s" % exc)
@@ -2037,7 +2029,7 @@ def run_export(board, options, plugin_dir,
         effective_die_thicks = options.die_thicknesses
         if not effective_die_thicks:
             try:
-                effective_die_thicks = read_die_thicknesses(board)
+                effective_die_thicks = source.read_die_thicknesses()
             except Exception as exc:
                 effective_die_thicks = {}
                 _log("Warning: per-die thickness read failed: %s" % exc)
@@ -2050,7 +2042,7 @@ def run_export(board, options, plugin_dir,
         # neutral default, it is a 0.0 that breaks one consumer and gets
         # silently invented by two others. Say so on every run.
         try:
-            for line in describe_die_thickness_gaps(list_die_refs(board),
+            for line in describe_die_thickness_gaps(source.list_die_refs(),
                                                     effective_die_thicks):
                 _log(line)
         except Exception as exc:
@@ -2061,8 +2053,7 @@ def run_export(board, options, plugin_dir,
         # value (e.g. the KiCad FR-4 default), which means no real interposer
         # stackup was set. Cosmetic: die z uses attachment_surface_z, not this.
         try:
-            body_iu = board.GetDesignSettings().GetBoardThickness()
-            for line in describe_interposer_body_default(_iu_to_um(body_iu)):
+            for line in describe_interposer_body_default(source.body_thickness_um()):
                 _log(line)
         except Exception as exc:
             _log("Warning: interposer body thickness check failed: %s" % exc)
@@ -2449,7 +2440,8 @@ def run_export(board, options, plugin_dir,
             try:
                 try:
                     adk_runner = find_adk_drc_runner(
-                        plugin_dir, board=board, root_override=options.adk_root)
+                        plugin_dir, board=discovery_board,
+                        root_override=options.adk_root)
                 except AdkRunnerNotFoundError as exc:
                     _log("Assembly DRC skipped: %s" % exc)
                     adk_runner = ""
@@ -2508,7 +2500,7 @@ def run_export(board, options, plugin_dir,
                             chiplet_for_drc,
                             interconnect_root=(
                                 effective_options.interconnect_pdk_root),
-                            board=board,
+                            board=discovery_board,
                             methods_db=interconnect_manifest.methods,
                         )
                         # Drop dies the boundary manifest does not declare, or the
