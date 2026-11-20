@@ -47,6 +47,19 @@ def _load_module(name, path):
 oracle = _load_module("routed_t03_make_oracle", FIXTURE / "make_oracle.py")
 standin = _load_module("routed_t03_make_standin", FIXTURE / "make_standin.py")
 
+# The routed path is held against the interconnect manifest, found as the
+# export finds it (env var or sibling checkout). On a lone checkout, as on a
+# bare CI runner, the cases that read it skip; the rest still run.
+try:
+    _manifest_reader()
+    _HAVE_MANIFEST = True
+except ImportError:
+    _HAVE_MANIFEST = False
+
+needs_manifest = pytest.mark.skipif(
+    not _HAVE_MANIFEST,
+    reason="interconnect_pdk manifest not discoverable on this checkout")
+
 
 def manifest_snapshot():
     """The interconnect manifest, found as the export finds it."""
@@ -109,6 +122,7 @@ def test_count_floor():
     assert_count_floor()
 
 
+@needs_manifest
 def test_the_oracle_and_this_host_read_one_connection_library():
     """The connection_stacks block is the shared emitter's, from whatever
     manifest the host has. If this fails, the .chiplet comparison is about
@@ -119,6 +133,7 @@ def test_the_oracle_and_this_host_read_one_connection_library():
         "connection_stacks block than the oracle's")
 
 
+@needs_manifest
 def test_the_routed_path_writes_the_board_paths_bytes(tmp_path):
     """The .chiplet, the pin lists, the connections and the thicknesses."""
     assert_count_floor()
@@ -142,6 +157,7 @@ def test_the_routed_path_writes_the_board_paths_bytes(tmp_path):
     assert counts["nofill_regions"] == 0
 
 
+@needs_manifest
 def test_the_pure_functions_return_what_write_intermediates_wrote(tmp_path):
     document, chiplet, _io_pads = documents()
     _out, result = run_routed(tmp_path)
@@ -217,16 +233,19 @@ def _assert_refused_unwritten(tmp_path, match, **overrides):
     assert not any((out / "pins").iterdir())
 
 
+@needs_manifest
 def test_refuses_a_document_of_another_major(tmp_path):
     doc = _variant(tmp_path, "v2.json", lambda d: d.update(version="2.0"))
     _assert_refused_unwritten(tmp_path, "unsupported version '2.0'", document=doc)
 
 
+@needs_manifest
 def test_refuses_a_device_without_its_archive(tmp_path):
     doc = _variant(tmp_path, "nopd.json", lambda d: d["devices"][1].pop("pad_domains"))
     _assert_refused_unwritten(tmp_path, "device U2 has no pad_domains", document=doc)
 
 
+@needs_manifest
 def test_refuses_a_chiplet_the_document_does_not_bind(tmp_path):
     other = tmp_path / "design.chiplet"
     shutil.copy(CHIPLET, other)
@@ -236,22 +255,26 @@ def test_refuses_a_chiplet_the_document_does_not_bind(tmp_path):
                               "was written from", chiplet=str(other))
 
 
+@needs_manifest
 def test_refuses_a_device_that_is_no_component(tmp_path):
     doc = _variant(tmp_path, "ref.json", lambda d: d["devices"][0].update(ref="U9"))
     _assert_refused_unwritten(tmp_path, "device U9 is no component of the .chiplet",
                               document=doc)
 
 
+@needs_manifest
 def test_refuses_an_explicit_cmim_sidecar(tmp_path):
     _assert_refused_unwritten(tmp_path, "CMIM sidecar",
                               cmim_devices_json=str(tmp_path / "cmim.json"))
 
 
+@needs_manifest
 def test_refuses_an_io_pads_manifest_in_the_board_frame(tmp_path):
     _assert_refused_unwritten(tmp_path, "board_absolute_ynegated_um",
                               io_pads=str(ORACLE / oracle.IO_PADS))
 
 
+@needs_manifest
 def test_refuses_an_archive_that_names_another_die(tmp_path):
     def swap(d):
         d["devices"][0]["pad_domains"], d["devices"][1]["pad_domains"] = (
@@ -260,12 +283,14 @@ def test_refuses_an_archive_that_names_another_die(tmp_path):
     _assert_refused_unwritten(tmp_path, "device U1: .*component differs", document=doc)
 
 
+@needs_manifest
 def test_refuses_a_die_of_the_chiplet_left_unplaced(tmp_path):
     doc = _variant(tmp_path, "drop.json", lambda d: d["devices"].pop(1))
     _assert_refused_unwritten(tmp_path, "die U2 of the .chiplet has no device",
                               document=doc)
 
 
+@needs_manifest
 def test_refuses_an_outline_off_the_frames_origin(tmp_path):
     def shift(d):
         d["outline"] = [[x + 1000.0, y] for x, y in d["outline"]]
@@ -281,6 +306,7 @@ def _io_pads_variant(tmp_path, edit):
     return str(path)
 
 
+@needs_manifest
 @pytest.mark.parametrize("edit, match", [
     (lambda pads: pads[0].update(io_class="bogus"), "io_class 'bogus'"),
     (lambda pads: pads[0].update(layer="Metal1"), "is on 'Metal1'"),
@@ -299,6 +325,7 @@ def _method_specs(**change):
     return methods
 
 
+@needs_manifest
 def test_an_archive_is_held_against_the_manifest_method(tmp_path):
     out, _result = run_routed(tmp_path, method_specs=_method_specs())
     assert (out / oracle.CHIPLET).is_file()
@@ -306,6 +333,7 @@ def test_an_archive_is_held_against_the_manifest_method(tmp_path):
                               method_specs=_method_specs(body_diameter_um=45.0))
 
 
+@needs_manifest
 def test_refuses_a_missing_pin_list_folder(tmp_path):
     with pytest.raises(RoutedRefused, match="pin list folder"):
         run_routed(tmp_path, pins_dir=str(tmp_path / "absent"))
@@ -350,6 +378,7 @@ print(json.dumps({"pcbnew": seen, "loaded": "pcbnew" in sys.modules,
 '''
 
 
+@needs_manifest
 def test_the_routed_path_imports_no_pcbnew_and_runs_no_kicad_cli(tmp_path):
     """The recorder sees an import attempt even where pcbnew is not
     installed, so this holds on a plain host and in the KiCad image alike."""
