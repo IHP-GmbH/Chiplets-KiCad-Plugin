@@ -162,7 +162,7 @@ def test_the_staged_intermediates_are_the_routed_ones(tmp_path, no_kicad, worker
         chiplet_output=str(ref / "x.chiplet"), pins_dir=str(ref / "pins"),
         board_name=NAME,
         interconnect_manifest=InterconnectManifestSnapshot(_manifest_reader().load_manifest()),
-        interposer_adapter="intm4tm2", interconnect_adapter="ihp_cupillar")
+        interposer_adapter="intm4tm2", interconnect_adapter="")
     staged_files = {Path(p).name: data for p, data in call.files.items()}
     for ref_name, path in expected.pin_lists.items():
         assert staged_files["%s_pins.json" % ref_name] == Path(path).read_bytes()
@@ -170,7 +170,9 @@ def test_the_staged_intermediates_are_the_routed_ones(tmp_path, no_kicad, worker
     assert call.files[io_pads] == IO_PADS.read_bytes()
     chiplet = Path(expected.chiplet).read_bytes()
     assert chiplet in call.files.values(), "the staged .chiplet is not the routed one"
-    assert b'adapter: "ihp_cupillar"' in chiplet
+    # --interconnect-adapter steers the DRC; as on the board path, the
+    # intermediate carries no interconnect block (the worker adds it).
+    assert b"\ninterconnect:" not in chiplet and b'adapter: "intm4tm2"' in chiplet
 
 
 @needs_manifest
@@ -228,6 +230,9 @@ REFUSALS = {
     "malformed interconnect adapter": (
         None, None, {"adapters": ADAPTERS[:2] + ["--interconnect-adapter", "a/b"]},
         "adapter"),
+    "unknown interconnect adapter": (
+        None, None, {"adapters": ADAPTERS[:2] + ["--interconnect-adapter", "acme_custom"]},
+        "unknown interconnect adapter 'acme_custom'"),
 }
 
 

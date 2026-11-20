@@ -265,7 +265,7 @@ def _intermediate_chiplet(tmp_path):
         str(stage(tmp_path / "intermediates")), str(CHIPLET), str(IO_PADS),
         chiplet_output=str(tmp_path / ("%s.chiplet" % NAME)), pins_dir=str(pins),
         board_name=NAME, interconnect_manifest=InterconnectManifestSnapshot(manifest),
-        interposer_adapter="intm4tm2", interconnect_adapter="ihp_cupillar")
+        interposer_adapter="intm4tm2", interconnect_adapter="")
     return result.chiplet
 
 
@@ -287,6 +287,20 @@ def test_the_finalized_dies_and_pads_are_the_board_paths(tmp_path):
         # The intermediate does not already hold the answer.
         assert (before[ref]["position"]["x"], before[ref]["position"]["y"]) != want
     assert finalized["interposer"]["io_pads"] == golden["interposer"]["io_pads"]
+
+
+def test_the_finalized_top_level_keys_are_the_board_paths_in_order(tmp_path, capsys):
+    """The worker adds the interconnect block from the die connections, after
+    the components, as on the board path."""
+    chiplet = _intermediate_chiplet(tmp_path)
+    ok, _layout = _run(tmp_path, chiplet=chiplet)
+    assert ok is True
+    assert "Set interconnect.adapter=ihp_cupillar" in capsys.readouterr().out
+    finalized, golden = (yaml.safe_load(Path(p).read_text())
+                         for p in (chiplet, BOARD_CHIPLET))
+    assert list(finalized) == list(golden)
+    assert list(golden)[-1] == "interconnect"
+    assert finalized["interconnect"] == golden["interconnect"]
 
 
 def test_the_finalized_pads_keep_their_own_layer(tmp_path):

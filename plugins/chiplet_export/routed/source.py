@@ -18,6 +18,8 @@ import shutil
 
 from ..pipeline.export_source import ExportSource
 from .document import RoutedRefused, bound_files
+from ..writers.connection_stacks import (
+    validate_adapter_id, validate_interconnect_ids)
 from .intermediates import prepare_intermediates, write_pin_lists
 
 #: The KiCad copper names a carrier archive gives its pad layer.
@@ -57,11 +59,17 @@ class RoutedSource(ExportSource):
 
     def __init__(self, document, chiplet, io_pads, *, name,
                  interposer_adapter=None, interconnect_adapter=None):
-        """``interposer_adapter`` and ``interconnect_adapter`` are what the
-        intermediate .chiplet names; the board path reads them from the
-        project's text variables. Both must be given (None is refused by the
-        preflight, never defaulted): the interposer adapter not empty, the
-        interconnect adapter empty for none, as on the board path."""
+        """``interposer_adapter`` is what the intermediate .chiplet names;
+        the board path reads it from the project's text variables.
+        ``interconnect_adapter`` is the --interconnect-adapter flag and keeps
+        its board-path meaning: checked here, it steers the assembly DRC, and
+        it is not written into the intermediate. On the board path that block
+        comes only from an INTERCONNECT_ADAPTER text variable, which a flow
+        draft's project does not set, so the worker adds the block from the
+        die connections on both paths, at the same place in the file. Both
+        must be given (None is refused by the preflight, never defaulted):
+        the interposer adapter not empty, the interconnect adapter empty for
+        none, as on the board path."""
         if not name:
             raise RoutedRefused("the routed path needs the output name (--name)")
         self._interposer_adapter = interposer_adapter
@@ -101,11 +109,14 @@ class RoutedSource(ExportSource):
         if not self._interposer_adapter:
             raise RoutedRefused("the interposer adapter is empty")
         try:
+            validate_adapter_id(self._interconnect_adapter, "interconnect adapter")
+            validate_interconnect_ids(adapter=self._interconnect_adapter,
+                                      manifest=interconnect_manifest)
             prepared = prepare_intermediates(
                 self.document_path, self.chiplet_path, self.io_pads_path,
                 board_name=self._name, interconnect_manifest=interconnect_manifest,
                 interposer_adapter=self._interposer_adapter,
-                interconnect_adapter=self._interconnect_adapter,
+                interconnect_adapter="",
                 method_specs=interconnect_manifest.methods, on_warn=on_warn)
         except ValueError as exc:
             # An adapter id the board path refuses too.

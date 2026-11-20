@@ -29,6 +29,9 @@ from chiplet_export.writers.connection_stacks import (  # noqa: E402
     InterconnectManifestSnapshot, _manifest_reader, emit_connection_stacks_block,
 )
 from chiplet_export import io_pads_manifest, vendored  # noqa: E402
+from chiplet_export.routed.source import RoutedSource  # noqa: E402
+
+from .routed_t03_stage import stage  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "routed_t03"
 INPUTS = FIXTURE / "inputs"
@@ -155,6 +158,24 @@ def test_the_routed_path_writes_the_board_paths_bytes(tmp_path):
     assert (result.io_pads, result.cmim_devices) == (counts["io_pads"],
                                                      counts["cmim_devices"])
     assert counts["nofill_regions"] == 0
+
+
+@needs_manifest
+def test_the_routed_source_writes_the_board_paths_chiplet_under_the_flows_flags(tmp_path):
+    """The flow gives both paths --interconnect-adapter. On the board path the
+    flag steers the assembly DRC and the intermediate .chiplet gains no
+    interconnect block, since the draft project sets no INTERCONNECT_ADAPTER;
+    the routed source, given the same flags, writes the same bytes."""
+    assert_count_floor()
+    source = RoutedSource(str(stage(tmp_path / "staged")), str(CHIPLET), str(IO_PADS),
+                          name=oracle.BOARD_NAME, interposer_adapter="intm4tm2",
+                          interconnect_adapter="ihp_cupillar")
+    source.preflight(manifest_snapshot())
+    path = tmp_path / oracle.CHIPLET
+    assert source.write_chiplet(str(path), interconnect_manifest=manifest_snapshot(),
+                                export_report=None)
+    assert_same_bytes(oracle.CHIPLET, oracle.normalise(path.read_bytes(), INPUTS),
+                      oracle_bytes(oracle.CHIPLET))
 
 
 @needs_manifest
