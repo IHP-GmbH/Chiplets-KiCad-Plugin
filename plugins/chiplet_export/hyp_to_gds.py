@@ -222,6 +222,11 @@ def chiplet_top_level_key_parity_error(chiplet_path: str) -> Optional[str]:
 # its own and the merged copper is unaffected.
 MANUFACTURING_GRID_NM = 5
 
+#: The routed path's line for an io pad the grid snap moved. Draft wording,
+#: pending review; this is the one place it is written.
+SNAPPED_PAD_LINE = ("  Snapped pad {ref} to the {grid} dbu manufacturing grid: "
+                    "({was[0]}, {was[1]}) -> ({now[0]}, {now[1]}) dbu")
+
 
 class SealRingRefused(Exception):
     """The seal ring was asked for and cannot be drawn, or cannot be kept.
@@ -3564,9 +3569,9 @@ class GDSGenerator:
                 was = tuple(int(round(v / dbu)) for v in raw)
                 now = (int(round(x / dbu)), int(round(y / dbu)))
                 if was != now:
-                    print(f"  Snapped pad {p.get('ref', '?')} to the "
-                          f"{self.grid_dbu} dbu manufacturing grid: "
-                          f"({was[0]}, {was[1]}) -> ({now[0]}, {now[1]}) dbu")
+                    print(SNAPPED_PAD_LINE.format(ref=p.get('ref', '?'),
+                                                  grid=self.grid_dbu,
+                                                  was=was, now=now))
             p['x_um'] = x
             p['y_um'] = y
             group_cells[io_class].insert(

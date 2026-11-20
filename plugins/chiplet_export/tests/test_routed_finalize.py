@@ -202,13 +202,18 @@ def test_a_pad_one_grid_step_inside_passes_the_guard_and_changes_the_canon(tmp_p
     assert _canon(layout / gds) != _canon(layout_moved / gds)
 
 
+def _snap_line(line):
+    """Whether ``line`` is a snapped-pad line, by the template's fixed head."""
+    return line.startswith(_h.SNAPPED_PAD_LINE.split("{", 1)[0])
+
+
 def test_a_pad_off_the_grid_is_snapped_and_the_snap_is_named(tmp_path, capsys):
     """The routed path snaps an off-grid pad as the board path does (one
     add_io_pads for both), and says so: one line per moved pad, its ref and
     both positions in dbu. An on-grid run prints no such line."""
     ok, _layout = _run(tmp_path / "as-written")
     assert ok is True
-    assert "Snapped pad" not in capsys.readouterr().out
+    assert not any(_snap_line(line) for line in capsys.readouterr().out.splitlines())
 
     def nudge(data):
         data["io_pads"][0]["x_um"] += 0.001
@@ -216,10 +221,11 @@ def test_a_pad_off_the_grid_is_snapped_and_the_snap_is_named(tmp_path, capsys):
     moved.mkdir()
     ok_moved, _layout = _run(moved, io_pads=_io_pads(moved, nudge))
     assert ok_moved is True
-    snapped = [line.strip() for line in capsys.readouterr().out.splitlines()
-               if "Snapped pad" in line]
-    assert snapped == ["Snapped pad J_U1_ext[0] to the 5 dbu manufacturing grid: "
-                       "(140001, 625000) -> (140000, 625000) dbu"]
+    expected = _h.SNAPPED_PAD_LINE.format(ref="J_U1_ext[0]", grid=5,
+                                          was=(140001, 625000), now=(140000, 625000))
+    lines = capsys.readouterr().out.splitlines()
+    assert [line for line in lines if line == expected] == [expected]
+    assert sum(_snap_line(line) for line in lines) == 1
 
 
 def test_the_board_path_does_not_name_its_snaps(tmp_path, capsys):
@@ -241,7 +247,7 @@ def test_the_board_path_does_not_name_its_snaps(tmp_path, capsys):
     captured = capsys.readouterr()
     assert ok is True, captured.err
     assert "Placed 6 wire_bond pads" in captured.out
-    assert "Snapped pad" not in captured.out
+    assert not any(_snap_line(line) for line in captured.out.splitlines())
 
 
 def _intermediate_chiplet(tmp_path):
