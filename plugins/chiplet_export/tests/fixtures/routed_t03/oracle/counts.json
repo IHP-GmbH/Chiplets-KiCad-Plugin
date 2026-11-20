@@ -1,0 +1,10 @@
+{
+  "cmim_devices": 0,
+  "cmim_skipped": [],
+  "io_pads": 6,
+  "nofill_regions": 0,
+  "pin_lists": [
+    "U1",
+    "U2"
+  ]
+}

@@ -29,14 +29,29 @@ def _loaded_by_pcbnew():
     return False
 
 
-try:
-    from .chiplet_export_action import ChipletExportPlugin
-except (ImportError, AttributeError):
-    # pcbnew is not importable, or the host has a stub pcbnew without
-    # ActionPlugin (the SWIG class is only exposed inside a running
-    # pcbnew process). Submodules that do not depend on pcbnew remain
-    # usable for tests and headless tooling.
-    ChipletExportPlugin = None
-else:
-    if _loaded_by_pcbnew():
+def _import_action():
+    """The action class, or None where pcbnew is not importable, or is a stub
+    without ActionPlugin (the SWIG class is only exposed inside a running
+    pcbnew process). Submodules that do not depend on pcbnew remain usable
+    for tests and headless tooling."""
+    try:
+        from .chiplet_export_action import ChipletExportPlugin
+    except (ImportError, AttributeError):
+        return None
+    return ChipletExportPlugin
+
+
+if _loaded_by_pcbnew():
+    ChipletExportPlugin = _import_action()
+    if ChipletExportPlugin is not None:
         ChipletExportPlugin().register()
+else:
+    # Anywhere else the action, and with it pcbnew, is imported only when the
+    # attribute is read (PEP 562). Importing a submodule such as
+    # chiplet_export.routed must not load pcbnew where it is installed.
+    def __getattr__(name):
+        if name == "ChipletExportPlugin":
+            value = _import_action()
+            globals()[name] = value
+            return value
+        raise AttributeError("module %r has no attribute %r" % (__name__, name))

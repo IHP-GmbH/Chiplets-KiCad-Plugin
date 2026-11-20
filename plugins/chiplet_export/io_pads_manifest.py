@@ -46,8 +46,11 @@ class IoPadsRefused(Exception):
 
 
 def read(path: str, *,
-         on_warn: Optional[Callable[[str], None]] = None) -> List[Dict]:
+         on_warn: Optional[Callable[[str], None]] = None,
+         frame: str = FRAME) -> List[Dict]:
     """The pad entries of the manifest at ``path``; IoPadsRefused otherwise.
+
+    ``frame`` is the one frame the caller reads; hyp_to_gds reads FRAME.
 
     The version goes through the vendored ``chiplet_format_io``'s shared
     version policy: a higher minor of major 1 is read with a note to
@@ -81,10 +84,11 @@ def read(path: str, *,
         # A newer minor is accepted by the policy; under -W error its stdlib
         # warning is raised instead. The note already went to on_warn.
         pass
-    if data.get("frame") != FRAME:
+    if data.get("frame") != frame:
         raise IoPadsRefused(
-            "%s is in frame %r; hyp_to_gds reads only %r and never converts"
-            % (path, data.get("frame"), FRAME))
+            "%s is in frame %r; %s reads only %r and never converts"
+            % (path, data.get("frame"),
+               "hyp_to_gds" if frame == FRAME else "this reader", frame))
     pads = data.get("io_pads")
     if not isinstance(pads, list):
         raise IoPadsRefused("%s has no io_pads list" % path)
