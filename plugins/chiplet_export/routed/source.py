@@ -101,7 +101,7 @@ def stack_layer_name(stack, token):
     else:
         inner = _INNER.match(token or "")
         if inner is None:
-            raise RoutedRefused("no copper layer %r in the routed stack" % token)
+            raise RoutedRefused("no metal layer for %r in the routed stack" % token)
         index = len(metals) - 1 - int(inner.group(1))
     if not 0 <= index < len(metals) or not metals[index]:
         raise RoutedRefused("the routed stack of %d metals has no %s"

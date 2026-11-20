@@ -155,20 +155,20 @@ The Hyperlynx `.hyp` that drives the pipeline is always written to the
 output directory (next to the `.chiplet`), so other tools can consume the
 exact netlist the layout was generated from.
 
-Each free track end is square in the GDS. The copper runs w/2 past the
+Each free track end is square in the GDS. The wire runs w/2 past the
 end along the track, which is the rectangle a PDN stripe reserves. An end
 that another track of its net runs through, as wide or wider, is drawn
 flush instead: the board's round cap there lies inside that track. The
 board draws a free end as a round cap, so at a free end with nothing under
-it the GDS holds a little more copper than KiCad shows: at most
+it the GDS holds a little more metal than KiCad shows: at most
 (sqrt(2) - 1) * w/2 at the cap's corners, 0.34 um on a 1.64 um track and
 4.1 um on a 20 um stripe. A clearance KiCad passes can still fail the
 KLayout deck by that margin, never the other way round, and the deck on
 the GDS is the judge. Where two nets' tracks touch on one layer, which on
 a board that passes its own clearance check means a square end, the export
-refuses and names each place, since merged copper is a short no spacing
+refuses and names each place, since merged metal is a short no spacing
 rule reports; widen that clearance. An end that reaches another net's pad,
-via or die copper is not checked here: the export runs no LVS, so that is
+via or die metal is not checked here: the export runs no LVS, so that is
 left to an LVS on the GDS. A bend keeps its mitred corner.
 
 Machine-readable sidecars land next to each generated GDS:
