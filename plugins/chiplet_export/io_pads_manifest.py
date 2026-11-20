@@ -28,6 +28,14 @@ SCHEMA = "chiplet-io-pad-manifest"
 VERSION = "1.0.0"
 FRAME = "board_absolute_ynegated_um"
 
+#: The canonical frame (interposer-pnr's projector): the one frame
+#: ``hyp_to_gds.py --routed-geometry`` reads, where the composed interposer's
+#: bbox lower-left is held at the origin, so the pads pass through as written.
+CANONICAL_FRAME = "gds_bbox_corner_um"
+
+#: Who reads which frame, for the refusal message.
+_READERS = {FRAME: "hyp_to_gds", CANONICAL_FRAME: "hyp_to_gds --routed-geometry"}
+
 #: The version this reader accepts, for chiplet_format_io's version policy.
 SUPPORTED_VERSION = "1.0"
 
@@ -50,7 +58,8 @@ def read(path: str, *,
          frame: str = FRAME) -> List[Dict]:
     """The pad entries of the manifest at ``path``; IoPadsRefused otherwise.
 
-    ``frame`` is the one frame the caller reads; hyp_to_gds reads FRAME.
+    ``frame`` is the one frame the caller reads: FRAME on the board path,
+    CANONICAL_FRAME on the routed path.
 
     The version goes through the vendored ``chiplet_format_io``'s shared
     version policy: a higher minor of major 1 is read with a note to
@@ -87,8 +96,8 @@ def read(path: str, *,
     if data.get("frame") != frame:
         raise IoPadsRefused(
             "%s is in frame %r; %s reads only %r and never converts"
-            % (path, data.get("frame"),
-               "hyp_to_gds" if frame == FRAME else "this reader", frame))
+            % (path, data.get("frame"), _READERS.get(frame, "this reader"),
+               frame))
     pads = data.get("io_pads")
     if not isinstance(pads, list):
         raise IoPadsRefused("%s has no io_pads list" % path)

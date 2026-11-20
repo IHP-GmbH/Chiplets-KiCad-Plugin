@@ -1,5 +1,5 @@
-usage: hyp_to_gds.py [-h] [-o OUTPUT] [-l LYP] [-c CELL]
-                     [--tech-json JSON_FILE] [--with-chiplets]
+usage: hyp_to_gds.py [-h] [--routed-geometry DOC] [-o OUTPUT] [-l LYP]
+                     [-c CELL] [--tech-json JSON_FILE] [--with-chiplets]
                      [--complete-output PATH]
                      [--update-chiplet-file CHIPLET_FILE]
                      [--pad-locations REF=FILE[,REF=FILE,...]]
@@ -14,15 +14,23 @@ usage: hyp_to_gds.py [-h] [-o OUTPUT] [-l LYP] [-c CELL]
                      [--fill-mode {single-pass,closure}] [--seal-ring]
                      [--annotate-boundaries] [--grid-nm GRID_NM]
                      [--boundary-viz-layer LAYER/DATATYPE]
-                     hyp_file
+                     [hyp_file]
 
 Convert KiCad HYP files to GDS format
 
 positional arguments:
-  hyp_file              Input HYP file path
+  hyp_file              Input HYP file path (or --routed-geometry instead)
 
 options:
   -h, --help            show this help message and exit
+  --routed-geometry DOC
+                        Read interposer-pnr's routed-geometry.json instead of
+                        a .hyp: the same drawing, from the document's stack,
+                        nets, vias and devices. The die layouts and pin lists
+                        it binds are checked against their sha256, and its via
+                        arrays against the via table (--tech-json, else the
+                        built-in one); a mismatch is refused before anything
+                        is written
   -o OUTPUT, --output OUTPUT
                         Output GDS file path (default: <input>.gds)
   -l LYP, --lyp LYP     KLayout LYP layer properties file (default: the
@@ -90,15 +98,21 @@ options:
                         it: external I/O pad locations in planner net names
                         (never inverted here). Its schema, version and frame
                         are required: schema chiplet-io-pad-manifest, version
-                        1.x, frame board_absolute_ynegated_um. A file without
-                        them (a bare pad list), another frame
-                        (gds_bbox_corner_um is never converted), another major
-                        version, or an unreadable file exits 1 before anything
-                        is written. Each entry is rendered in the interposer
-                        GDS based on its io_class field (wire_bond now;
-                        flipped_bump and tsv_bump reserved). When combined
-                        with --update-chiplet-file, the placed pads are also
-                        injected under the interposer component.
+                        1.x, and frame board_absolute_ynegated_um with a HYP
+                        file, gds_bbox_corner_um with --routed-geometry
+                        (interposer-pnr's projector). A file without them (a
+                        bare pad list), the other frame (never converted),
+                        another major version, or an unreadable file exits 1
+                        before anything is written. With --routed-geometry the
+                        pads and die origins reach the .chiplet unshifted, so
+                        the composed interposer's bbox lower-left must be (0,
+                        0) exactly, before the write and after any fill;
+                        otherwise the run exits 1 [interposer-bbox-off-origin]
+                        and leaves no GDS or sidecar. Each entry is rendered
+                        in the interposer GDS based on its io_class field
+                        (wire_bond now; flipped_bump and tsv_bump reserved).
+                        When combined with --update-chiplet-file, the placed
+                        pads are also injected under the interposer component.
   --cmim-devices JSON_FILE
                         Sidecar JSON with cap_cmim footprint parameters for
                         IntM4TM2 PCell placement.

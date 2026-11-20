@@ -23,7 +23,6 @@ import os
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from .. import io_pads_manifest as _io_pads_manifest
 from ..pad_domains import PadDomainError, archive_die_dimensions, archive_pin_list
 from ..writers.connection_stacks import (
     emit_connection_stacks_block, validate_adapter_id, validate_interconnect_ids,
@@ -34,7 +33,7 @@ from ..writers.intermediate_chiplet import (
     emit_intermediate_chiplet,
 )
 from ..writers._units import _size_um, parse_thickness_um
-from .document import RoutedRefused, check_chiplet_binding, read_document
+from .document import RoutedRefused
 
 #: The stroke interposer-pnr draws the board outline with (kicad_export.py,
 #: the Edge.Cuts gr_rect). The board path's frame is the outline's bounding
@@ -46,6 +45,19 @@ BOARD_EDGE_STROKE_UM = 100.0
 #: The frame of the routed io_pads manifest. Its origin is the document's
 #: (the outline's lower-left corner, which check_document holds at 0, 0).
 IO_PADS_FRAME = "gds_bbox_corner_um"
+
+
+def read_inputs(document_path, chiplet_path, io_pads_path, *, on_warn=None):
+    """(document, chiplet, io_pads), read in this process by the vendored
+    reader (routed_inputs.read_inputs), so only where PyYAML is; RoutedRefused
+    otherwise."""
+    from .. import routed_inputs as _routed_inputs
+    try:
+        return _routed_inputs.read_inputs(document_path, chiplet_path, io_pads_path,
+                                          io_pads_frame=IO_PADS_FRAME,
+                                          on_warn=on_warn)
+    except _routed_inputs.InputsRefused as exc:
+        raise RoutedRefused(str(exc)) from exc
 
 
 def _iu(value_um):
@@ -105,7 +117,7 @@ def _check_carrier(pad, index):
     where = "io_pads[%d]" % index
     if not isinstance(pad, dict):
         raise RoutedRefused("%s must be an object" % where)
-    for key in ("ref", "io_class", "net"):
+    for key in ("ref", "io_class", "net", "layer"):
         if not isinstance(pad.get(key), str) or not pad[key]:
             raise RoutedRefused("%s has no %s" % (where, key))
     for key in ("x_um", "y_um", "size_x_um", "size_y_um"):
@@ -119,8 +131,8 @@ def _check_carrier(pad, index):
         raise RoutedRefused("io_pad %s has io_class %r, not one of %s"
                             % (pad["ref"], pad["io_class"], ", ".join(IO_CLASSES)))
     # The emitter writes every carrier on IO_PAD_LAYER; another layer would be
-    # written as that one without a word.
-    if pad.get("layer", IO_PAD_LAYER) != IO_PAD_LAYER:
+    # written as that one without a word. The worker reads the layer as given.
+    if pad["layer"] != IO_PAD_LAYER:
         raise RoutedRefused("io_pad %s is on %r; the .chiplet carries io_pads on %s"
                             % (pad["ref"], pad["layer"], IO_PAD_LAYER))
 
@@ -261,6 +273,57 @@ class RoutedIntermediates:
     cmim_devices: int = 0
 
 
+@dataclass(frozen=True)
+class PreparedIntermediates:
+    """Everything write_intermediates writes, computed and checked, nothing
+    written yet: the documents as read, and the intermediates' contents."""
+    document: dict
+    chiplet: dict
+    io_pads: list
+    facts: object
+    stacks: str
+    pin_lists: Dict[str, dict]
+    die_connections: Dict[str, str]
+    die_thicknesses: Dict[str, float]
+
+
+def prepare_intermediates(document, chiplet, io_pads, *, board_name,
+                          interconnect_manifest=None,
+                          interposer_adapter=DEFAULT_INTERPOSER_ADAPTER,
+                          interconnect_adapter="", interposer_lyp="",
+                          method_specs=None):
+    """Compute the intermediates from the three inputs as read_inputs gives
+    them (the document checked and bound to the .chiplet).
+
+    Refuses (RoutedRefused) everything write_intermediates refuses about the
+    inputs once read: a device that is no .chiplet component or whose archive
+    does not decode, a stack or net the intermediates cannot carry. Writes
+    nothing.
+    """
+    facts = facts_from_documents(
+        document, chiplet, io_pads, board_name=board_name,
+        interconnect_manifest=interconnect_manifest,
+        interposer_adapter=interposer_adapter,
+        interconnect_adapter=interconnect_adapter, interposer_lyp=interposer_lyp)
+    return PreparedIntermediates(
+        document=document, chiplet=chiplet, io_pads=io_pads, facts=facts,
+        stacks=emit_connection_stacks_block(interconnect_manifest),
+        pin_lists=die_pin_lists(document, chiplet, method_specs),
+        die_connections=die_connections(document, chiplet),
+        die_thicknesses=die_thicknesses(document, chiplet))
+
+
+def write_pin_lists(pin_lists, pins_dir):
+    """One ``<ref>_pins.json`` per entry into ``pins_dir``; {ref: path}."""
+    paths = {}
+    for ref, sidecar in pin_lists.items():
+        path = os.path.join(pins_dir, "%s_pins.json" % ref)
+        with open(path, "w") as f:
+            json.dump(sidecar, f, indent=2)
+        paths[ref] = path
+    return paths
+
+
 def write_intermediates(document_path, chiplet_path, io_pads_path, *,
                         chiplet_output, pins_dir, board_name,
                         interconnect_manifest=None,
@@ -270,49 +333,28 @@ def write_intermediates(document_path, chiplet_path, io_pads_path, *,
     """Write the intermediate .chiplet to ``chiplet_output`` and one
     ``<ref>_pins.json`` per device into ``pins_dir``.
 
-    Refuses (RoutedRefused), before any file is written: a document this
-    reader does not read, a .chiplet other than the one it binds, a device
-    that is no .chiplet component or whose archive does not decode, an io_pads
-    manifest in another frame, a missing ``pins_dir``, and any CMIM sidecar.
+    Reads the inputs in this process (read_inputs), so only where PyYAML is.
+    Refuses (RoutedRefused), before any file is written: what read_inputs and
+    prepare_intermediates refuse, a missing ``pins_dir``, and any CMIM
+    sidecar.
     """
     if cmim_devices_json:
         raise RoutedRefused(
             "a CMIM sidecar (%s) was given, but the routed path draws no "
             "integrated capacitor; it is computed on the board path only"
             % cmim_devices_json)
-    document = read_document(document_path, on_warn=on_warn)
-    check_chiplet_binding(document, chiplet_path)
-    from .. import vendored as _vendored
-    cfio = _vendored.chiplet_format_io()
-    try:
-        chiplet = cfio.load(chiplet_path)
-    except (OSError, cfio.ChipletFormatError) as exc:
-        raise RoutedRefused("cannot read %s: %s" % (chiplet_path, exc)) from exc
-    try:
-        io_pads = _io_pads_manifest.read(io_pads_path, on_warn=on_warn,
-                                         frame=IO_PADS_FRAME)
-    except _io_pads_manifest.IoPadsRefused as exc:
-        raise RoutedRefused(str(exc)) from exc
-
-    facts = facts_from_documents(
-        document, chiplet, io_pads, board_name=board_name,
-        interconnect_manifest=interconnect_manifest,
+    prepared = prepare_intermediates(
+        *read_inputs(document_path, chiplet_path, io_pads_path, on_warn=on_warn),
+        board_name=board_name, interconnect_manifest=interconnect_manifest,
         interposer_adapter=interposer_adapter,
-        interconnect_adapter=interconnect_adapter, interposer_lyp=interposer_lyp)
-    pin_lists = die_pin_lists(document, chiplet, method_specs)
-    connections = die_connections(document, chiplet)
-    thicknesses = die_thicknesses(document, chiplet)
-    stacks = emit_connection_stacks_block(interconnect_manifest)
+        interconnect_adapter=interconnect_adapter, interposer_lyp=interposer_lyp,
+        method_specs=method_specs)
     if not os.path.isdir(pins_dir):
         raise RoutedRefused("the pin list folder %s does not exist" % pins_dir)
 
-    emit_intermediate_chiplet(facts, chiplet_output, stacks)
-    paths = {}
-    for ref, sidecar in pin_lists.items():
-        path = os.path.join(pins_dir, "%s_pins.json" % ref)
-        with open(path, "w") as f:
-            json.dump(sidecar, f, indent=2)
-        paths[ref] = path
+    emit_intermediate_chiplet(prepared.facts, chiplet_output, prepared.stacks)
+    paths = write_pin_lists(prepared.pin_lists, pins_dir)
     return RoutedIntermediates(
-        chiplet=chiplet_output, pin_lists=paths, die_connections=connections,
-        die_thicknesses=thicknesses, io_pads=len(io_pads))
+        chiplet=chiplet_output, pin_lists=paths,
+        die_connections=prepared.die_connections,
+        die_thicknesses=prepared.die_thicknesses, io_pads=len(prepared.io_pads))

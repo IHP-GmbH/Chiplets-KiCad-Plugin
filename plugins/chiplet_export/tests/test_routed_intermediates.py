@@ -8,6 +8,7 @@ comparison of the facts themselves needs pcbnew: test_routed_board_parity.py.
 """
 
 import copy
+import hashlib
 import importlib.util
 import json
 import shutil
@@ -28,6 +29,9 @@ from chiplet_export.writers.connection_stacks import (  # noqa: E402
     InterconnectManifestSnapshot, _manifest_reader, emit_connection_stacks_block,
 )
 from chiplet_export import io_pads_manifest, vendored  # noqa: E402
+from chiplet_export.routed.source import RoutedSource  # noqa: E402
+
+from .routed_t03_stage import stage  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "routed_t03"
 INPUTS = FIXTURE / "inputs"
@@ -45,7 +49,6 @@ def _load_module(name, path):
 
 
 oracle = _load_module("routed_t03_make_oracle", FIXTURE / "make_oracle.py")
-standin = _load_module("routed_t03_make_standin", FIXTURE / "make_standin.py")
 
 # The routed path is held against the interconnect manifest, found as the
 # export finds it (env var or sibling checkout). On a lone checkout, as on a
@@ -158,6 +161,24 @@ def test_the_routed_path_writes_the_board_paths_bytes(tmp_path):
 
 
 @needs_manifest
+def test_the_routed_source_writes_the_board_paths_chiplet_under_the_flows_flags(tmp_path):
+    """The flow gives both paths --interconnect-adapter. On the board path the
+    flag steers the assembly DRC and the intermediate .chiplet gains no
+    interconnect block, since the draft project sets no INTERCONNECT_ADAPTER;
+    the routed source, given the same flags, writes the same bytes."""
+    assert_count_floor()
+    source = RoutedSource(str(stage(tmp_path / "staged")), str(CHIPLET), str(IO_PADS),
+                          name=oracle.BOARD_NAME, interposer_adapter="intm4tm2",
+                          interconnect_adapter="ihp_cupillar")
+    source.preflight(manifest_snapshot(), worker_python=lambda: sys.executable)
+    path = tmp_path / oracle.CHIPLET
+    assert source.write_chiplet(str(path), interconnect_manifest=manifest_snapshot(),
+                                export_report=None)
+    assert_same_bytes(oracle.CHIPLET, oracle.normalise(path.read_bytes(), INPUTS),
+                      oracle_bytes(oracle.CHIPLET))
+
+
+@needs_manifest
 def test_the_pure_functions_return_what_write_intermediates_wrote(tmp_path):
     document, chiplet, _io_pads = documents()
     _out, result = run_routed(tmp_path)
@@ -179,8 +200,23 @@ def test_the_routed_io_pads_are_the_board_paths(tmp_path):
             assert abs(r[key] - b[key]) <= 0.001, (r["ref"], key)
 
 
-def test_the_stand_in_document_rebuilds():
-    assert DOCUMENT.read_bytes() == standin.build()
+def test_the_document_is_the_writers_and_binds_these_inputs():
+    """The routed geometry is interposer-pnr's, written from this run: it
+    binds this .chiplet and these pin lists, and names each layout by the
+    board's GDS_FILE text. No checkout path is left in it."""
+    text = DOCUMENT.read_text()
+    assert "/home/" not in text and "/tmp/" not in text
+    document = json.loads(text)
+    assert document["producer"]["tool"] == "interposer-pnr"
+    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    assert document["inputs"]["chiplet"]["sha256"] == digest(CHIPLET)
+    pins = {"U1": "PAD_FRAME_L", "U2": "PAD_FRAME_R"}
+    board = (INPUTS / "cf_typical_03_from_schematic.draft.kicad_pcb").read_text()
+    for device in document["devices"]:
+        die = pins[device["ref"]]
+        assert (document["inputs"]["pins"][device["ref"]]["sha256"]
+                == digest(INPUTS / "pins" / ("%s.pins.json" % die)))
+        assert '(property "GDS_FILE" "%s"' % device["layout"]["path"] in board
 
 
 def test_a_thickness_goes_through_the_boards_text():
@@ -311,7 +347,8 @@ def _io_pads_variant(tmp_path, edit):
     (lambda pads: pads[0].update(io_class="bogus"), "io_class 'bogus'"),
     (lambda pads: pads[0].update(layer="Metal1"), "is on 'Metal1'"),
     (lambda pads: pads[1].update(ref=pads[0]["ref"]), "is listed twice"),
-], ids=["io-class", "layer", "duplicate-ref"])
+    (lambda pads: pads[0].pop("layer"), r"io_pads\[0\] has no layer"),
+], ids=["io-class", "layer", "duplicate-ref", "no-layer"])
 def test_refuses_a_carrier_the_board_path_refuses(tmp_path, edit, match):
     _assert_refused_unwritten(tmp_path, match, io_pads=_io_pads_variant(tmp_path, edit))
 

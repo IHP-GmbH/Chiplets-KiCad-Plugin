@@ -694,6 +694,17 @@ Re-check the dialog status line. Exit codes other than 0 indicate
 `hyp_to_gds.py` failed; the live log preserves stderr under a `[stderr]`
 prefix.
 
+**`[interposer-bbox-off-origin]` on a `--routed-geometry` run**
+
+The routed geometry and its io pad manifest (`gds_bbox_corner_um`) put the
+origin at the outline's lower-left, and the worker writes their pads and die
+origins into the `.chiplet` without a shift. That holds only while nothing
+composed lies left of or below the outline, so the worker checks that the
+interposer's bbox lower-left is exactly (0, 0) in database units, before the
+GDS is written and again after the metal fill. The message names both
+lower-left corners and the layer and cell of the shape lying farthest out;
+move that shape inside the outline. The run leaves no GDS or sidecar.
+
 **Plugin not visible under External Plugins**
 
 KiCad scans `~/.config/kicad/9.0/scripting/plugins/` at startup. Verify
@@ -752,6 +763,12 @@ plugins/chiplet_export/
 │                              (worker side, --die-layouts)
 ├── technology_overlay.py      Technology ids from the System .chiplet
 │                              (worker side, --system-chiplet)
+├── hyp_model.py               The board model both worker parsers fill
+│                              (worker side)
+├── routed_geometry_parser.py  The routed geometry read into that model
+│                              (worker side, --routed-geometry)
+├── routed_inputs.py           The routed path's three inputs, read under
+│                              the worker interpreter (--routed-geometry)
 ├── tests/                     pytest suite (see tests/README.md)
 └── requirements.txt           Worker venv deps
 

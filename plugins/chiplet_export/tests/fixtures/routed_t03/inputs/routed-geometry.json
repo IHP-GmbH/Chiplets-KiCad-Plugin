@@ -1,41 +1,16 @@
 {
-  "schema": "routed-geometry",
-  "version": "1.0",
-  "frame": "interposer_local_y_up_um",
-  "outline": [
-    [
-      0.0,
-      0.0
-    ],
-    [
-      2600.0,
-      0.0
-    ],
-    [
-      2600.0,
-      1400.0
-    ],
-    [
-      0.0,
-      1400.0
-    ]
-  ],
-  "interposer": {
-    "body_thickness_um": 260.81
-  },
+  "dbu_um": 0.001,
   "devices": [
     {
-      "ref": "U1",
       "layout": {
         "path": "../../../../dies/PAD_FRAME_L/layout.gds",
         "sha256": "36aa050b9898a580b7e18cd65d73aaa890e5ef951d5d09b1fb6da313e5863dd4"
       },
+      "mirrored": true,
       "origin": [
         1180.0,
         380.0
       ],
-      "rotation_deg": 0.0,
-      "mirrored": true,
       "pad_domains": {
         "attachments": [
           {
@@ -294,20 +269,20 @@
           "tm2_enclosure_um": 7.5
         },
         "version": 1
-      }
+      },
+      "ref": "U1",
+      "rotation_deg": 0.0
     },
     {
-      "ref": "U2",
       "layout": {
         "path": "../../../../dies/PAD_FRAME_R/layout.gds",
         "sha256": "3ba2845013c5475411298a6016db49c6db4c663b0fe25229747e8e44bfb8d3d9"
       },
+      "mirrored": true,
       "origin": [
         2182.0,
         380.0
       ],
-      "rotation_deg": 0.0,
-      "mirrored": true,
       "pad_domains": {
         "attachments": [
           {
@@ -566,31 +541,1134 @@
           "tm2_enclosure_um": 7.5
         },
         "version": 1
-      }
+      },
+      "ref": "U2",
+      "rotation_deg": 0.0
     }
   ],
+  "frame": "interposer_local_y_up_um",
   "inputs": {
+    "bumps": {
+      "path": "bumps.json",
+      "sha256": "f2948b182e59572db045b7c67f1f65c46726245ca417ec9fac354f85ad158ff4"
+    },
     "chiplet": {
-      "path": "design.chiplet",
+      "path": "../design.chiplet",
       "sha256": "2ed1382f6452d556bb21c304d6fe3f9fad8cc1effd535c1276c4e4711f61da03"
+    },
+    "form": {
+      "path": "<RUN>/system.connectivity.json",
+      "sha256": "46b1cbe24e4f367093291d95354fcef2d01d5069b3426d834ad4f4c47af5b3f4"
+    },
+    "physical_stack": {
+      "sha256": "46a5879540ece79cec3267975a29af51d617e81fb77e358dfd5af67452d24117"
     },
     "pins": {
       "U1": {
-        "path": "pins/PAD_FRAME_L.pins.json",
+        "path": "<RUN>/dies/PAD_FRAME_L/pins.json",
         "sha256": "34d940dba99bc4a3c6ed0ff4f1a4fe01900f611021576926c6c859f597c192ed"
       },
       "U2": {
-        "path": "pins/PAD_FRAME_R.pins.json",
+        "path": "<RUN>/dies/PAD_FRAME_R/pins.json",
         "sha256": "645c1740a0da1735ee1c65e9da06e4670968601e91b3c71b81ca11a899a8b838"
       }
+    },
+    "routing_tech": {
+      "sha256": "998ac0cdd5a8127fce1f715ae7bf33d30af154efa67a89276c789a16ab3085cf"
+    },
+    "tech_package": {
+      "sha256": "1530f5a9a097180b365052b46a6618034909294557ad82b0b55a9ac974e58459"
+    },
+    "traces": {
+      "path": "traces.json",
+      "sha256": "772ea828b8cc7a07584867395e21638c07f7f6db363f655640fba6c31c24dfed"
     }
   },
-  "producer": {
-    "tool": "make_standin.py",
-    "version": "stand-in",
-    "from": {
-      "export_report": "c78f5860605b2bce39eaf222c5344c3382113909963075044bf782230c037d58",
-      "board": "3e6e7d1d17c1a30f753c955041432d4c447c1a00bfc43291c270ed3b1ca29d90"
+  "interposer": {
+    "body_thickness_um": 260.81
+  },
+  "nets": [
+    {
+      "board_name": "Net-(J1-Pad1)",
+      "drawn": [
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 176.0,
+          "y": 675.6800000000001
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 444.0,
+          "y": 669.12
+        }
+      ],
+      "name": "U1_ext[0]",
+      "segments": [
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 176.0,
+          "x1": 176.0,
+          "y0": 662.5600000000001,
+          "y1": 675.6800000000001
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 344.40000000000003,
+          "x1": 344.40000000000003,
+          "y0": 669.12,
+          "y1": 675.6800000000001
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 176.0,
+          "x1": 344.40000000000003,
+          "y0": 675.6800000000001,
+          "y1": 675.6800000000001
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 344.40000000000003,
+          "x1": 444.0,
+          "y0": 669.12,
+          "y1": 669.12
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 444.0,
+          "x1": 444.0,
+          "y0": 629.76,
+          "y1": 669.12
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 444.0,
+          "x1": 461.0,
+          "y0": 629.76,
+          "y1": 629.76
+        }
+      ],
+      "vias": [
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 176.0,
+          "y": 675.6800000000001
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 444.0,
+          "y": 669.12
+        }
+      ]
+    },
+    {
+      "board_name": "Net-(J2-Pad1)",
+      "drawn": [
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 176.0,
+          "y": 826.5600000000001
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 444.0,
+          "y": 820.0
+        }
+      ],
+      "name": "U1_ext[1]",
+      "segments": [
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 176.0,
+          "x1": 176.0,
+          "y0": 812.5600000000001,
+          "y1": 826.5600000000001
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 344.40000000000003,
+          "x1": 344.40000000000003,
+          "y0": 820.0,
+          "y1": 826.5600000000001
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 176.0,
+          "x1": 344.40000000000003,
+          "y0": 826.5600000000001,
+          "y1": 826.5600000000001
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 344.40000000000003,
+          "x1": 444.0,
+          "y0": 820.0,
+          "y1": 820.0
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 444.0,
+          "x1": 444.0,
+          "y0": 729.76,
+          "y1": 820.0
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 444.0,
+          "x1": 461.0,
+          "y0": 729.76,
+          "y1": 729.76
+        }
+      ],
+      "vias": [
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 176.0,
+          "y": 826.5600000000001
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 444.0,
+          "y": 820.0
+        }
+      ]
+    },
+    {
+      "board_name": "Net-(J3-Pad1)",
+      "drawn": [
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 2112.0,
+          "y": 669.12
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 2424.0,
+          "y": 675.6800000000001
+        }
+      ],
+      "name": "U2_ext[0]",
+      "segments": [
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 2100.0,
+          "x1": 2112.0,
+          "y0": 629.76,
+          "y1": 629.76
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 2112.0,
+          "x1": 2112.0,
+          "y0": 629.76,
+          "y1": 669.12
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 2112.0,
+          "x1": 2410.8,
+          "y0": 669.12,
+          "y1": 669.12
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 2410.8,
+          "x1": 2410.8,
+          "y0": 669.12,
+          "y1": 675.6800000000001
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 2410.8,
+          "x1": 2424.0,
+          "y0": 675.6800000000001,
+          "y1": 675.6800000000001
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 2424.0,
+          "x1": 2424.0,
+          "y0": 662.5600000000001,
+          "y1": 675.6800000000001
+        }
+      ],
+      "vias": [
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 2112.0,
+          "y": 669.12
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 2424.0,
+          "y": 675.6800000000001
+        }
+      ]
+    },
+    {
+      "board_name": "Net-(J4-Pad1)",
+      "drawn": [
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 2112.0,
+          "y": 820.0
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 2424.0,
+          "y": 826.5600000000001
+        }
+      ],
+      "name": "U2_ext[1]",
+      "segments": [
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 2100.0,
+          "x1": 2112.0,
+          "y0": 729.76,
+          "y1": 729.76
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 2112.0,
+          "x1": 2112.0,
+          "y0": 729.76,
+          "y1": 820.0
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 2112.0,
+          "x1": 2410.8,
+          "y0": 820.0,
+          "y1": 820.0
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 2410.8,
+          "x1": 2410.8,
+          "y0": 820.0,
+          "y1": 826.5600000000001
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 2410.8,
+          "x1": 2424.0,
+          "y0": 826.5600000000001,
+          "y1": 826.5600000000001
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 2424.0,
+          "x1": 2424.0,
+          "y0": 812.5600000000001,
+          "y1": 826.5600000000001
+        }
+      ],
+      "vias": [
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 2112.0,
+          "y": 820.0
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 2424.0,
+          "y": 826.5600000000001
+        }
+      ]
+    },
+    {
+      "board_name": "VDD",
+      "drawn": [
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 808.0,
+          "y": 875.76
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1332.0,
+          "y": 875.76
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1752.0,
+          "y": 875.76
+        }
+      ],
+      "name": "VDD",
+      "net_class": "power",
+      "segments": [
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 804.0,
+          "x1": 808.0,
+          "y0": 875.76,
+          "y1": 875.76
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1752.0,
+          "x1": 1760.0,
+          "y0": 875.76,
+          "y1": 875.76
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 808.0,
+          "x1": 1752.0,
+          "y0": 875.76,
+          "y1": 875.76
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1332.0,
+          "x1": 1332.0,
+          "y0": 875.76,
+          "y1": 1222.1200000000001
+        }
+      ],
+      "vias": [
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 808.0,
+          "y": 875.76
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1332.0,
+          "y": 875.76
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1752.0,
+          "y": 875.76
+        }
+      ]
+    },
+    {
+      "board_name": "VSS",
+      "drawn": [
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 808.0,
+          "y": 455.92
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1280.0,
+          "y": 455.92
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1752.0,
+          "y": 455.92
+        }
+      ],
+      "name": "VSS",
+      "net_class": "ground",
+      "segments": [
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 808.0,
+          "x1": 808.0,
+          "y0": 455.92,
+          "y1": 485.76
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 804.0,
+          "x1": 808.0,
+          "y0": 485.76,
+          "y1": 485.76
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1280.0,
+          "x1": 1280.0,
+          "y0": 177.56,
+          "y1": 455.92
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1752.0,
+          "x1": 1752.0,
+          "y0": 455.92,
+          "y1": 485.76
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1752.0,
+          "x1": 1760.0,
+          "y0": 485.76,
+          "y1": 485.76
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 808.0,
+          "x1": 1752.0,
+          "y0": 455.92,
+          "y1": 455.92
+        }
+      ],
+      "vias": [
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 808.0,
+          "y": 455.92
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1280.0,
+          "y": 455.92
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1752.0,
+          "y": 455.92
+        }
+      ]
+    },
+    {
+      "board_name": "lane0",
+      "drawn": [
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1456.0,
+          "y": 501.84000000000003
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1104.0,
+          "y": 501.84000000000003
+        }
+      ],
+      "name": "lane0",
+      "segments": [
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1456.0,
+          "x1": 1456.0,
+          "y0": 501.84000000000003,
+          "y1": 528.08
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1456.0,
+          "x1": 1464.0,
+          "y0": 528.08,
+          "y1": 528.08
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1104.0,
+          "x1": 1104.0,
+          "y0": 501.84000000000003,
+          "y1": 528.08
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1099.0,
+          "x1": 1104.0,
+          "y0": 528.08,
+          "y1": 528.08
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 1104.0,
+          "x1": 1456.0,
+          "y0": 501.84000000000003,
+          "y1": 501.84000000000003
+        }
+      ],
+      "vias": [
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1456.0,
+          "y": 501.84000000000003
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1104.0,
+          "y": 501.84000000000003
+        }
+      ]
+    },
+    {
+      "board_name": "lane1",
+      "drawn": [
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1456.0,
+          "y": 600.24
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1104.0,
+          "y": 600.24
+        }
+      ],
+      "name": "lane1",
+      "segments": [
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1456.0,
+          "x1": 1456.0,
+          "y0": 600.24,
+          "y1": 628.08
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1456.0,
+          "x1": 1464.0,
+          "y0": 628.08,
+          "y1": 628.08
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1104.0,
+          "x1": 1104.0,
+          "y0": 600.24,
+          "y1": 628.08
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1099.0,
+          "x1": 1104.0,
+          "y0": 628.08,
+          "y1": 628.08
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 1104.0,
+          "x1": 1456.0,
+          "y0": 600.24,
+          "y1": 600.24
+        }
+      ],
+      "vias": [
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1456.0,
+          "y": 600.24
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1104.0,
+          "y": 600.24
+        }
+      ]
+    },
+    {
+      "board_name": "lane2",
+      "drawn": [
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1456.0,
+          "y": 701.92
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1104.0,
+          "y": 701.92
+        }
+      ],
+      "name": "lane2",
+      "segments": [
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1456.0,
+          "x1": 1456.0,
+          "y0": 701.92,
+          "y1": 728.08
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1456.0,
+          "x1": 1464.0,
+          "y0": 728.08,
+          "y1": 728.08
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1104.0,
+          "x1": 1104.0,
+          "y0": 701.92,
+          "y1": 728.08
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1099.0,
+          "x1": 1104.0,
+          "y0": 728.08,
+          "y1": 728.08
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 1104.0,
+          "x1": 1456.0,
+          "y0": 701.92,
+          "y1": 701.92
+        }
+      ],
+      "vias": [
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1456.0,
+          "y": 701.92
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1104.0,
+          "y": 701.92
+        }
+      ]
+    },
+    {
+      "board_name": "lane3",
+      "drawn": [
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1456.0,
+          "y": 800.32
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "cut": 0.9,
+          "enclosure": 0.5,
+          "k": 1,
+          "pad": [
+            1.9,
+            1.9
+          ],
+          "pitch": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1104.0,
+          "y": 800.32
+        }
+      ],
+      "name": "lane3",
+      "segments": [
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1456.0,
+          "x1": 1456.0,
+          "y0": 800.32,
+          "y1": 828.08
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1456.0,
+          "x1": 1464.0,
+          "y0": 828.08,
+          "y1": 828.08
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1104.0,
+          "x1": 1104.0,
+          "y0": 800.32,
+          "y1": 828.08
+        },
+        {
+          "layer": "TopMetal2",
+          "width": 2.0,
+          "x0": 1099.0,
+          "x1": 1104.0,
+          "y0": 828.08,
+          "y1": 828.08
+        },
+        {
+          "layer": "TopMetal1",
+          "width": 1.64,
+          "x0": 1104.0,
+          "x1": 1456.0,
+          "y0": 800.32,
+          "y1": 800.32
+        }
+      ],
+      "vias": [
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1456.0,
+          "y": 800.32
+        },
+        {
+          "bottom_layer": "TopMetal1",
+          "size": null,
+          "top_layer": "TopMetal2",
+          "via": "TopVia2_C",
+          "x": 1104.0,
+          "y": 800.32
+        }
+      ]
     }
-  }
+  ],
+  "outline": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      2600.0,
+      0.0
+    ],
+    [
+      2600.0,
+      1400.0
+    ],
+    [
+      0.0,
+      1400.0
+    ]
+  ],
+  "producer": {
+    "tool": "interposer-pnr",
+    "version": "0.6.0.dev0"
+  },
+  "schema": "routed-geometry",
+  "stack": [
+    {
+      "cut_above": "Via4",
+      "metal": "Metal4"
+    },
+    {
+      "cut_above": "TopVia1",
+      "metal": "Metal5"
+    },
+    {
+      "cut_above": "TopVia2",
+      "metal": "TopMetal1"
+    },
+    {
+      "cut_above": null,
+      "metal": "TopMetal2"
+    }
+  ],
+  "version": "1.0"
 }
