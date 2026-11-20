@@ -256,7 +256,7 @@ def test_the_plugin_refuses_every_variant_the_helper_refuses(helper, tmp_path):
         elif ours != theirs:
             read_otherwise.append(label)
     cfio._reset_version_warnings()
-    # typical_03 gives 856 refused variants at chiplet-spec 6978c7b; far fewer
+    # typical_03 gives 856 refused variants at the pinned chiplet-spec; far fewer
     # means the sweep stopped reaching the document, not that it got cleaner.
     assert refused >= 800, "the sweep refused only %d variants" % refused
     assert not accepted_by_us, (
