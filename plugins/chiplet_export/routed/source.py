@@ -104,9 +104,11 @@ def stack_layer_name(stack, token):
         if inner is None:
             raise RoutedRefused(
                 "%r is not a KiCad copper layer name (F.Cu, B.Cu or In<n>.Cu)" % token)
-        # An inner layer that reached the bottom would name B.Cu's metal.
-        below_top = int(inner.group(1))
-        index = len(metals) - 1 - below_top if below_top < len(metals) - 1 else -1
+        index = len(metals) - 1 - int(inner.group(1))
+        if index == 0:
+            # The bottom metal is B.Cu's; an inner layer sits strictly above
+            # it. -1 is refused by the range check below.
+            index = -1
     if not 0 <= index < len(metals) or not metals[index]:
         raise RoutedRefused("the routed stack of %d metals has no %s"
                             % (len(metals), token))
