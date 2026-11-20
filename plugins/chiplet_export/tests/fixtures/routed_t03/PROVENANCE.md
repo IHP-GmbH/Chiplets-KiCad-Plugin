@@ -29,9 +29,24 @@ Outputs, `oracle/` (sha256):
 - `die_thicknesses.json` `350fab2b648b9e871ef2ef1addb3a34555601e45a0598b25b57726d5d15c6006`
 - `io_pads.json` `c1ad87ada319aa43b69e4b7534581fdc4ccb4bb897cced285a8edbc0c0399a06`
 
-`inputs/routed-io-pads.json` (sha256 `1fee4b33146c7f96f4ea4e1fc028b11df68173d253629a54499ce7b21b55e517`) is the output of
-`interposer-pnr io-pads --chiplet inputs/design.chiplet`, in the same container
-run. It stands in for the io_pads manifest the routed geometry row will write.
+`inputs/routed-geometry.json` and `inputs/routed-io-pads.json` are what the
+interposer-pnr routed geometry writer (commit
+`52e2ce04041fef2e6080c9b882793a937cf7dec6`) wrote from its own copy of this
+run, `tests/data/routed_geometry_typical_03`, with the arguments its tests use
+(`--layout U1=../../dies/PAD_FRAME_L/layout.gds`, the same for U2,
+`--board-relative-layout`). The io_pads manifest is unchanged, sha256
+`b35b256a4470812360da3959738ca32e587eaedd94ff9975ccfd1ab3be8e8ff0`. The
+document, as written (sha256
+`83aa669b6a4ec49ee273da47c7131371e51a4d8777cb755e6dcaa0c5a7fc90ad`), had two
+changes, digests untouched:
+
+- the absolute folder of that copy became `<RUN>` (in `inputs.pins` and
+  `inputs.form`, which the export does not read);
+- each `devices[].layout.path` became the GDS_FILE text this board gives the
+  die, `../../../../dies/...`, as the flow passes it with `--layout`. The
+  writer's copy keeps its layouts two folders up.
+
+Result: sha256 `41cc95805d4c27311fb31cb915a6f02c33b54f2ab8bc00c11435ab896faaefb4`.
 
 The one normalising rule: the absolute folder of `inputs/` at run time becomes
 `<RUN>` in the oracle files. On this run it matched nothing.

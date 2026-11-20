@@ -8,6 +8,7 @@ comparison of the facts themselves needs pcbnew: test_routed_board_parity.py.
 """
 
 import copy
+import hashlib
 import importlib.util
 import json
 import shutil
@@ -45,7 +46,6 @@ def _load_module(name, path):
 
 
 oracle = _load_module("routed_t03_make_oracle", FIXTURE / "make_oracle.py")
-standin = _load_module("routed_t03_make_standin", FIXTURE / "make_standin.py")
 
 # The routed path is held against the interconnect manifest, found as the
 # export finds it (env var or sibling checkout). On a lone checkout, as on a
@@ -179,8 +179,23 @@ def test_the_routed_io_pads_are_the_board_paths(tmp_path):
             assert abs(r[key] - b[key]) <= 0.001, (r["ref"], key)
 
 
-def test_the_stand_in_document_rebuilds():
-    assert DOCUMENT.read_bytes() == standin.build()
+def test_the_document_is_the_writers_and_binds_these_inputs():
+    """The routed geometry is interposer-pnr's, written from this run: it
+    binds this .chiplet and these pin lists, and names each layout by the
+    board's GDS_FILE text. No checkout path is left in it."""
+    text = DOCUMENT.read_text()
+    assert "/home/" not in text and "/tmp/" not in text
+    document = json.loads(text)
+    assert document["producer"]["tool"] == "interposer-pnr"
+    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    assert document["inputs"]["chiplet"]["sha256"] == digest(CHIPLET)
+    pins = {"U1": "PAD_FRAME_L", "U2": "PAD_FRAME_R"}
+    board = (INPUTS / "cf_typical_03_from_schematic.draft.kicad_pcb").read_text()
+    for device in document["devices"]:
+        die = pins[device["ref"]]
+        assert (document["inputs"]["pins"][device["ref"]]["sha256"]
+                == digest(INPUTS / "pins" / ("%s.pins.json" % die)))
+        assert '(property "GDS_FILE" "%s"' % device["layout"]["path"] in board
 
 
 def test_a_thickness_goes_through_the_boards_text():
