@@ -1,0 +1,126 @@
+Technology SG13_dev is loaded.
+GRID : 0.01
+GRID inverse : 100.0
+EPSILON1  : 0.001
+EPSILON2  : 1e-9
+Success.
+2026-11-19 20:50:26 +0000: Loaded DRC rules from /opt/adk-tools/OpenIntM4TM2/libs.tech/klayout/tech/drc/rule_decks/interposer_tech_default.json
+2026-11-19 20:50:26 +0000: Starting density table (opt-in deck)
+2026-11-19 20:50:26 +0000: Density sanity rules (DEN.BND.*) enabled: false
+2026-11-19 20:50:26 +0000: Using prBoundary (235/0) for chip area: 3640000.0 um^2 (bbox (0,0;2600,1400))
+2026-11-19 20:50:28 +0000: Metal4 global density: 46.65% (min 35.00%, max 60.00%)
+2026-11-19 20:50:28 +0000: Executing rule M4.j
+2026-11-19 20:50:28 +0000: Executing rule M4.k
+2026-11-19 20:50:30 +0000: Metal5 global density: 46.65% (min 35.00%, max 60.00%)
+2026-11-19 20:50:30 +0000: Executing rule M5.j
+2026-11-19 20:50:30 +0000: Executing rule M5.k
+2026-11-19 20:50:30 +0000: TopMetal1 global density: 43.45% (min 25.00%, max 70.00%)
+2026-11-19 20:50:30 +0000: Executing rule TM1.c
+2026-11-19 20:50:30 +0000: Executing rule TM1.d
+2026-11-19 20:50:30 +0000: TopMetal2 global density: 44.73% (min 25.00%, max 70.00%)
+2026-11-19 20:50:30 +0000: Executing rule TM2.c
+2026-11-19 20:50:30 +0000: Executing rule TM2.d
+2026-11-19 20:50:30 +0000: Executing rule LBE.i
+2026-11-19 20:50:30 +0000: LBE global density: 0.00% (max 20.00%)
+2026-11-19 20:50:30 +0000: Executing rule M4Fil.h
+2026-11-19 20:50:34 +0000: Executing rule M4Fil.k
+2026-11-19 20:50:39 +0000: Executing rule M5Fil.h
+2026-11-19 20:50:43 +0000: Executing rule M5Fil.k
+2026-11-19 20:50:48 +0000: Executing rule Slt.i_M4
+2026-11-19 20:50:48 +0000: Executing rule Slt.i_M5
+2026-11-19 20:50:48 +0000: Executing rule Slt.i_TM1
+2026-11-19 20:50:48 +0000: Executing rule Slt.i_TM2
+2026-11-19 20:50:48 +0000: Density table checks complete
+2026-11-19 20:50:48 +0000: DRC check complete for interposer backend layers
+Converting: /tmp/chiplet_export_o66ibat2/cf_typical_03_from_schematic.draft.hyp -> /work/typical_03_from_schematic/runs/2026-11-19_20-49-29Z/run/out/export/layout/cf_typical_03_from_schematic.draft_interposer.gds
+Loaded LayerMap(187 layers from LYP)
+Parsed 54 trace segments
+Parsed 0 trace arcs
+Parsed 22 vias
+Parsed 3 padstack definitions
+Parsed 2 devices with GDS_FILE
+Parsed 22 pins
+Units: METRIC
+Stackup (top→bottom): TopMetal2 → TopMetal1 → Metal5 → Metal4
+Devices with GDS_FILE:
+  U1: /work/typical_03_from_schematic/dies/PAD_FRAME_L/layout.gds
+    Position: (0.001180, 0.000380) METRIC, Rotation: 0.0°
+  U2: /work/typical_03_from_schematic/dies/PAD_FRAME_R/layout.gds
+    Position: (0.002182, 0.000380) METRIC, Rotation: 0.0°
+Padstacks:
+  P=0: TopMetal2
+  P=1: TopMetal2
+  P=2: TopMetal2 -> TopMetal1
+Die outlines:
+  U1: exempt (--die-outline-exempt): keeps its .chiplet width/height and the cell bbox as boundary
+  U2: exempt (--die-outline-exempt): keeps its .chiplet width/height and the cell bbox as boundary
+Mount plane: beol.attachment_surface_z_um = 10.8103 um (/opt/adk-tools/OpenIntM4TM2/libs.tech/intm4tm2_stack.json)
+Technologies from /work/typical_03_from_schematic/runs/2026-11-19_20-49-29Z/run/design.chiplet:
+  interposer: intm4tm2
+  U1: sg13g2
+  U2: sg13g2
+Segments by layer:
+  TopMetal1: 18
+  TopMetal2: 36
+PDK PCells available - using via_stack PCell for vias
+Created 32 continuous paths from 54 segments and 0 arcs
+  Created via_stack: TopMetal1->TopMetal2, target=1.9µm, vn=5x5, tv1=2x2, tv2=1x1
+Successfully converted 22/22 vias
+Board outline: 4 perimeter segment(s) -> 1 closed loop(s) on prBoundary 235/0
+
+Generating CuPillarPad landings (connection=cupillar_opt1, body diameter=44 um, pitch 75.0 um / spacing 40.0 um) with DRC validation...
+  3D bodies: CuPillar (500/35), SnAgCap (501/35)
+  U1: 0 error(s), 0 warning(s) across 5 checks
+  U2: 0 error(s), 0 warning(s) across 5 checks
+Total landing pads placed: 16 (2 device group(s))
+Landing DRC report: /work/typical_03_from_schematic/runs/2026-11-19_20-49-29Z/run/out/export/layout/cf_typical_03_from_schematic.draft_cupillar_drc.json
+
+Adding I/O pads from /tmp/chiplet_export_o66ibat2/cf_typical_03_from_schematic.draft_io_pads.json...
+  Created I/O pad cell: wire_bond_80x80 (80x80 um)
+  Placed 6 wire_bond pads
+Total I/O pads placed: 6
+Seal ring: drawn on the board outline (0.000, 0.000)-(2600.000, 1400.000) um, 2600.000 x 1400.000 um
+  Manufacturing grid (5 dbu): snapped 12 shape(s) and 0 instance origin(s)
+  Notch heal (134/0, TM2_b = 2.0 um): 9 patch(es)
+Interposer GDS file written to: /work/typical_03_from_schematic/runs/2026-11-19_20-49-29Z/run/out/export/layout/cf_typical_03_from_schematic.draft_interposer.gds
+Fill engine: /opt/adk-tools/OpenIntM4TM2/libs.tech/klayout/python/fill_closure.py
+iter 1: M4=46.7% [ok]  M5=46.7% [ok]  TM1=43.4% [ok]  TM2=44.7% [ok]
+fill_stack (closure): M4=46.6% [ok]  M5=46.6% [ok]  TM1=43.5% [ok]  TM2=44.7% [ok]
+Fill density report: /work/typical_03_from_schematic/runs/2026-11-19_20-49-29Z/run/out/export/layout/cf_typical_03_from_schematic.draft_interposer.fill_density.json
+Fill coverage map: /work/typical_03_from_schematic/runs/2026-11-19_20-49-29Z/run/out/export/layout/cf_typical_03_from_schematic.draft_interposer.fill_coverage.json (91 cell(s))
+  Boundary manifest written to: /work/typical_03_from_schematic/runs/2026-11-19_20-49-29Z/run/out/export/layout/cf_typical_03_from_schematic.draft_interposer.boundaries.json (0 chiplet boundaries)
+  Pillar manifest written to: /work/typical_03_from_schematic/runs/2026-11-19_20-49-29Z/run/out/export/layout/cf_typical_03_from_schematic.draft_interposer.pillars.json (16 pillar(s))
+Updated interposer: layout=layout/cf_typical_03_from_schematic.draft_interposer.gds
+  dimensions: 2600.00 x 1400.00 um (board outline, prBoundary 235/0); body thickness=260.81 um (kept), attachment_surface_z=10.8103 um
+  position: (1300.00, 700.00) um (bbox center, canonical GDS-bbox-corner frame)
+  anchor: bbox_center
+  Injected 6 io_pads under interposer (re-anchored to GDS-bbox-corner: shift = (-0.00, -0.00) um)
+  Set connection=cupillar_opt1 on U1
+  Set connection=cupillar_opt1 on U2
+  Set interconnect.adapter=ihp_cupillar (matches die connection)
+  U1: dimensions.thickness = 750.0 um
+  U1: exempt from the die outline read; keeps dimensions 800.0 x 600.0 um
+  U1: z = 10.8103 + 44.0 = 54.8103 um (connection: cupillar_opt1)
+  U1: re-anchored x/y (1230.00,430.00) -> (1180.00,380.00) [GDS bbox corner]
+  U1: bundled die GDS -> chiplets/U1/layout.gds (self-contained; ../chiplets not reachable from the output dir)
+  U2: dimensions.thickness = 750.0 um
+  U2: exempt from the die outline read; keeps dimensions 800.0 x 600.0 um
+  U2: z = 10.8103 + 44.0 = 54.8103 um (connection: cupillar_opt1)
+  U2: re-anchored x/y (2232.00,430.00) -> (2182.00,380.00) [GDS bbox corner]
+  U2: bundled die GDS -> chiplets/U2/layout.gds (self-contained; ../chiplets not reachable from the output dir)
+  Stripped _metadata.finalize_required marker (file is now canonical)
+Chiplet file updated: /work/typical_03_from_schematic/runs/2026-11-19_20-49-29Z/run/out/export/.cf_typical_03_from_schematic.draft.chiplet.staging
+
+Generating complete GDS with chiplets...
+  U1: boundary is the placed cell bbox (exempt)
+  Added device U1: layout.gds (U1_layout_flipped) at anchor (1180.00, 380.00) um [mirror-X, flip-chip, per-layer]
+  U1: placed with mirror-X (flip-chip)
+  U2: boundary is the placed cell bbox (exempt)
+  Added device U2: layout.gds (U2_layout_flipped) at anchor (2182.00, 380.00) um [mirror-X, flip-chip, per-layer]
+  U2: placed with mirror-X (flip-chip)
+Successfully added 2/2 devices
+Pruned 2 orphan top-level cell(s) (imported flip-chip templates)
+  Boundary manifest written to: /work/typical_03_from_schematic/runs/2026-11-19_20-49-29Z/run/out/export/layout/cf_typical_03_from_schematic.draft_complete.boundaries.json (2 chiplet boundaries)
+  Pillar manifest written to: /work/typical_03_from_schematic/runs/2026-11-19_20-49-29Z/run/out/export/layout/cf_typical_03_from_schematic.draft_complete.pillars.json (16 pillar(s))
+Complete GDS file (with chiplets) written to: /work/typical_03_from_schematic/runs/2026-11-19_20-49-29Z/run/out/export/layout/cf_typical_03_from_schematic.draft_complete.gds
+Seal ring: carried into the complete GDS

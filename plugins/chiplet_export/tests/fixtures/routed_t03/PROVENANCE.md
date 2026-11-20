@@ -73,3 +73,11 @@ sha256, never by path text.
 for byte: sha256 `706b10aaf6d51d1d3ab6cb374efc700a8b56971eec8e0da050acb1579efe54da`, the digest the seal
 lists for it. The routed finalize test compares its dies' positions and
 anchors and its interposer io pads with what the routed path writes.
+
+`inputs/board-path.worker.log` is the worker's output in the same golden
+run: lines 15 to 140 of its run log,
+`goldens/out/export/logs/20261119_205013_cf_typical_03_from_schematic.draft.log`
+(sha256 `f11d15436b6203ae3ae8bf63c94daff07e6a88fc56ae13f1044c72862ec3a0f7`, the digest the seal lists for it), from the line after
+the worker's command to the worker's last line, `Seal ring: carried into the
+complete GDS`; sha256 `7abc0ce3a3bf5b96f2deddbdebeda723031d5df4c8b588cc257597eb009ab9ff`. Its paths are the container's. The
+one-body test replays it as the worker's stdout on both sources.
