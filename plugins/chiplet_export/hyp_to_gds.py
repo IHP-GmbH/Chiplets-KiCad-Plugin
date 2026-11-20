@@ -228,10 +228,10 @@ def chiplet_top_level_key_parity_error(chiplet_path: str) -> Optional[str]:
 # its own and the merged copper is unaffected.
 MANUFACTURING_GRID_NM = 5
 
-#: The routed path's line for an io pad the grid snap moved. Draft wording,
-#: pending review; this is the one place it is written.
-SNAPPED_PAD_LINE = ("  Snapped pad {ref} to the {grid} dbu manufacturing grid: "
-                    "({was[0]}, {was[1]}) -> ({now[0]}, {now[1]}) dbu")
+#: The routed path's line for an io pad the grid snap moved. The wording is
+#: the reviewed one; this is the one place it is written.
+SNAPPED_PAD_LINE = ("  Pad {ref} was off the {grid} dbu manufacturing grid and was "
+                    "moved onto it: ({was[0]}, {was[1]}) -> ({now[0]}, {now[1]}) dbu")
 
 
 class SealRingRefused(Exception):

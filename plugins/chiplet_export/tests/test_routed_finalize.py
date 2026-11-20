@@ -19,6 +19,7 @@ board-path.chiplet).
 import copy
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -239,8 +240,10 @@ def test_a_pad_one_grid_step_inside_passes_the_guard_and_changes_the_canon(tmp_p
 
 
 def _snap_line(line):
-    """Whether ``line`` is a snapped-pad line, by the template's fixed head."""
-    return line.startswith(_h.SNAPPED_PAD_LINE.split("{", 1)[0])
+    """Whether ``line`` is a snapped-pad line: the template's fixed text, in
+    order, around anything at its fields."""
+    fixed = re.split(r"\{[^}]*\}", _h.SNAPPED_PAD_LINE)
+    return re.fullmatch(".*?".join(map(re.escape, fixed)), line) is not None
 
 
 def test_a_pad_off_the_grid_is_snapped_and_the_snap_is_named(tmp_path, capsys):
@@ -259,6 +262,9 @@ def test_a_pad_off_the_grid_is_snapped_and_the_snap_is_named(tmp_path, capsys):
     assert ok_moved is True
     expected = _h.SNAPPED_PAD_LINE.format(ref="J_U1_ext[0]", grid=5,
                                           was=(140001, 625000), now=(140000, 625000))
+    assert expected.strip() == (
+        "Pad J_U1_ext[0] was off the 5 dbu manufacturing grid and was moved "
+        "onto it: (140001, 625000) -> (140000, 625000) dbu")
     lines = capsys.readouterr().out.splitlines()
     assert [line for line in lines if line == expected] == [expected]
     assert sum(_snap_line(line) for line in lines) == 1
