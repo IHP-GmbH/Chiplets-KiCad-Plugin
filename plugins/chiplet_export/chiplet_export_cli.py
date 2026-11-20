@@ -103,14 +103,16 @@ def _build_parser():
              "FAILED, was REFUSED or did NOT RUN; the last line says which.",
     )
     parser.add_argument(
-        "--interposer-adapter", default="",
+        "--interposer-adapter", default=None,
         help="Interposer adapter override. Empty = read interposer.adapter from "
-             "the .chiplet (final fallback intm4tm2).",
+             "the .chiplet (final fallback intm4tm2). Required, not empty, "
+             "with --routed-geometry.",
     )
     parser.add_argument(
-        "--interconnect-adapter", default="",
+        "--interconnect-adapter", default=None,
         help="Interconnect adapter override. Empty = read interconnect.adapter "
-             "from the .chiplet (absent there = no interconnect axis).",
+             "from the .chiplet (absent there = no interconnect axis). Required "
+             "with --routed-geometry, empty for none.",
     )
     parser.add_argument(
         "--connection", default="",
@@ -295,8 +297,8 @@ def _export(board_or_source, args, output_dir):
         top_cell="INTERPOSER",
         emit_assembly_drc=True,
         connection_type=args.connection,
-        interposer_adapter=args.interposer_adapter,
-        interconnect_adapter=args.interconnect_adapter,
+        interposer_adapter=args.interposer_adapter or "",
+        interconnect_adapter=args.interconnect_adapter or "",
         insert_metal_fill=args.insert_metal_fill,
         fill_mode=args.fill_mode,
         seal_ring=args.seal_ring,

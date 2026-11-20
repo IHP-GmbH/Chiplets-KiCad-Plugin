@@ -17,10 +17,8 @@ import re
 import shutil
 
 from ..pipeline.export_source import ExportSource
-from .document import RoutedRefused
-from .intermediates import (
-    DEFAULT_INTERPOSER_ADAPTER, prepare_intermediates, write_pin_lists,
-)
+from .document import RoutedRefused, bound_files
+from .intermediates import prepare_intermediates, write_pin_lists
 
 #: The KiCad copper names a carrier archive gives its pad layer.
 _INNER = re.compile(r"^In([1-9][0-9]*)\.Cu$")
@@ -58,15 +56,17 @@ class RoutedSource(ExportSource):
     origin = field_origin = "routed geometry"
 
     def __init__(self, document, chiplet, io_pads, *, name,
-                 interposer_adapter="", interconnect_adapter=""):
+                 interposer_adapter=None, interconnect_adapter=None):
         """``interposer_adapter`` and ``interconnect_adapter`` are what the
-        intermediate .chiplet names (the board path reads them from the
-        project's text variables); an empty interposer adapter is the
-        default one."""
+        intermediate .chiplet names; the board path reads them from the
+        project's text variables. Both must be given (None is refused by the
+        preflight, never defaulted): the interposer adapter not empty, the
+        interconnect adapter empty for none, as on the board path."""
         if not name:
             raise RoutedRefused("the routed path needs the output name (--name)")
-        self._interposer_adapter = interposer_adapter or DEFAULT_INTERPOSER_ADAPTER
+        self._interposer_adapter = interposer_adapter
         self._interconnect_adapter = interconnect_adapter
+        self.files = {}
         self.document_path = os.path.abspath(document)
         self.chiplet_path = os.path.abspath(chiplet)
         self.io_pads_path = os.path.abspath(io_pads)
@@ -87,19 +87,30 @@ class RoutedSource(ExportSource):
     def preflight(self, interconnect_manifest, *, on_warn=None):
         """Read and check the documents and compute every intermediate.
 
-        Refuses (RoutedRefused) what prepare_intermediates refuses, a document
-        with no stack, and a device reference the worker's flags cannot carry.
-        Writes nothing. (The die layouts the document binds are the worker's
-        to read and check.)
+        Refuses (RoutedRefused) an adapter not given, what
+        prepare_intermediates refuses (the stack and nets included), a die
+        layout or pin list whose bytes are not the ones the document binds,
+        and a device reference the worker's flags cannot carry. Writes
+        nothing.
         """
-        prepared = prepare_intermediates(
-            self.document_path, self.chiplet_path, self.io_pads_path,
-            board_name=self._name, interconnect_manifest=interconnect_manifest,
-            interposer_adapter=self._interposer_adapter,
-            interconnect_adapter=self._interconnect_adapter,
-            method_specs=interconnect_manifest.methods, on_warn=on_warn)
-        if not prepared.document.get("stack"):
-            raise RoutedRefused("the routed geometry names no stack")
+        if self._interposer_adapter is None or self._interconnect_adapter is None:
+            raise RoutedRefused(
+                "the routed path takes both adapters explicitly: give "
+                "--interposer-adapter and --interconnect-adapter (empty for "
+                "no interconnect adapter)")
+        if not self._interposer_adapter:
+            raise RoutedRefused("the interposer adapter is empty")
+        try:
+            prepared = prepare_intermediates(
+                self.document_path, self.chiplet_path, self.io_pads_path,
+                board_name=self._name, interconnect_manifest=interconnect_manifest,
+                interposer_adapter=self._interposer_adapter,
+                interconnect_adapter=self._interconnect_adapter,
+                method_specs=interconnect_manifest.methods, on_warn=on_warn)
+        except ValueError as exc:
+            # An adapter id the board path refuses too.
+            raise RoutedRefused(str(exc)) from exc
+        self.files = bound_files(prepared.document, self.document_path)
         # The worker's per-die flags carry every device reference.
         from ..die_outline import _reference_problem
         for device in prepared.document["devices"]:

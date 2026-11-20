@@ -51,6 +51,10 @@ Result: sha256 `41cc95805d4c27311fb31cb915a6f02c33b54f2ab8bc00c11435ab896faaefb4
 The one normalising rule: the absolute folder of `inputs/` at run time becomes
 `<RUN>` in the oracle files. On this run it matched nothing.
 
-The die layouts are not committed. The board names them by path,
-`../../../../dies/PAD_FRAME_L/layout.gds` and `../../../../dies/PAD_FRAME_R/layout.gds`,
-with sha256 as `inputs/export.json` records them (`round_trip.footprints[ref].gds_sha256`).
+The die layouts are in `dies/`, copied from interposer-pnr's
+`tests/data/routed_geometry_typical_03/dies` (commit `dd9d941a0cc42f0562e28930dba6e7e3331004d7`):
+`dies/PAD_FRAME_L/layout.gds` `36aa050b9898a580b7e18cd65d73aaa890e5ef951d5d09b1fb6da313e5863dd4` and `dies/PAD_FRAME_R/layout.gds` `3ba2845013c5475411298a6016db49c6db4c663b0fe25229747e8e44bfb8d3d9`, the
+sha256 the routed geometry binds and `inputs/export.json` records. The board
+names them `../../../../dies/PAD_FRAME_L/layout.gds` and
+`../../../../dies/PAD_FRAME_R/layout.gds`; tests that read them stage the
+document four folders below a copy of `dies/`.
