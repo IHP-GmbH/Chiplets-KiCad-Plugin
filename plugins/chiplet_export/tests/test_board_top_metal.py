@@ -60,7 +60,9 @@ def test_a_stack_without_a_top_metal_name_is_refused(tmp_path, stack):
     path.write_text(json.dumps(stack), encoding="utf-8")
     with pytest.raises(CarrierPackageRefused) as caught:
         read_carrier_package(str(tmp_path)).top_metal()
-    assert str(caught.value) == "PACKAGE_STACK_KEY: %s has no metal name at beol.metals" % path
+    assert str(caught.value) == (
+        "PACKAGE_STACK_KEY: the stack file %s names no top metal; the last entry of "
+        "beol.metals needs a name" % path)
 
 
 def test_a_stack_that_is_not_json_is_refused(tmp_path):
@@ -69,8 +71,13 @@ def test_a_stack_that_is_not_json_is_refused(tmp_path):
     path.write_text("{", encoding="utf-8")
     with pytest.raises(CarrierPackageRefused) as caught:
         read_carrier_package(str(tmp_path)).top_metal()
-    assert caught.value.message_id == "PACKAGE_STACK_KEY"
-    assert str(caught.value).startswith("PACKAGE_STACK_KEY: %s: " % path)
+    try:
+        json.loads("{")
+    except ValueError as exc:
+        error = exc
+    assert str(caught.value) == (
+        "PACKAGE_STACK_KEY: the stack file %s of the carrier technology package cannot "
+        "be read: %s" % (path, error))
 
 
 def test_a_version_2_carrier_on_the_top_metal_passes(tmp_path, monkeypatch):
@@ -115,17 +122,21 @@ def test_version_2_without_the_package_is_refused(tmp_path, monkeypatch):
     with pytest.raises(PadDomainError) as caught:
         validate(tmp_path, monkeypatch, version_2(), "TopMetal2", load_top_metal=None)
     assert str(caught.value) == (
-        "U1 carrier layer: Carrier validation requires the carrier technology package")
+        "U1 carrier layer: A version 2 carrier is checked against the top metal of the "
+        "carrier technology package, and the caller gave no load_top_metal.")
 
 
 def test_a_package_refusal_is_a_pad_domain_refusal(tmp_path, monkeypatch):
     def refused():
-        raise CarrierPackageRefused("PACKAGE_STACK_KEY", "s.json has no metal name at beol.metals")
+        raise CarrierPackageRefused(
+            "PACKAGE_STACK_KEY",
+            "the stack file s.json names no top metal; the last entry of beol.metals needs a name")
 
     with pytest.raises(PadDomainError) as caught:
         validate(tmp_path, monkeypatch, version_2(), "TopMetal2", load_top_metal=refused)
     assert str(caught.value) == (
-        "U1 carrier layer: PACKAGE_STACK_KEY: s.json has no metal name at beol.metals")
+        "U1 carrier layer: PACKAGE_STACK_KEY: the stack file s.json names no top metal; "
+        "the last entry of beol.metals needs a name")
 
 
 # The export: the top metal is read from the package the worker is given.

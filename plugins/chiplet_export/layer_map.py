@@ -310,14 +310,16 @@ class CarrierPackage(NamedTuple):
             stack = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise CarrierPackageRefused(
-                "PACKAGE_STACK_KEY", "%s: %s" % (path, exc)) from None
+                "PACKAGE_STACK_KEY", "the stack file %s of the carrier technology "
+                "package cannot be read: %s" % (path, exc)) from None
         beol = stack.get("beol") if isinstance(stack, dict) else None
         metals = beol.get("metals") if isinstance(beol, dict) else None
         top = metals[-1] if isinstance(metals, list) and metals else None
         name = top.get("name") if isinstance(top, dict) else None
         if not isinstance(name, str) or not name:
             raise CarrierPackageRefused(
-                "PACKAGE_STACK_KEY", "%s has no metal name at beol.metals" % path)
+                "PACKAGE_STACK_KEY", "the stack file %s names no top metal; the last "
+                "entry of beol.metals needs a name" % path)
         return name
 
 

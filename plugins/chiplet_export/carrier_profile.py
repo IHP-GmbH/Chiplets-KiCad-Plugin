@@ -58,12 +58,17 @@ def check_reader(reader):
     version = (tuple(int(part) for part in parts)
                if len(parts) == 2 and all(part.isdigit() for part in parts) else None)
     if version is None or version < READER_MIN_VERSION:
+        where = getattr(reader, "__file__", None) or "an unknown path"
+        if isinstance(value, str) and value:
+            first = ("interconnect_pdk at %s reads interconnect methods up to version %s."
+                     % (where, value))
+        else:
+            first = ("interconnect_pdk at %s does not report which version of "
+                     "interconnect methods it reads." % where)
         raise FabParamsRefused(
-            "interconnect_pdk at %s reads interconnect methods up to version %s. This "
-            "plugin needs version 1.2 or later, because 1.2 names the pad parameters "
-            "passivation_opening_um and pad_metal_enclosure_um. Update interconnect_pdk."
-            % (getattr(reader, "__file__", None) or "an unknown path",
-               value if isinstance(value, str) and value else "unknown"))
+            first + " This plugin needs version 1.2 or later, because 1.2 names the pad "
+            "parameters passivation_opening_um and pad_metal_enclosure_um. Update "
+            "interconnect_pdk.")
 
 
 def method_fab_params(method, method_specs, *, where=MANIFEST_WHERE, reader=None):

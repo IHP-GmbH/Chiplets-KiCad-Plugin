@@ -70,22 +70,32 @@ READERS = pytest.mark.parametrize("reader", [None, Reader12()],
                                   ids=["no reader", "reader 1.2"])
 
 
-def old_reader_text(version):
-    return ("interconnect_pdk at /pdk/libs.tech/klayout/python/interconnect_manifest.py "
-            "reads interconnect methods up to version %s. This plugin needs version 1.2 "
-            "or later, because 1.2 names the pad parameters passivation_opening_um and "
-            "pad_metal_enclosure_um. Update interconnect_pdk." % version)
+READER_PATH = "/pdk/libs.tech/klayout/python/interconnect_manifest.py"
+NEEDS_1_2 = (" This plugin needs version 1.2 or later, because 1.2 names the pad "
+             "parameters passivation_opening_um and pad_metal_enclosure_um. Update "
+             "interconnect_pdk.")
 
 
-@pytest.mark.parametrize("version, shown", [
-    ("1.1", "1.1"), ("1.0", "1.0"), (None, "unknown"), ("1.x", "1.x"), ("", "unknown"),
-])
-def test_a_reader_below_1_2_is_refused_before_it_is_asked(version, shown):
+@pytest.mark.parametrize("version", ["1.1", "1.0", "1.x"])
+def test_a_reader_below_1_2_is_refused_before_it_is_asked(version):
     reader = OldReader()
     reader.SUPPORTED_SCHEMA_VERSION = version
     with pytest.raises(FabParamsRefused) as caught:
         method_fab_params("cupillar_opt2", specs(**BOTH), where="r.json", reader=reader)
-    assert str(caught.value) == old_reader_text(shown)
+    assert str(caught.value) == (
+        "interconnect_pdk at %s reads interconnect methods up to version %s." % (
+            READER_PATH, version) + NEEDS_1_2)
+
+
+@pytest.mark.parametrize("version", [None, "", 12], ids=["none", "empty", "not a string"])
+def test_a_reader_that_reports_no_version_is_refused_saying_so(version):
+    reader = OldReader()
+    reader.SUPPORTED_SCHEMA_VERSION = version
+    with pytest.raises(FabParamsRefused) as caught:
+        method_fab_params("cupillar_opt2", specs(**BOTH), where="r.json", reader=reader)
+    assert str(caught.value) == (
+        "interconnect_pdk at %s does not report which version of interconnect methods "
+        "it reads." % READER_PATH + NEEDS_1_2)
 
 
 @pytest.mark.parametrize("version", ["1.2", "1.10", "2.0"])

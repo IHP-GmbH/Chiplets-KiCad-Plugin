@@ -429,7 +429,9 @@ def validate_board_pad_domains(board, method_specs, *, load_layer_map=None,
                     if top_metal is None:
                         if load_top_metal is None:
                             raise PadDomainError(
-                                "Carrier validation requires the carrier technology package")
+                                "A version 2 carrier is checked against the top metal of "
+                                "the carrier technology package, and the caller gave no "
+                                "load_top_metal.")
                         top_metal = load_top_metal()
                     layer = domains["carrier"]["layer"]
                     if layer_map.get_layer(layer) != layer_map.get_layer(top_metal):
