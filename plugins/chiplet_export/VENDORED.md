@@ -30,9 +30,9 @@ that is kept and never rebased, squashed or deleted; never the head of a branch 
 because a pin has to name a commit that survives whatever the merge does.
 
 **`vendor/chiplet_format_io/__init__.py`**
-from `reference/python/chiplet_format_io/__init__.py` at commit `6978c7b`,
-sha256 `43a5bc5d7a647fd7f1fb3bac72a10ecddba2c98d5a08f38fe59bb6601bba0f14`,
-reader release 1.23.0.
+from `reference/python/chiplet_format_io/__init__.py` at commit `9d84e3f`,
+sha256 `53b46fac62f7baff9b91a6f36a88203d24961051d32c7be3a645dbf6e15798cb`,
+reader release 1.24.0.
 Gated by `tests/test_vendored_copies.py`. `vendor/chiplet_format_io.SOURCE` states the
 same pin in the format gds_to_kicad's copy uses, and the gate checks it too.
 Its license is the repository's `LICENSES/Apache-2.0.txt`, the bytes of upstream's
@@ -41,7 +41,7 @@ it. Not gated: re-copy it only if upstream changes it. It sits outside the packa
 because adk-tools' `ci/check_vendored_reader.py` holds every file under a copy to a file of
 the reference, and the reference directory carries no license.
 
-What this copy holds the plugin to, at 1.23.0:
+What this copy holds the plugin to, at 1.24.0:
 
 - A document of format `1.5` or below reads without the newer-minor warning
   (`ACCEPTED_FORMAT_VERSIONS`). The assembly stamp `SUPPORTED_FORMAT_VERSION` is `1.0`.
@@ -67,6 +67,7 @@ line-break and grammar oracle, so that is the frontier it covers.
 
 | date | move | what changed for this plugin |
 |---|---|---|
+| 2026-11-20 | 1.23.0 to 1.24.0, the pin list's derived `type` (role and direction) | Release number only. The change is in `pins` and `technology_package`, which this plugin does not vendor. Oracle bytes unchanged. |
 | 2026-11-20 | 1.22.0 to 1.23.0, the merge of the routed-geometry schema and reader helper into dev | Release number only. Adds `routed_geometry` (the routed-geometry reader helper, which needs `die_contract`, the schema file and `jsonschema`); this plugin does not vendor it, and reads the routed geometry with its own reader through the shared version policy. Oracle bytes unchanged. |
 | 2026-11-10 | pin moved within 1.22.0, off a commit that never reached the published `dev`, onto the `dev` commit with the same tree | None: identical tree, so reader and oracle bytes are unchanged. |
 | 2026-11-09 | pin moved within 1.22.0, onto the mount-plane commits that `dev` fast-forwards to | None: mount-plane conformance cases, the description, docs and reader tests only. Reader and oracle bytes unchanged. |
@@ -92,7 +93,7 @@ line-break and grammar oracle, so that is the frontier it covers.
 | 2026-09-05 | 1.4.0 to 1.5.0 | Additive: `split_top_level_keys` and `TopLevelKeys`. |
 
 **`tests/fixtures/top_level_blocks_cases.json`**
-from `conformance/fixtures/top_level_blocks_cases.json` at commit `6978c7b`,
+from `conformance/fixtures/top_level_blocks_cases.json` at commit `9d84e3f`,
 sha256 `45c37f47f142d88c63dfd3056a3dceba07afe6f2035d25243b7f87f2c37bccd0`,
 oracle version 5. Its commit is the reader's pin.
 Gated by `tests/test_top_level_block_grammar.py`
