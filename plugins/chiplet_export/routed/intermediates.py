@@ -287,27 +287,19 @@ class PreparedIntermediates:
     die_thicknesses: Dict[str, float]
 
 
-def prepare_intermediates(document_path, chiplet_path, io_pads_path, *,
-                          board_name, interconnect_manifest=None,
+def prepare_intermediates(document, chiplet, io_pads, *, board_name,
+                          interconnect_manifest=None,
                           interposer_adapter=DEFAULT_INTERPOSER_ADAPTER,
                           interconnect_adapter="", interposer_lyp="",
-                          method_specs=None, on_warn=None, inputs=None):
-    """Read and check the three documents and compute the intermediates.
+                          method_specs=None):
+    """Compute the intermediates from the three inputs as read_inputs gives
+    them (the document checked and bound to the .chiplet).
 
-    Refuses (RoutedRefused) everything write_intermediates refuses about its
-    inputs: a document this reader does not read, a .chiplet other than the
-    one it binds, a device that is no .chiplet component or whose archive does
-    not decode, and an io_pads manifest in another frame. Writes nothing.
-
-    ``inputs`` is (document, chiplet, io_pads) as routed_inputs.read_inputs
-    gives them, read by the worker interpreter for a caller without PyYAML
-    (RoutedSource.preflight); None reads them here, which needs PyYAML.
+    Refuses (RoutedRefused) everything write_intermediates refuses about the
+    inputs once read: a device that is no .chiplet component or whose archive
+    does not decode, a stack or net the intermediates cannot carry. Writes
+    nothing.
     """
-    if inputs is None:
-        inputs = read_inputs(document_path, chiplet_path, io_pads_path,
-                             on_warn=on_warn)
-    document, chiplet, io_pads = inputs
-
     facts = facts_from_documents(
         document, chiplet, io_pads, board_name=board_name,
         interconnect_manifest=interconnect_manifest,
@@ -341,8 +333,9 @@ def write_intermediates(document_path, chiplet_path, io_pads_path, *,
     """Write the intermediate .chiplet to ``chiplet_output`` and one
     ``<ref>_pins.json`` per device into ``pins_dir``.
 
-    Refuses (RoutedRefused), before any file is written: what
-    prepare_intermediates refuses, a missing ``pins_dir``, and any CMIM
+    Reads the inputs in this process (read_inputs), so only where PyYAML is.
+    Refuses (RoutedRefused), before any file is written: what read_inputs and
+    prepare_intermediates refuse, a missing ``pins_dir``, and any CMIM
     sidecar.
     """
     if cmim_devices_json:
@@ -351,11 +344,11 @@ def write_intermediates(document_path, chiplet_path, io_pads_path, *,
             "integrated capacitor; it is computed on the board path only"
             % cmim_devices_json)
     prepared = prepare_intermediates(
-        document_path, chiplet_path, io_pads_path, board_name=board_name,
-        interconnect_manifest=interconnect_manifest,
+        *read_inputs(document_path, chiplet_path, io_pads_path, on_warn=on_warn),
+        board_name=board_name, interconnect_manifest=interconnect_manifest,
         interposer_adapter=interposer_adapter,
         interconnect_adapter=interconnect_adapter, interposer_lyp=interposer_lyp,
-        method_specs=method_specs, on_warn=on_warn)
+        method_specs=method_specs)
     if not os.path.isdir(pins_dir):
         raise RoutedRefused("the pin list folder %s does not exist" % pins_dir)
 

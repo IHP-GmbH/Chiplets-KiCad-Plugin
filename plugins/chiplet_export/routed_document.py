@@ -4,9 +4,11 @@ and the worker's drawing read from it.
 
 Read for the export's preflight (routed_inputs.py, which the CLI runs under
 the worker interpreter) and by the worker (hyp_to_gds.py --routed-geometry),
-so both refuse the same documents. Both import it as a sibling script module,
-so besides the standard library it imports only the vendored chiplet_format_io
-(for the version policy), the way hyp_to_gds imports its siblings.
+so both refuse the same documents; the CLI imports it too, for the files the
+document binds. Run as scripts, both import it as a sibling module, so besides
+the standard library it imports only the vendored chiplet_format_io (for the
+version policy, and only when a version is checked), the way hyp_to_gds
+imports its siblings.
 
 The document is interposer-pnr's: micrometres, Y up, origin at the outline's
 lower-left corner. chiplet-spec reads it with ``load_routed_geometry``, which

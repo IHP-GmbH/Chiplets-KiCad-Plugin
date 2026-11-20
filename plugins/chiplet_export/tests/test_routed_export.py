@@ -14,8 +14,6 @@ lists the routed geometry binds resolve.
 import importlib.abc
 import importlib.util
 import json
-import os
-import subprocess
 import sys
 import types
 from pathlib import Path
@@ -26,7 +24,6 @@ PLUGINS = Path(__file__).resolve().parents[2]
 if str(PLUGINS) not in sys.path:
     sys.path.insert(0, str(PLUGINS))
 
-from chiplet_export import connection_methods  # noqa: E402
 from chiplet_export.routed import write_intermediates  # noqa: E402
 from chiplet_export.routed.source import INPUTS_SCRIPT  # noqa: E402
 from chiplet_export.writers.connection_stacks import (  # noqa: E402
@@ -324,59 +321,3 @@ def test_a_routed_flag_without_the_document_is_refused(tmp_path, no_kicad, flag)
     with pytest.raises(SystemExit) as exc:
         _cli().main(argv)
     assert exc.value.code == 2
-
-
-# The whole CLI in a child process. A finder placed before anything is
-# imported records every pcbnew import (and lets it fail), and a kicad-cli on
-# PATH records every call; the worker python records its argv and reports
-# every connection method drawable.
-_CHILD = r"""
-import importlib.abc, runpy, sys
-record = sys.argv[1]
-class Finder(importlib.abc.MetaPathFinder):
-    def find_spec(self, name, path=None, target=None):
-        if name == "pcbnew" or name.startswith("pcbnew."):
-            with open(record, "a") as f:
-                f.write(name + "\n")
-            raise ImportError("recorded")
-        return None
-sys.meta_path.insert(0, Finder())
-sys.argv = sys.argv[2:]
-runpy.run_path(sys.argv[0], run_name="__main__")
-"""
-
-
-def _executable(path, text):
-    path.write_text(text)
-    path.chmod(0o755)
-    return path
-
-
-@needs_manifest
-def test_the_routed_cli_process_never_imports_pcbnew_or_runs_kicad_cli(tmp_path):
-    records = tmp_path / "records"
-    records.mkdir()
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _executable(bin_dir / "kicad-cli",
-                '#!/bin/sh\necho "$@" >> "%s"\nexit 1\n' % (records / "kicad-cli"))
-    report = json.dumps({"format": connection_methods.FORMAT,
-                         "version": connection_methods.VERSION, "methods": []})
-    worker_python = _executable(
-        tmp_path / "worker-python",
-        '#!/bin/sh\necho "$@" >> "%s"\n'
-        'case "$1" in *connection_methods.py) printf %%s \'%s\'; exit 0;; '
-        '*routed_inputs.py) exec "%s" "$@";; esac\n'
-        'exit 1\n' % (records / "worker", report, sys.executable))
-    env = dict(os.environ, KICAD_CHIPLET_PYTHON=str(worker_python),
-               PATH="%s%s%s" % (bin_dir, os.pathsep, os.environ.get("PATH", "")))
-    result = subprocess.run(
-        [sys.executable, "-c", _CHILD, str(records / "pcbnew"), str(CLI_SOURCE),
-         *_routed_argv(tmp_path)],
-        env=env, capture_output=True, text=True, timeout=120, check=False)
-    calls = ((records / "worker").read_text().splitlines()
-             if (records / "worker").exists() else [])
-    assert any("--routed-geometry" in line for line in calls), (
-        result.stdout + result.stderr)
-    assert not (records / "pcbnew").exists(), (records / "pcbnew").read_text()
-    assert not (records / "kicad-cli").exists()

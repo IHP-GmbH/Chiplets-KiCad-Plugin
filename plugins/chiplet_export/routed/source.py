@@ -14,11 +14,9 @@ No PyYAML either: the documents are read by routed_inputs.py under the
 worker interpreter, which has it; the CLI's interpreter has not.
 """
 
-import json
 import os
 import re
 import shutil
-import tempfile
 import warnings
 
 from ..pipeline.export_source import ExportSource
@@ -47,39 +45,46 @@ def output_stem_problem(name):
 
 
 def read_in_worker(python, document_path, chiplet_path, io_pads_path, *,
-                   on_warn=None):
+                   on_warn=None, cancel_event=None):
     """(document, chiplet, io_pads), read by routed_inputs.py under the worker
     interpreter ``python``: this process may not import the vendored reader
-    (it imports PyYAML). The reads' version warnings go to ``on_warn``, or to
-    the warnings channel as the reader's own default does. RoutedRefused when
-    the reads refuse or the script cannot report."""
-    from ..pipeline import runner
-    with tempfile.TemporaryDirectory(prefix="chiplet_export_routed_inputs_") as tmp:
-        out = os.path.join(tmp, "inputs.json")
-        command = [python, INPUTS_SCRIPT, document_path, chiplet_path,
-                   io_pads_path, IO_PADS_FRAME, out]
-        try:
-            run = runner.run_async(command, timeout=INPUTS_TIMEOUT_SECONDS)
-        except OSError as exc:
-            raise RoutedRefused("the worker interpreter %s cannot read the routed "
-                                "inputs: %s" % (python, exc)) from exc
-        if run.timed_out or run.exit_code != 0 or not os.path.isfile(out):
-            lines = (run.stderr or "").strip().splitlines()
-            raise RoutedRefused(
-                "the worker interpreter %s could not read the routed inputs (%s): %s"
-                % (python, "timed out after %d s" % INPUTS_TIMEOUT_SECONDS
-                   if run.timed_out else "exit %s" % run.exit_code,
-                   lines[-1] if lines else "no message"))
-        with open(out, encoding="utf-8") as f:
-            report = json.load(f)
-    for message in report["warnings"]:
+    (it imports PyYAML). The reads' warnings go to ``on_warn``, or to the
+    warnings channel as the readers' own default does. RoutedRefused when the
+    reads refuse, or the script fails, times out, is cancelled through
+    ``cancel_event`` or prints no report of its version."""
+    import subprocess
+    from ..pipeline.runner import run_async
+    from ..routed_inputs import ReportError, parse_report
+    command = [python, INPUTS_SCRIPT, document_path, chiplet_path,
+               io_pads_path, IO_PADS_FRAME]
+    shown = "%s %s" % (python, os.path.basename(INPUTS_SCRIPT))
+    try:
+        run = run_async(command, cancel_event=cancel_event,
+                        timeout=INPUTS_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RoutedRefused("%s cannot read the routed inputs: %s"
+                            % (shown, exc)) from exc
+    if run.cancelled:
+        raise RoutedRefused("%s: cancelled" % shown)
+    if run.timed_out:
+        raise RoutedRefused("%s timed out after %d s"
+                            % (shown, INPUTS_TIMEOUT_SECONDS))
+    if run.exit_code != 0:
+        lines = (run.stderr or "").strip().splitlines()
+        raise RoutedRefused("%s exited %s: %s" % (
+            shown, run.exit_code, lines[-1] if lines else "no message"))
+    try:
+        inputs, messages, refused = parse_report(run.stdout)
+    except ReportError as exc:
+        raise RoutedRefused("%s printed %s" % (shown, exc)) from exc
+    for message in messages:
         if on_warn is not None:
             on_warn(message)
         else:
             warnings.warn(message, stacklevel=2)
-    if "refused" in report:
-        raise RoutedRefused(report["refused"])
-    return tuple(report["inputs"])
+    if refused is not None:
+        raise RoutedRefused(refused)
+    return inputs
 
 
 def stack_layer_name(stack, token):
@@ -149,8 +154,8 @@ class RoutedSource(ExportSource):
         return ("Routed geometry: %s (the board is not opened)"
                 % self.document_path)
 
-    def preflight(self, interconnect_manifest, *, on_warn=None,
-                  worker_python=None):
+    def preflight(self, interconnect_manifest, *, worker_python, on_warn=None,
+                  cancel_event=None):
         """Read and check the documents and compute every intermediate.
 
         The documents are read under the worker interpreter
@@ -161,9 +166,6 @@ class RoutedSource(ExportSource):
         and a device reference the worker's flags cannot carry. Writes
         nothing.
         """
-        if worker_python is None:
-            raise RoutedRefused("the routed path reads its inputs with the worker "
-                                "interpreter, and none was given")
         if self._interposer_adapter is None or self._interconnect_adapter is None:
             raise RoutedRefused(
                 "the routed path takes both adapters explicitly: give "
@@ -177,14 +179,12 @@ class RoutedSource(ExportSource):
                                       manifest=interconnect_manifest)
             inputs = read_in_worker(worker_python(), self.document_path,
                                     self.chiplet_path, self.io_pads_path,
-                                    on_warn=on_warn)
+                                    on_warn=on_warn, cancel_event=cancel_event)
             prepared = prepare_intermediates(
-                self.document_path, self.chiplet_path, self.io_pads_path,
-                board_name=self._name, interconnect_manifest=interconnect_manifest,
+                *inputs, board_name=self._name, interconnect_manifest=interconnect_manifest,
                 interposer_adapter=self._interposer_adapter,
                 interconnect_adapter="",
-                method_specs=interconnect_manifest.methods, on_warn=on_warn,
-                inputs=inputs)
+                method_specs=interconnect_manifest.methods)
         except ValueError as exc:
             # An adapter id the board path refuses too.
             raise RoutedRefused(str(exc)) from exc

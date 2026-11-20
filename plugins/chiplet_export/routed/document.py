@@ -3,7 +3,8 @@
 
 The checks are routed_document's, which the worker runs too, so a document
 the worker would refuse is refused here, before any output; this module turns
-its refusals into RoutedRefused and adds the .chiplet binding.
+its refusals into RoutedRefused. The .chiplet binding is checked where the
+.chiplet is read (routed_inputs.py).
 """
 
 from .. import routed_document as _copper
@@ -53,12 +54,3 @@ def bound_files(document, document_path):
     except _copper.DocumentRefused as exc:
         raise RoutedRefused(str(exc)) from exc
 
-
-def check_chiplet_binding(document, chiplet_path):
-    """Refuse a .chiplet other than the one the document was written from
-    (routed_document.check_chiplet_binding, which the worker-tier read runs);
-    RoutedRefused otherwise."""
-    try:
-        return _copper.check_chiplet_binding(document, chiplet_path)
-    except _copper.DocumentRefused as exc:
-        raise RoutedRefused(str(exc)) from exc

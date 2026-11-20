@@ -35,11 +35,11 @@ class ExportSource:
     origin = "board"
     field_origin = "board fields"
 
-    def preflight(self, interconnect_manifest, *, on_warn=None,
-                  worker_python=None):
+    def preflight(self, interconnect_manifest, *, worker_python, on_warn=None,
+                  cancel_event=None):
         """Refuse inputs the export cannot use, before any output exists.
-        ``worker_python`` gives the worker interpreter, for a source whose
-        readers need it (a board's do not)."""
+        ``worker_python()`` gives the worker interpreter, for a source whose
+        readers run there (a board's do not); ``cancel_event`` cancels them."""
 
     def load_readers(self):
         """Import what the readers need; a failure here comes before any

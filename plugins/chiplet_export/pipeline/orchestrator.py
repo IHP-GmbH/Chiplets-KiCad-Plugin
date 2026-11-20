@@ -1706,7 +1706,9 @@ def run_export(board, options, plugin_dir,
     Sequence:
       1. Preflight a present interconnect PDK manifest, the carrier pad
          domains and the die outline layers (early refusals).
-      2. Resolve worker python and hyp_to_gds.py (early failure).
+      2. Resolve worker python and hyp_to_gds.py (early failure). A source
+         whose readers run under the worker python (routed geometry)
+         resolves it during step 1 and reads its inputs there.
       3. Create a workspace tmpdir.
       4. Write Hyperlynx and intermediate .chiplet via the Python ports.
       5. Stage the intermediate .chiplet as a sibling of the canonical one
@@ -1727,7 +1729,8 @@ def run_export(board, options, plugin_dir,
         ``exit_code`` is -1, except for a finalized .chiplet that did not
         replace the canonical file (it changed during the run, or the
         replace failed), which keeps the worker's exit code.
-        Preflight refusals occur before output creation or subprocesses.
+        Preflight refusals occur before output creation, and before every
+        subprocess except the routed source's input read.
         Later refusals can leave completed layout outputs; ``error`` alone
         does not imply that no subprocess ran.
     """
@@ -1761,12 +1764,19 @@ def run_export(board, options, plugin_dir,
     from . import discovery as _discovery
     from .discovery import WorkerPythonNotFoundError
 
+    found_worker = []
+
     def worker_python():
-        return (options.worker_python_override
+        """The worker interpreter, looked for once per export."""
+        if not found_worker:
+            found_worker.append(
+                options.worker_python_override
                 or _discovery.find_worker_python(plugin_dir, board=discovery_board))
+        return found_worker[0]
 
     try:
-        source.preflight(interconnect_manifest, worker_python=worker_python)
+        source.preflight(interconnect_manifest, worker_python=worker_python,
+                         cancel_event=cancel_event)
     except SourceRefused as exc:
         return ExportResult(error="Routed geometry refused: %s" % exc)
     except WorkerPythonNotFoundError as exc:
@@ -1819,7 +1829,7 @@ def run_export(board, options, plugin_dir,
             return ExportResult(error="Carrier pad domains refused: %s" % exc)
 
     from .discovery import (
-        find_worker_python, find_hyp_to_gds, find_adk_drc_runner,
+        find_hyp_to_gds, find_adk_drc_runner,
         WorkerPythonNotFoundError, HypToGdsNotFoundError,
         AdkRunnerNotFoundError,
     )
@@ -1859,8 +1869,7 @@ def run_export(board, options, plugin_dir,
     board_name = source.name()
 
     try:
-        worker_py = (options.worker_python_override
-                     or find_worker_python(plugin_dir, board=discovery_board))
+        worker_py = worker_python()
     except WorkerPythonNotFoundError as exc:
         return ExportResult(error=str(exc))
 
