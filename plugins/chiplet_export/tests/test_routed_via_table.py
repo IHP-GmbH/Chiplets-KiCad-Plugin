@@ -188,3 +188,26 @@ def test_the_worker_takes_a_hyp_or_the_routed_geometry(monkeypatch, capsys):
             _h.main()
         assert exc.value.code == 2
         assert "--routed-geometry" in capsys.readouterr().err
+
+
+def test_a_valid_tech_json_the_document_disagrees_with_is_refused(tmp_path, capsys):
+    """The generator sizes vias from the --tech-json load_via_table checked:
+    a readable table whose TopVia2 cut is not the document's refuses the
+    run before anything is drawn, and the same table with the document's
+    cut lets it through."""
+    if not LYP_PATH.is_file():
+        pytest.skip("interposer LYP not found: %s" % LYP_PATH)
+    document = stage(tmp_path)
+    for name, size, ok_expected in (("other", 0.8, False), ("same", 0.9, True)):
+        tech = tmp_path / ("%s.json" % name)
+        tech.write_text(json.dumps({"rules": dict(FULL_RULES, TV2_a=size)}))
+        out = tmp_path / name / "interposer.gds"
+        out.parent.mkdir()
+        ok = _h.convert_hyp_to_gds("", str(out), str(LYP_PATH),
+                                   routed_geometry_path=str(document),
+                                   tech_json_path=str(tech))
+        err = capsys.readouterr().err
+        assert ok is ok_expected, err
+        if not ok_expected:
+            assert "TopVia2 cut is 0.9, the engine's TV2 table gives 0.8" in err
+            assert not out.exists()
