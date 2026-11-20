@@ -37,8 +37,11 @@ python3 plugins/chiplet_export/chiplet_export_cli.py --board ... --output-dir ..
 
 The second form composes from the routed-geometry document the packaging
 flow's place-and-route row writes, instead of from the board. It never imports
-pcbnew, so any Python 3 runs it. The board must still exist but is not opened,
-and no `.hyp` is written: the worker reads the document.
+pcbnew, so any Python 3 runs it. It imports no PyYAML either: the three input
+documents are read by `routed_inputs.py` under the worker interpreter
+(`KICAD_CHIPLET_PYTHON`), and the CLI computes the rest from what that read
+returns. The board must still exist but is not opened, and no `.hyp` is
+written: the worker reads the document.
 
 ## Flags
 
@@ -98,7 +101,7 @@ one of them.
 
 | Variable | Used for | Fallback |
 |----------|----------|----------|
-| `KICAD_CHIPLET_PYTHON` | The worker interpreter that runs `hyp_to_gds.py` and the assembly DRC; it needs `klayout.db` and PyYAML. | `<plugin>/.venv/bin/python3`, the project text variable, then a `python3` on `PATH` that imports both |
+| `KICAD_CHIPLET_PYTHON` | The worker interpreter that runs `hyp_to_gds.py`, the assembly DRC and, with `--routed-geometry`, `routed_inputs.py`; it needs `klayout.db` and PyYAML. | `<plugin>/.venv/bin/python3`, the project text variable, then a `python3` on `PATH` that imports both |
 | `INTERPOSER_PDK_ROOT` | The interposer PDK, needed by every export (OpenIntM4TM2 v2026.11 or later): its technology package manifest, `libs.tech/adk/technology.json`, names the stack file whose `beol.attachment_surface_z_um` is the mount plane (an export that cannot read it is refused) and the layer properties. Also its PCells, seal ring and fill engine. The manifest is how a carrier root is told: a set root without it (another KLayout PDK, the SG13G2 die PDK included) exits 1 with `PACKAGE_MANIFEST_MISSING`, never falling back to the sibling checkout; a manifest the export cannot read, or a member path that leaves the package or names no file, is refused with the chiplet-spec package validator's id for it. A package whose `id` is not `intm4tm2` exits 1 with `CARRIER_UNSUPPORTED_TECHNOLOGY` before anything is drawn, with or without `--system-chiplet`: pads and connections still land on IntM4TM2's TopMetal2. | sibling `interposer` or `OpenIntM4TM2` |
 | `INTERPOSER_LYP` | The interposer layer-properties file, when not the `layer_properties.lyp` the PDK's technology package names. | the project text variable, then the PDK's file |
 | `INTERCONNECT_PDK_ROOT` | The interconnect PDK manifest: connection stacks and method ids. A selected root that is unusable refuses the export. | the project text variable, then sibling `interconnect_pdk` or `IHP-Interconnect-IntM4TM2` |

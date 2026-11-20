@@ -28,6 +28,7 @@ if str(PLUGINS) not in sys.path:
 
 from chiplet_export import connection_methods  # noqa: E402
 from chiplet_export.routed import write_intermediates  # noqa: E402
+from chiplet_export.routed.source import INPUTS_SCRIPT  # noqa: E402
 from chiplet_export.writers.connection_stacks import (  # noqa: E402
     InterconnectManifestSnapshot, _manifest_reader,
 )
@@ -91,8 +92,12 @@ def worker(monkeypatch):
     monkeypatch.setattr(orchestrator, "query_connection_availability",
                         lambda *_a, **_kw: ({}, "methods"))
     calls = []
+    recorded = runner.run_async
 
-    def run_async(command, **_kwargs):
+    def run_async(command, **kwargs):
+        if len(command) > 1 and command[1] == INPUTS_SCRIPT:
+            # The routed inputs are read for real, by this interpreter.
+            return recorded([sys.executable] + list(command[1:]), **kwargs)
         files = {}
         for arg in command:
             for part in arg.replace("=", ",").split(","):
@@ -360,8 +365,9 @@ def test_the_routed_cli_process_never_imports_pcbnew_or_runs_kicad_cli(tmp_path)
     worker_python = _executable(
         tmp_path / "worker-python",
         '#!/bin/sh\necho "$@" >> "%s"\n'
-        'case "$1" in *connection_methods.py) printf %%s \'%s\'; exit 0;; esac\n'
-        'exit 1\n' % (records / "worker", report))
+        'case "$1" in *connection_methods.py) printf %%s \'%s\'; exit 0;; '
+        '*routed_inputs.py) exec "%s" "$@";; esac\n'
+        'exit 1\n' % (records / "worker", report, sys.executable))
     env = dict(os.environ, KICAD_CHIPLET_PYTHON=str(worker_python),
                PATH="%s%s%s" % (bin_dir, os.pathsep, os.environ.get("PATH", "")))
     result = subprocess.run(

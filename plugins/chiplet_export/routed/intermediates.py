@@ -23,7 +23,6 @@ import os
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from .. import io_pads_manifest as _io_pads_manifest
 from ..pad_domains import PadDomainError, archive_die_dimensions, archive_pin_list
 from ..writers.connection_stacks import (
     emit_connection_stacks_block, validate_adapter_id, validate_interconnect_ids,
@@ -34,7 +33,7 @@ from ..writers.intermediate_chiplet import (
     emit_intermediate_chiplet,
 )
 from ..writers._units import _size_um, parse_thickness_um
-from .document import RoutedRefused, check_chiplet_binding, read_document
+from .document import RoutedRefused
 
 #: The stroke interposer-pnr draws the board outline with (kicad_export.py,
 #: the Edge.Cuts gr_rect). The board path's frame is the outline's bounding
@@ -46,6 +45,19 @@ BOARD_EDGE_STROKE_UM = 100.0
 #: The frame of the routed io_pads manifest. Its origin is the document's
 #: (the outline's lower-left corner, which check_document holds at 0, 0).
 IO_PADS_FRAME = "gds_bbox_corner_um"
+
+
+def read_inputs(document_path, chiplet_path, io_pads_path, *, on_warn=None):
+    """(document, chiplet, io_pads), read in this process by the vendored
+    reader (routed_inputs.read_inputs), so only where PyYAML is; RoutedRefused
+    otherwise."""
+    from .. import routed_inputs as _routed_inputs
+    try:
+        return _routed_inputs.read_inputs(document_path, chiplet_path, io_pads_path,
+                                          io_pads_frame=IO_PADS_FRAME,
+                                          on_warn=on_warn)
+    except _routed_inputs.InputsRefused as exc:
+        raise RoutedRefused(str(exc)) from exc
 
 
 def _iu(value_um):
@@ -279,27 +291,22 @@ def prepare_intermediates(document_path, chiplet_path, io_pads_path, *,
                           board_name, interconnect_manifest=None,
                           interposer_adapter=DEFAULT_INTERPOSER_ADAPTER,
                           interconnect_adapter="", interposer_lyp="",
-                          method_specs=None, on_warn=None):
+                          method_specs=None, on_warn=None, inputs=None):
     """Read and check the three documents and compute the intermediates.
 
     Refuses (RoutedRefused) everything write_intermediates refuses about its
     inputs: a document this reader does not read, a .chiplet other than the
     one it binds, a device that is no .chiplet component or whose archive does
     not decode, and an io_pads manifest in another frame. Writes nothing.
+
+    ``inputs`` is (document, chiplet, io_pads) as routed_inputs.read_inputs
+    gives them, read by the worker interpreter for a caller without PyYAML
+    (RoutedSource.preflight); None reads them here, which needs PyYAML.
     """
-    document = read_document(document_path, on_warn=on_warn)
-    check_chiplet_binding(document, chiplet_path)
-    from .. import vendored as _vendored
-    cfio = _vendored.chiplet_format_io()
-    try:
-        chiplet = cfio.load(chiplet_path)
-    except (OSError, cfio.ChipletFormatError) as exc:
-        raise RoutedRefused("cannot read %s: %s" % (chiplet_path, exc)) from exc
-    try:
-        io_pads = _io_pads_manifest.read(io_pads_path, on_warn=on_warn,
-                                         frame=IO_PADS_FRAME)
-    except _io_pads_manifest.IoPadsRefused as exc:
-        raise RoutedRefused(str(exc)) from exc
+    if inputs is None:
+        inputs = read_inputs(document_path, chiplet_path, io_pads_path,
+                             on_warn=on_warn)
+    document, chiplet, io_pads = inputs
 
     facts = facts_from_documents(
         document, chiplet, io_pads, board_name=board_name,

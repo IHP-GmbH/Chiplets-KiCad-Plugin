@@ -2,11 +2,11 @@
 """The routed-geometry document, checked: what the export's intermediates
 and the worker's drawing read from it.
 
-Read by the export's preflight (routed/document.py) and by the worker
-(hyp_to_gds.py --routed-geometry), so both refuse the same documents. The
-worker imports it as a sibling script module, so besides the standard library
-it imports only the vendored chiplet_format_io (for the version policy), the
-way hyp_to_gds imports its siblings.
+Read for the export's preflight (routed_inputs.py, which the CLI runs under
+the worker interpreter) and by the worker (hyp_to_gds.py --routed-geometry),
+so both refuse the same documents. Both import it as a sibling script module,
+so besides the standard library it imports only the vendored chiplet_format_io
+(for the version policy), the way hyp_to_gds imports its siblings.
 
 The document is interposer-pnr's: micrometres, Y up, origin at the outline's
 lower-left corner. chiplet-spec reads it with ``load_routed_geometry``, which
@@ -393,3 +393,16 @@ def bound_files(document, document_path):
                     % (label, ref, path, actual, entry["sha256"]))
             files[ref][kind] = os.path.normpath(path)
     return files
+
+
+def check_chiplet_binding(document, chiplet_path):
+    """Refuse a .chiplet other than the one the document was written from
+    (``inputs.chiplet.sha256``). No path is followed from the document."""
+    bound = ((document.get("inputs") or {}).get("chiplet") or {}).get("sha256")
+    if not isinstance(bound, str) or not bound:
+        raise DocumentRefused("%s names no inputs.chiplet.sha256" % ARTIFACT)
+    actual = sha256_file(chiplet_path)
+    if actual != bound:
+        raise DocumentRefused(
+            "%s is not the .chiplet the routed geometry was written from "
+            "(sha256 %s, the document binds %s)" % (chiplet_path, actual, bound))

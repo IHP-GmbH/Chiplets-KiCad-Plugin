@@ -170,7 +170,7 @@ def test_the_routed_source_writes_the_board_paths_chiplet_under_the_flows_flags(
     source = RoutedSource(str(stage(tmp_path / "staged")), str(CHIPLET), str(IO_PADS),
                           name=oracle.BOARD_NAME, interposer_adapter="intm4tm2",
                           interconnect_adapter="ihp_cupillar")
-    source.preflight(manifest_snapshot())
+    source.preflight(manifest_snapshot(), worker_python=lambda: sys.executable)
     path = tmp_path / oracle.CHIPLET
     assert source.write_chiplet(str(path), interconnect_manifest=manifest_snapshot(),
                                 export_report=None)

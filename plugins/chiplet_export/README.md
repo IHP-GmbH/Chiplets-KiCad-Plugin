@@ -767,6 +767,8 @@ plugins/chiplet_export/
 │                              (worker side)
 ├── routed_geometry_parser.py  The routed geometry read into that model
 │                              (worker side, --routed-geometry)
+├── routed_inputs.py           The routed path's three inputs, read under
+│                              the worker interpreter (--routed-geometry)
 ├── tests/                     pytest suite (see tests/README.md)
 └── requirements.txt           Worker venv deps
 

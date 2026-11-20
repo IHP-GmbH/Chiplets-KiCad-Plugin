@@ -56,12 +56,9 @@ def bound_files(document, document_path):
 
 def check_chiplet_binding(document, chiplet_path):
     """Refuse a .chiplet other than the one the document was written from
-    (``inputs.chiplet.sha256``). No path is followed from the document."""
-    bound = ((document.get("inputs") or {}).get("chiplet") or {}).get("sha256")
-    if not isinstance(bound, str) or not bound:
-        raise RoutedRefused("%s names no inputs.chiplet.sha256" % ARTIFACT)
-    actual = sha256_file(chiplet_path)
-    if actual != bound:
-        raise RoutedRefused(
-            "%s is not the .chiplet the routed geometry was written from "
-            "(sha256 %s, the document binds %s)" % (chiplet_path, actual, bound))
+    (routed_document.check_chiplet_binding, which the worker-tier read runs);
+    RoutedRefused otherwise."""
+    try:
+        return _copper.check_chiplet_binding(document, chiplet_path)
+    except _copper.DocumentRefused as exc:
+        raise RoutedRefused(str(exc)) from exc

@@ -1758,10 +1758,19 @@ def run_export(board, options, plugin_dir,
     # before any output exists (a board's are checked by the preflights
     # below, as they always were).
     from .export_source import SourceRefused
+    from . import discovery as _discovery
+    from .discovery import WorkerPythonNotFoundError
+
+    def worker_python():
+        return (options.worker_python_override
+                or _discovery.find_worker_python(plugin_dir, board=discovery_board))
+
     try:
-        source.preflight(interconnect_manifest)
+        source.preflight(interconnect_manifest, worker_python=worker_python)
     except SourceRefused as exc:
         return ExportResult(error="Routed geometry refused: %s" % exc)
+    except WorkerPythonNotFoundError as exc:
+        return ExportResult(error=str(exc))
 
     # Carrier metadata is a physical contract, not an optional extraction hint.
     # Check it before output creation, including explicit pin/GDS overrides.

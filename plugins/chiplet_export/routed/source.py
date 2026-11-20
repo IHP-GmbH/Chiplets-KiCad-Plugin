@@ -10,17 +10,27 @@ computed and refuse nothing, because the body turns most of their exceptions
 into warnings.
 
 No pcbnew, and no kicad-cli: nothing here or in what it imports loads KiCad.
+No PyYAML either: the documents are read by routed_inputs.py under the
+worker interpreter, which has it; the CLI's interpreter has not.
 """
 
+import json
 import os
 import re
 import shutil
+import tempfile
+import warnings
 
 from ..pipeline.export_source import ExportSource
 from .document import RoutedRefused, bound_files
 from ..writers.connection_stacks import (
     validate_adapter_id, validate_interconnect_ids)
-from .intermediates import prepare_intermediates, write_pin_lists
+from .intermediates import IO_PADS_FRAME, prepare_intermediates, write_pin_lists
+
+#: The worker-tier script that reads the three inputs (routed_inputs.py).
+INPUTS_SCRIPT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "routed_inputs.py")
+INPUTS_TIMEOUT_SECONDS = 120
 
 #: The KiCad copper names a carrier archive gives its pad layer.
 _INNER = re.compile(r"^In([1-9][0-9]*)\.Cu$")
@@ -34,6 +44,42 @@ def output_stem_problem(name):
     if name in (".", "..") or "/" in name or "\\" in name or os.sep in name:
         return "the output name (--name) must be a file stem, not a path: %r" % name
     return None
+
+
+def read_in_worker(python, document_path, chiplet_path, io_pads_path, *,
+                   on_warn=None):
+    """(document, chiplet, io_pads), read by routed_inputs.py under the worker
+    interpreter ``python``: this process may not import the vendored reader
+    (it imports PyYAML). The reads' version warnings go to ``on_warn``, or to
+    the warnings channel as the reader's own default does. RoutedRefused when
+    the reads refuse or the script cannot report."""
+    from ..pipeline import runner
+    with tempfile.TemporaryDirectory(prefix="chiplet_export_routed_inputs_") as tmp:
+        out = os.path.join(tmp, "inputs.json")
+        command = [python, INPUTS_SCRIPT, document_path, chiplet_path,
+                   io_pads_path, IO_PADS_FRAME, out]
+        try:
+            run = runner.run_async(command, timeout=INPUTS_TIMEOUT_SECONDS)
+        except OSError as exc:
+            raise RoutedRefused("the worker interpreter %s cannot read the routed "
+                                "inputs: %s" % (python, exc)) from exc
+        if run.timed_out or run.exit_code != 0 or not os.path.isfile(out):
+            lines = (run.stderr or "").strip().splitlines()
+            raise RoutedRefused(
+                "the worker interpreter %s could not read the routed inputs (%s): %s"
+                % (python, "timed out after %d s" % INPUTS_TIMEOUT_SECONDS
+                   if run.timed_out else "exit %s" % run.exit_code,
+                   lines[-1] if lines else "no message"))
+        with open(out, encoding="utf-8") as f:
+            report = json.load(f)
+    for message in report["warnings"]:
+        if on_warn is not None:
+            on_warn(message)
+        else:
+            warnings.warn(message, stacklevel=2)
+    if "refused" in report:
+        raise RoutedRefused(report["refused"])
+    return tuple(report["inputs"])
 
 
 def stack_layer_name(stack, token):
@@ -103,15 +149,21 @@ class RoutedSource(ExportSource):
         return ("Routed geometry: %s (the board is not opened)"
                 % self.document_path)
 
-    def preflight(self, interconnect_manifest, *, on_warn=None):
+    def preflight(self, interconnect_manifest, *, on_warn=None,
+                  worker_python=None):
         """Read and check the documents and compute every intermediate.
 
+        The documents are read under the worker interpreter
+        ``worker_python()`` (read_in_worker); the rest is computed here.
         Refuses (RoutedRefused) an adapter not given, what
         prepare_intermediates refuses (the stack and nets included), a die
         layout or pin list whose bytes are not the ones the document binds,
         and a device reference the worker's flags cannot carry. Writes
         nothing.
         """
+        if worker_python is None:
+            raise RoutedRefused("the routed path reads its inputs with the worker "
+                                "interpreter, and none was given")
         if self._interposer_adapter is None or self._interconnect_adapter is None:
             raise RoutedRefused(
                 "the routed path takes both adapters explicitly: give "
@@ -123,12 +175,16 @@ class RoutedSource(ExportSource):
             validate_adapter_id(self._interconnect_adapter, "interconnect adapter")
             validate_interconnect_ids(adapter=self._interconnect_adapter,
                                       manifest=interconnect_manifest)
+            inputs = read_in_worker(worker_python(), self.document_path,
+                                    self.chiplet_path, self.io_pads_path,
+                                    on_warn=on_warn)
             prepared = prepare_intermediates(
                 self.document_path, self.chiplet_path, self.io_pads_path,
                 board_name=self._name, interconnect_manifest=interconnect_manifest,
                 interposer_adapter=self._interposer_adapter,
                 interconnect_adapter="",
-                method_specs=interconnect_manifest.methods, on_warn=on_warn)
+                method_specs=interconnect_manifest.methods, on_warn=on_warn,
+                inputs=inputs)
         except ValueError as exc:
             # An adapter id the board path refuses too.
             raise RoutedRefused(str(exc)) from exc
