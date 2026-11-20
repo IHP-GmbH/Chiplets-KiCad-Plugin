@@ -4,10 +4,10 @@
 From registry 1.2 on a method may state each pad parameter under two names,
 passivation_opening_um beside passiv_opening_um and pad_metal_enclosure_um
 beside tm2_enclosure_um, and the 1.x name stays required. Every plugin read
-goes through method_fab_params, which applies chiplet-spec 1.25.0's rule
-(technology_package.method_fab_params) with its two texts whichever
-interconnect_pdk reader was found: one from 1.2 on refuses by itself, an
-older one returns the entry as written.
+goes through method_fab_params. With interconnect_pdk's reader, which must
+read interconnect methods 1.2 or later, the reader owns the rule and its
+texts; without one (the board path) the plugin applies chiplet-spec 1.25.0's
+rule (technology_package.method_fab_params) with the same two texts.
 """
 
 import copy
@@ -15,7 +15,7 @@ import json
 
 import pytest
 
-from chiplet_export.carrier_profile import FabParamsRefused, method_fab_params
+from chiplet_export.carrier_profile import FabParamsRefused, check_reader, method_fab_params
 from chiplet_export.pad_domains import PadDomainError, footprint_pin_list
 from chiplet_export.pipeline import orchestrator
 
@@ -40,29 +40,60 @@ BOTH = dict(OLD, passivation_opening_um=40.0, pad_metal_enclosure_um=7.5)
 class OldReader:
     """interconnect_pdk's reader before 1.2: the entry as written."""
 
-    def fab_params(self, method_id, manifest):
-        return dict(manifest["methods"][method_id]["fab_params"])
+    SUPPORTED_SCHEMA_VERSION = "1.1"
+    __file__ = "/pdk/libs.tech/klayout/python/interconnect_manifest.py"
+
+    def fab_params(self, method_id, manifest, *, where=None):
+        raise AssertionError("a reader below 1.2 was asked")
 
 
 class Reader12:
     """A reader from 1.2 on, as its contract states: the whole dict with both
     names present and equal, or its own FabParamsRefused."""
 
+    SUPPORTED_SCHEMA_VERSION = "1.2"
+
     class FabParamsRefused(Exception):
         pass
 
-    def fab_params(self, method_id, manifest):
+    def fab_params(self, method_id, manifest, *, where=None):
         fab = dict(manifest["methods"][method_id]["fab_params"])
         for new, old in RENAMED:
             if old not in fab:
-                raise self.FabParamsRefused("PACKAGE_METHODS_FAB_PARAMS_MISSING: reader")
+                raise self.FabParamsRefused("PACKAGE_METHODS_FAB_PARAMS_MISSING: %s" % where)
             if fab.setdefault(new, fab[old]) != fab[old]:
-                raise self.FabParamsRefused("PACKAGE_METHODS_FAB_PARAMS_DISAGREE: reader")
+                raise self.FabParamsRefused("PACKAGE_METHODS_FAB_PARAMS_DISAGREE: %s" % where)
         return fab
 
 
-READERS = pytest.mark.parametrize("reader", [None, OldReader(), Reader12()],
-                                  ids=["no reader", "reader 1.1", "reader 1.2"])
+READERS = pytest.mark.parametrize("reader", [None, Reader12()],
+                                  ids=["no reader", "reader 1.2"])
+
+
+def old_reader_text(version):
+    return ("interconnect_pdk at /pdk/libs.tech/klayout/python/interconnect_manifest.py "
+            "reads interconnect methods up to version %s. This plugin needs version 1.2 "
+            "or later, because 1.2 names the pad parameters passivation_opening_um and "
+            "pad_metal_enclosure_um. Update interconnect_pdk." % version)
+
+
+@pytest.mark.parametrize("version, shown", [
+    ("1.1", "1.1"), ("1.0", "1.0"), (None, "unknown"), ("1.x", "1.x"), ("", "unknown"),
+])
+def test_a_reader_below_1_2_is_refused_before_it_is_asked(version, shown):
+    reader = OldReader()
+    reader.SUPPORTED_SCHEMA_VERSION = version
+    with pytest.raises(FabParamsRefused) as caught:
+        method_fab_params("cupillar_opt2", specs(**BOTH), where="r.json", reader=reader)
+    assert str(caught.value) == old_reader_text(shown)
+
+
+@pytest.mark.parametrize("version", ["1.2", "1.10", "2.0"])
+def test_a_reader_from_1_2_on_is_taken(version):
+    reader = Reader12()
+    reader.SUPPORTED_SCHEMA_VERSION = version
+    check_reader(reader)
+    assert method_fab_params("cupillar_opt2", specs(**OLD), reader=reader) == BOTH
 
 
 @READERS
@@ -80,18 +111,18 @@ def test_on_a_1_2_readers_output_it_changes_nothing():
 
 
 def test_a_1_2_readers_refusal_is_the_plugins_with_its_text():
-    with pytest.raises(FabParamsRefused, match="^PACKAGE_METHODS_FAB_PARAMS_DISAGREE: reader$"):
+    with pytest.raises(FabParamsRefused, match="^PACKAGE_METHODS_FAB_PARAMS_DISAGREE: r.json$"):
         method_fab_params("cupillar_opt2", specs(**dict(OLD, passiv_opening_um=45.0),
                                                 passivation_opening_um=40.0),
                           where="r.json", reader=Reader12())
 
 
 # The two texts, word for word as chiplet-spec 1.25.0's conformance tests pin
-# them, on the readers that do not refuse by themselves.
+# them, on the path without a reader (the board's).
 
-@pytest.mark.parametrize("reader", [None, OldReader()], ids=["no reader", "reader 1.1"])
 @pytest.mark.parametrize("new,old", RENAMED)
-def test_two_spellings_with_two_values_are_refused(reader, new, old):
+def test_two_spellings_with_two_values_are_refused(new, old):
+    reader = None
     fab = dict(OLD)
     fab[new] = fab[old] + 5.0
     with pytest.raises(FabParamsRefused) as caught:
@@ -103,9 +134,9 @@ def test_two_spellings_with_two_values_are_refused(reader, new, old):
         % (old, fab[old], new, fab[new]))
 
 
-@pytest.mark.parametrize("reader", [None, OldReader()], ids=["no reader", "reader 1.1"])
 @pytest.mark.parametrize("new,old", RENAMED)
-def test_a_method_without_the_old_name_is_refused(reader, new, old):
+def test_a_method_without_the_old_name_is_refused(new, old):
+    reader = None
     fab = dict(BOTH)
     del fab[old]
     with pytest.raises(FabParamsRefused) as caught:
@@ -117,9 +148,9 @@ def test_a_method_without_the_old_name_is_refused(reader, new, old):
         % (old, new))
 
 
-@pytest.mark.parametrize("reader", [None, OldReader()], ids=["no reader", "reader 1.1"])
 @pytest.mark.parametrize("new,old", RENAMED)
-def test_a_method_with_neither_name_is_refused(reader, new, old):
+def test_a_method_with_neither_name_is_refused(new, old):
+    reader = None
     fab = dict(OLD)
     del fab[old]
     with pytest.raises(FabParamsRefused) as caught:
@@ -133,7 +164,7 @@ def test_a_method_with_neither_name_is_refused(reader, new, old):
 @pytest.mark.parametrize("spec", [None, "fab", {"fab_params": "x"}, {"fab_params": None}])
 def test_what_is_not_a_method_reads_as_one_without_pad_parameters(spec):
     with pytest.raises(FabParamsRefused, match="^PACKAGE_METHODS_FAB_PARAMS_MISSING"):
-        method_fab_params("m", {"m": spec}, where="r.json", reader=OldReader())
+        method_fab_params("m", {"m": spec}, where="r.json")
 
 
 def test_an_unknown_method_stays_a_key_error():

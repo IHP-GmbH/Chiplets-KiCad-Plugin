@@ -37,39 +37,56 @@ MANIFEST_WHERE = "interconnect_methods.json"
 
 
 class FabParamsRefused(Exception):
-    """A method's pad parameters have no single reading.
+    """A method's pad parameters have no single reading, or the reader that
+    would read them is older than interconnect methods 1.2.
 
     Deliberately not a KeyError, TypeError or ValueError: the handlers around
     a manifest read take those to mean "malformed entry, skip it".
     """
 
 
+#: The oldest interconnect methods version whose reader this plugin uses: 1.2
+#: names the pad parameters by their new names and refuses two values.
+READER_MIN_VERSION = (1, 2)
+
+
+def check_reader(reader):
+    """Refuse interconnect_pdk's reader when it reads interconnect methods
+    below 1.2 (its ``SUPPORTED_SCHEMA_VERSION``), with FabParamsRefused."""
+    value = getattr(reader, "SUPPORTED_SCHEMA_VERSION", None)
+    parts = value.split(".") if isinstance(value, str) else ()
+    version = (tuple(int(part) for part in parts)
+               if len(parts) == 2 and all(part.isdigit() for part in parts) else None)
+    if version is None or version < READER_MIN_VERSION:
+        raise FabParamsRefused(
+            "interconnect_pdk at %s reads interconnect methods up to version %s. This "
+            "plugin needs version 1.2 or later, because 1.2 names the pad parameters "
+            "passivation_opening_um and pad_metal_enclosure_um. Update interconnect_pdk."
+            % (getattr(reader, "__file__", None) or "an unknown path",
+               value if isinstance(value, str) and value else "unknown"))
+
+
 def method_fab_params(method, method_specs, *, where=MANIFEST_WHERE, reader=None):
     """``method``'s fab_params, its pad parameters under the 1.2 names.
 
-    With ``reader`` (interconnect_pdk's interconnect_manifest) the dict is the
-    reader's ``fab_params``; without one, the method's own entry. A reader
-    from interconnect methods 1.2 on refuses a method whose two names of one
-    parameter disagree; an older one returns the entry as written. Either way
-    chiplet-spec 1.25.0's rule (technology_package.method_fab_params) is
-    applied here, with its two texts, so a refusal does not depend on which
-    reader discovery found; on a 1.2 reader's dict it changes nothing.
-    The reader is asked first so every read goes through interconnect_pdk's
-    own (and a 1.2 reader's refusal keeps its text); the rule is applied
-    again because an older reader does not refuse. ``where`` names the
-    manifest in the refusal. A method that is not an
-    object, or has no fab_params object, reads as one without pad parameters
-    (MISSING), with or without a reader. Raises KeyError for an unknown
+    With ``reader`` (interconnect_pdk's interconnect_manifest) the reader
+    owns the rule: it must read interconnect methods 1.2 or later
+    (check_reader), and its ``fab_params`` dict, or its own refusal with its
+    text, is the answer. Without one (the board path reads the method from
+    the board) chiplet-spec 1.25.0's rule (technology_package.method_fab_params)
+    is applied here, with its two texts. ``where`` names the manifest in
+    those. A method that is not an object, or has no fab_params object, reads
+    as one without pad parameters (MISSING). Raises KeyError for an unknown
     method, as the reader does, and FabParamsRefused.
     """
     spec = method_specs[method]
-    fab_params = spec.get("fab_params") if isinstance(spec, dict) else None
-    if reader is not None and isinstance(fab_params, dict):
-        refused = getattr(reader, "FabParamsRefused", ())
+    if reader is not None:
+        check_reader(reader)
         try:
-            fab_params = reader.fab_params(method, {"methods": method_specs})
-        except refused as exc:
+            return dict(reader.fab_params(method, {"methods": method_specs}, where=where))
+        except reader.FabParamsRefused as exc:
             raise FabParamsRefused(str(exc)) from exc
+    fab_params = spec.get("fab_params") if isinstance(spec, dict) else None
     params = dict(fab_params) if isinstance(fab_params, dict) else {}
     for new, old, words in PAD_PARAMETERS:
         if old not in params:
