@@ -6211,7 +6211,8 @@ def _insert_metal_fill(gds_path, topcell, mode, filler_layers, log=print):
     (fill_closure.fill_stack) -- the single source of truth for the density
     rules -- and only locates it, calls it, and writes the read-back sidecars
     (``<stem>.fill_density.json`` and ``<stem>.fill_coverage.json``). Returns
-    {"status": "ok"|"skipped"|"error", "report": .., "coverage": ..}.
+    {"status": "ok"|"skipped"|"error", "report": .., "coverage": ..}, and on
+    "ok" the sidecars it wrote under "files".
 
     The ``klayout`` binary is required (the engine shells out to it, exactly
     like the assembly-DRC step); when it is absent we SOFT-SKIP with a clear
@@ -6250,8 +6251,10 @@ def _insert_metal_fill(gds_path, topcell, mode, filler_layers, log=print):
             return {"status": "error", "report": None, "coverage": None}
 
     stem = str(Path(gds_path).with_suffix(""))
+    written = []
     try:
         with open(stem + ".fill_density.json", "w") as f:
+            written.append(stem + ".fill_density.json")
             json.dump(report if report is not None else {}, f, indent=2)
         log("Fill density report: %s.fill_density.json" % stem)
     except OSError as exc:
@@ -6262,6 +6265,7 @@ def _insert_metal_fill(gds_path, topcell, mode, filler_layers, log=print):
     try:
         coverage = _compute_fill_coverage(gds_path, filler_layers)
         with open(stem + ".fill_coverage.json", "w") as f:
+            written.append(stem + ".fill_coverage.json")
             json.dump(coverage, f, indent=2)
         log("Fill coverage map: %s.fill_coverage.json (%d cell(s))"
             % (stem, len(coverage.get("grid", []))))
@@ -6269,7 +6273,8 @@ def _insert_metal_fill(gds_path, topcell, mode, filler_layers, log=print):
         print("Warning: could not compute fill coverage map: %s" % exc,
               file=sys.stderr)
 
-    return {"status": "ok", "report": report, "coverage": coverage}
+    return {"status": "ok", "report": report, "coverage": coverage,
+            "files": written}
 
 
 def _parse_length_um(value) -> Optional[float]:
@@ -6393,6 +6398,12 @@ def _report_refusal(what: str, exc: Exception) -> None:
     print("\nERROR: %s refused: %s" % (what, reason), file=sys.stderr)
     for line in detail.splitlines():
         print("  " + line, file=sys.stderr)
+
+
+def _remove_files(paths: List[str]) -> None:
+    for path in paths:
+        if os.path.exists(path):
+            os.remove(path)
 
 
 def _report_bbox_refusal(exc: "BboxOffOrigin") -> None:
@@ -6534,6 +6545,9 @@ def convert_hyp_to_gds(
         True if conversion was successful
     """
     print(f"Converting: {routed_geometry_path or hyp_path} -> {output_path}")
+    # Files written before the routed bbox checks: a refusal there removes
+    # them, so its "no sidecar was written" holds.
+    early_files: List[str] = []
 
     # Gate: do the text grammar and the YAML parser agree about this document's
     # top-level keys? The GUI tier decided block ownership from the raw text
@@ -7078,6 +7092,7 @@ def convert_hyp_to_gds(
                 }
                 try:
                     with open(str(drc_path), "w") as f:
+                        early_files.append(str(drc_path))
                         json.dump(doc, f, indent=2)
                     print(f"Landing DRC report: {drc_path}")
                 except OSError as e:
@@ -7170,6 +7185,7 @@ def convert_hyp_to_gds(
         try:
             check_bbox_at_origin(generator.layout, generator.top_cell)
         except BboxOffOrigin as exc:
+            _remove_files(early_files)
             _report_bbox_refusal(exc)
             return False
 
@@ -7190,6 +7206,7 @@ def convert_hyp_to_gds(
     if insert_metal_fill:
         fill_result = _insert_metal_fill(
             output_path, cell_name, fill_mode, _filler_layers(layer_map))
+        early_files.extend(fill_result.get("files", []))
         if fill_result["status"] == "error":
             return False
         # The fill drew on the file, where the check above could not see:
@@ -7198,7 +7215,7 @@ def convert_hyp_to_gds(
             try:
                 check_written_bbox_at_origin(output_path, cell_name)
             except BboxOffOrigin as exc:
-                os.remove(output_path)
+                _remove_files(early_files + [output_path])
                 _report_bbox_refusal(exc)
                 return False
         generator.write_sidecars(output_path)

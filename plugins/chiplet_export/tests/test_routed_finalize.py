@@ -35,7 +35,7 @@ if str(PLUGINS) not in sys.path:
 
 import hyp_to_gds as _h  # noqa: E402
 
-from .routed_t03_stage import BOARD_HYP, CHIPLET, INPUTS, IO_PADS, stage  # noqa: E402
+from .routed_t03_stage import BOARD_HYP, CHIPLET, DIES, INPUTS, IO_PADS, stage  # noqa: E402
 
 LYP_PATH = Path(_h._find_default_lyp())
 BOARD_CHIPLET = INPUTS / "board-path.chiplet"
@@ -167,6 +167,42 @@ def test_a_fill_shape_past_the_left_edge_is_refused_and_the_gds_deleted(
     assert ok is False
     assert OFF_ORIGIN in err and "bbox lower-left is (-5000, 0) dbu" in err
     assert "in cell INTERPOSER" in err
+    assert _left_out(layout) == []
+
+
+def test_a_refusal_after_the_landing_report_leaves_nothing(tmp_path, capsys):
+    """With the dies' pin lists and connections the worker writes the
+    landing DRC report before the bbox check; the refusal removes it."""
+    pins = {ref: str(tmp_path / "run" / "dies" / die / "pins.json")
+            for ref, die in DIES.items()}
+    ok, layout = _run(tmp_path, io_pads=_io_pads(tmp_path, _pad_past_left_edge),
+                      pad_locations=pins,
+                      die_connections={ref: "cupillar_opt1" for ref in DIES})
+    captured = capsys.readouterr()
+    assert ok is False
+    assert "Landing DRC report:" in captured.out
+    assert OFF_ORIGIN in captured.err
+    assert _left_out(layout) == []
+
+
+def test_a_refusal_after_the_fill_leaves_none_of_its_sidecars(
+        tmp_path, capsys, monkeypatch):
+    def fill(path, cell, mode, layers):
+        layout = db.Layout()
+        layout.read(path)
+        top = layout.cell(cell)
+        index = layout.layer(*layers[0]) if layers else layout.layer(126, 22)
+        top.shapes(index).insert(db.Box(-5000, 100000, -1000, 104000))
+        layout.write(path)
+        stem = str(Path(path).with_suffix(""))
+        files = [stem + ".fill_density.json", stem + ".fill_coverage.json"]
+        for name in files:
+            Path(name).write_text("{}\n")
+        return {"status": "ok", "report": {}, "files": files}
+    monkeypatch.setattr(_h, "_insert_metal_fill", fill)
+    ok, layout = _run(tmp_path, insert_metal_fill=True)
+    assert ok is False
+    assert OFF_ORIGIN in capsys.readouterr().err
     assert _left_out(layout) == []
 
 

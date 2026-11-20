@@ -26,6 +26,16 @@ from .intermediates import prepare_intermediates, write_pin_lists
 _INNER = re.compile(r"^In([1-9][0-9]*)\.Cu$")
 
 
+def output_stem_problem(name):
+    """Why name cannot name the outputs, or None: it is joined to the
+    workspace and the output folder, so it must be a file stem, not a path."""
+    if not name:
+        return "the routed path needs the output name (--name)"
+    if name in (".", "..") or "/" in name or "\\" in name or os.sep in name:
+        return "the output name (--name) must be a file stem, not a path: %r" % name
+    return None
+
+
 def stack_layer_name(stack, token):
     """The metal the routed document's ``stack`` (bottom to top) puts at the
     KiCad copper layer ``token``: F.Cu is the top metal, B.Cu the bottom one,
@@ -70,8 +80,9 @@ class RoutedSource(ExportSource):
         must be given (None is refused by the preflight, never defaulted):
         the interposer adapter not empty, the interconnect adapter empty for
         none, as on the board path."""
-        if not name:
-            raise RoutedRefused("the routed path needs the output name (--name)")
+        problem = output_stem_problem(name)
+        if problem:
+            raise RoutedRefused(problem)
         self._interposer_adapter = interposer_adapter
         self._interconnect_adapter = interconnect_adapter
         self.files = {}

@@ -105,7 +105,7 @@ def _check_carrier(pad, index):
     where = "io_pads[%d]" % index
     if not isinstance(pad, dict):
         raise RoutedRefused("%s must be an object" % where)
-    for key in ("ref", "io_class", "net"):
+    for key in ("ref", "io_class", "net", "layer"):
         if not isinstance(pad.get(key), str) or not pad[key]:
             raise RoutedRefused("%s has no %s" % (where, key))
     for key in ("x_um", "y_um", "size_x_um", "size_y_um"):
@@ -119,8 +119,8 @@ def _check_carrier(pad, index):
         raise RoutedRefused("io_pad %s has io_class %r, not one of %s"
                             % (pad["ref"], pad["io_class"], ", ".join(IO_CLASSES)))
     # The emitter writes every carrier on IO_PAD_LAYER; another layer would be
-    # written as that one without a word.
-    if pad.get("layer", IO_PAD_LAYER) != IO_PAD_LAYER:
+    # written as that one without a word. The worker reads the layer as given.
+    if pad["layer"] != IO_PAD_LAYER:
         raise RoutedRefused("io_pad %s is on %r; the .chiplet carries io_pads on %s"
                             % (pad["ref"], pad["layer"], IO_PAD_LAYER))
 

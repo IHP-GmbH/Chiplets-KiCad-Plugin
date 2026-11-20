@@ -347,7 +347,8 @@ def _io_pads_variant(tmp_path, edit):
     (lambda pads: pads[0].update(io_class="bogus"), "io_class 'bogus'"),
     (lambda pads: pads[0].update(layer="Metal1"), "is on 'Metal1'"),
     (lambda pads: pads[1].update(ref=pads[0]["ref"]), "is listed twice"),
-], ids=["io-class", "layer", "duplicate-ref"])
+    (lambda pads: pads[0].pop("layer"), r"io_pads\[0\] has no layer"),
+], ids=["io-class", "layer", "duplicate-ref", "no-layer"])
 def test_refuses_a_carrier_the_board_path_refuses(tmp_path, edit, match):
     _assert_refused_unwritten(tmp_path, match, io_pads=_io_pads_variant(tmp_path, edit))
 

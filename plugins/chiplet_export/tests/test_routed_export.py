@@ -293,6 +293,25 @@ def test_the_routed_path_needs_its_three_flags(tmp_path, no_kicad, drop):
     assert exc.value.code == 2
 
 
+@pytest.mark.parametrize("name", ["../x", "a/b", "..", "a\\b"])
+def test_the_output_name_is_a_stem_not_a_path(tmp_path, no_kicad, worker, capsys, name):
+    argv = _routed_argv(tmp_path)
+    argv[argv.index("--name") + 1] = name
+    with pytest.raises(SystemExit) as exc:
+        _cli().main(argv)
+    assert exc.value.code == 2
+    assert "must be a file stem, not a path" in capsys.readouterr().err
+    assert worker == [] and not (tmp_path / "out").exists()
+
+
+def test_the_source_refuses_a_path_for_a_name():
+    from chiplet_export.routed.document import RoutedRefused
+    from chiplet_export.routed.source import RoutedSource
+    with pytest.raises(RoutedRefused, match="file stem, not a path"):
+        RoutedSource("d.json", "c.chiplet", "p.json", name="../x",
+                     interposer_adapter="intm4tm2", interconnect_adapter="")
+
+
 @pytest.mark.parametrize("flag", ["--name", "--io-pads"])
 def test_a_routed_flag_without_the_document_is_refused(tmp_path, no_kicad, flag):
     argv = ["--board", str(_board(tmp_path)), "--output-dir", str(tmp_path / "out"),

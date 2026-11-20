@@ -189,6 +189,10 @@ def _check_routed_args(parser, args):
                if not value]
     if missing:
         parser.error("%s needs %s" % (ROUTED_FLAG, ", ".join(missing)))
+    from chiplet_export.routed.source import output_stem_problem
+    problem = output_stem_problem(args.name)
+    if problem:
+        parser.error(problem)
 
 
 def _missing(label, path):
