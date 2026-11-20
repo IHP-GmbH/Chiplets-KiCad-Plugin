@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The routed-geometry document's copper: its stack and its nets, checked.
+"""The routed-geometry document, checked: what the export's intermediates
+and the worker's drawing read from it.
 
 Read by the export's preflight (routed/document.py) and by the worker
-(hyp_to_gds.py --routed-geometry), so both refuse the same documents; the
-worker imports it as a sibling script module, so it imports nothing from the
-package. Standard library only.
+(hyp_to_gds.py --routed-geometry), so both refuse the same documents. The
+worker imports it as a sibling script module, so besides the standard library
+it imports only the vendored chiplet_format_io (for the version policy), the
+way hyp_to_gds imports its siblings.
+
+The document is interposer-pnr's: micrometres, Y up, origin at the outline's
+lower-left corner.
 
 Nothing in a net is ignored: a net or a record carrying a key this reader does
 not read (an arc, say) is refused, naming the net and the key, as is one
@@ -15,9 +20,15 @@ net class). Coordinates and widths are micrometres in the interposer GDS frame.
 """
 
 import hashlib
+import json
 import math
 import os
 
+SCHEMA = "routed-geometry"
+SUPPORTED_VERSION = "1.0"
+FRAME = "interposer_local_y_up_um"
+
+#: The name the version policy gives the document in its messages.
 ARTIFACT = "routed-geometry.json"
 
 STACK_KEYS = frozenset({"metal", "cut_above"})
@@ -33,7 +44,16 @@ _PLACED = ("via", "x", "y", "top_layer", "bottom_layer")
 
 
 class DocumentRefused(Exception):
-    """The document's stack or nets cannot be read; nothing is drawn."""
+    """The document cannot be read for what it is read for; nothing is
+    written or drawn."""
+
+
+def _chiplet_format_io():
+    try:
+        from . import vendored
+    except ImportError:
+        import vendored
+    return vendored.chiplet_format_io()
 
 
 def _keys(record, allowed, what, labels=frozenset()):
@@ -65,6 +85,102 @@ def _text(value, what):
     if not isinstance(value, str) or not value:
         raise DocumentRefused("%s is not a name: %r" % (what, value))
     return value
+
+
+def _finite(value, label, positive=False):
+    if (type(value) not in (int, float) or not math.isfinite(value)
+            or (positive and value <= 0)):
+        raise DocumentRefused("%s must be a finite number%s, not %r"
+                            % (label, " above 0" if positive else "", value))
+    return float(value)
+
+
+def _point(value, label):
+    if not isinstance(value, list) or len(value) != 2:
+        raise DocumentRefused("%s must be an [x, y] pair, not %r" % (label, value))
+    return (_finite(value[0], label + "[0]"), _finite(value[1], label + "[1]"))
+
+
+def _device(device, index):
+    where = "devices[%d]" % index
+    if not isinstance(device, dict):
+        raise DocumentRefused("%s must be an object" % where)
+    ref = device.get("ref")
+    if not isinstance(ref, str) or not ref:
+        raise DocumentRefused("%s has no ref" % where)
+    where = "device %s" % ref
+    layout = device.get("layout")
+    if (not isinstance(layout, dict) or not isinstance(layout.get("path"), str)
+            or not layout["path"]):
+        raise DocumentRefused("%s has no layout.path" % where)
+    _point(device.get("origin"), where + " origin")
+    _finite(device.get("rotation_deg"), where + " rotation_deg")
+    if type(device.get("mirrored")) is not bool:
+        raise DocumentRefused("%s mirrored must be true or false" % where)
+    if device.get("pad_domains") is None:
+        raise DocumentRefused(
+            "%s has no pad_domains; the die pin list and its dimensions come "
+            "from that archive only" % where)
+
+
+def check_document(document, *, on_warn=None):
+    """Refuse ``document`` unless it holds what the intermediates read.
+
+    The version goes through chiplet_format_io's shared policy: a higher
+    minor of major 1 is read with a warning, any other major is refused.
+    """
+    if not isinstance(document, dict):
+        raise DocumentRefused("%s is not a JSON object" % ARTIFACT)
+    if document.get("schema") != SCHEMA:
+        raise DocumentRefused("%s has schema %r, not %r"
+                            % (ARTIFACT, document.get("schema"), SCHEMA))
+    cfio = _chiplet_format_io()
+    try:
+        cfio.check_contract_version(document.get("version"), SUPPORTED_VERSION,
+                                    name=ARTIFACT, on_warn=on_warn)
+    except cfio.ContractVersionError as exc:
+        raise DocumentRefused(str(exc)) from exc
+    if document.get("frame") != FRAME:
+        raise DocumentRefused("%s is in frame %r; this reader reads only %r"
+                            % (ARTIFACT, document.get("frame"), FRAME))
+    outline = document.get("outline")
+    if not isinstance(outline, list) or len(outline) < 3:
+        raise DocumentRefused("%s outline needs at least three points" % ARTIFACT)
+    points = [_point(point, "outline[%d]" % i) for i, point in enumerate(outline)]
+    # The io_pads manifest's gds_bbox_corner_um frame and this one share an
+    # origin only because this frame puts it at the outline's lower-left.
+    corner = (min(x for x, _y in points), min(y for _x, y in points))
+    if any(round(value * 1000.0) != 0 for value in corner):
+        raise DocumentRefused(
+            "%s outline's lower-left is (%g, %g); frame %s has its origin there"
+            % (ARTIFACT, corner[0], corner[1], FRAME))
+    interposer = document.get("interposer")
+    if not isinstance(interposer, dict):
+        raise DocumentRefused("%s has no interposer object" % ARTIFACT)
+    _finite(interposer.get("body_thickness_um"), "interposer.body_thickness_um",
+            positive=True)
+    devices = document.get("devices")
+    if not isinstance(devices, list) or not devices:
+        raise DocumentRefused("%s lists no devices" % ARTIFACT)
+    seen = set()
+    for i, device in enumerate(devices):
+        _device(device, i)
+        if device["ref"] in seen:
+            raise DocumentRefused("device %s is listed twice" % device["ref"])
+        seen.add(device["ref"])
+    check_nets(document)
+    return document
+
+
+def read_document(path, *, on_warn=None):
+    """The routed-geometry document at ``path``, checked; DocumentRefused
+    otherwise."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            document = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise DocumentRefused("cannot read %s: %s" % (path, exc)) from exc
+    return check_document(document, on_warn=on_warn)
 
 
 def stack_metals(document):
