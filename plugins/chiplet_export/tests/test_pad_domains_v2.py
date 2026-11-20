@@ -94,10 +94,10 @@ def test_an_archive_never_mixes_the_two_spellings(version, key):
     no reader picks one of two values for one parameter."""
     doc = version_2() if version == 2 else document()
     doc["interconnect"][key] = 1.0
-    with pytest.raises(PadDomainError,
-                       match="interconnect.%s is not a key of pad-domain version %d"
-                       % (key, version)):
+    with pytest.raises(PadDomainError) as caught:
         decode(doc)
+    assert str(caught.value) == (
+        "U1: interconnect.%s is not a key of pad domain version %d" % (key, version))
 
 
 @pytest.mark.parametrize("edit", [

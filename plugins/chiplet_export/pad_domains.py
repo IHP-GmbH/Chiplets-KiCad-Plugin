@@ -136,8 +136,9 @@ def decode_domains(text, reference, method):
     for other, keys in PAD_PARAMETER_KEYS.items():
         for key in keys:
             if other != version and key in attachment:
-                raise PadDomainError("interconnect.%s is not a key of pad-domain version %d"
-                                     % (key, version))
+                # interposer-pnr's text, word for word (its pad_domains.py).
+                raise PadDomainError("%s: interconnect.%s is not a key of pad domain version %d"
+                                     % (reference, key, version))
     for key in ("body_diameter_um", opening, enclosure):
         _number(attachment.get(key), "interconnect." + key, positive=True)
     diameter = _number(carrier.get("diameter_um"), "carrier.diameter_um", True)
