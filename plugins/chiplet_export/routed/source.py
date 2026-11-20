@@ -90,8 +90,9 @@ def read_in_worker(python, document_path, chiplet_path, io_pads_path, *,
 def stack_layer_name(stack, token):
     """The metal the routed document's ``stack`` (bottom to top) puts at the
     KiCad copper layer ``token``: F.Cu is the top metal, B.Cu the bottom one,
-    In<n>.Cu the n-th below the top. The board names its copper layers this
-    way (interposer-pnr kicad_export writes F.Cu first)."""
+    In<n>.Cu the n-th below the top, strictly above the bottom. The board
+    names its copper layers this way (interposer-pnr kicad_export writes
+    F.Cu first)."""
     metals = [entry.get("metal") if isinstance(entry, dict) else None
               for entry in stack]
     if token == "F.Cu":
@@ -103,7 +104,9 @@ def stack_layer_name(stack, token):
         if inner is None:
             raise RoutedRefused(
                 "%r is not a KiCad copper layer name (F.Cu, B.Cu or In<n>.Cu)" % token)
-        index = len(metals) - 1 - int(inner.group(1))
+        # An inner layer that reached the bottom would name B.Cu's metal.
+        below_top = int(inner.group(1))
+        index = len(metals) - 1 - below_top if below_top < len(metals) - 1 else -1
     if not 0 <= index < len(metals) or not metals[index]:
         raise RoutedRefused("the routed stack of %d metals has no %s"
                             % (len(metals), token))
