@@ -15,7 +15,6 @@ worker interpreter, which has it; the CLI's interpreter has not.
 """
 
 import os
-import re
 import shutil
 import warnings
 
@@ -29,10 +28,6 @@ from .intermediates import IO_PADS_FRAME, prepare_intermediates, write_pin_lists
 INPUTS_SCRIPT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "routed_inputs.py")
 INPUTS_TIMEOUT_SECONDS = 120
-
-#: The KiCad copper names a carrier archive gives its pad layer.
-_INNER = re.compile(r"^In([1-9][0-9]*)\.Cu$")
-
 
 def output_stem_problem(name):
     """Why name cannot name the outputs, or None: it is joined to the
@@ -85,34 +80,6 @@ def read_in_worker(python, document_path, chiplet_path, io_pads_path, *,
     if refused is not None:
         raise RoutedRefused(refused)
     return inputs
-
-
-def stack_layer_name(stack, token):
-    """The metal the routed document's ``stack`` (bottom to top) puts at the
-    KiCad copper layer ``token``: F.Cu is the top metal, B.Cu the bottom one,
-    In<n>.Cu the n-th below the top, strictly above the bottom. The board
-    names its copper layers this way (interposer-pnr kicad_export writes
-    F.Cu first)."""
-    metals = [entry.get("metal") if isinstance(entry, dict) else None
-              for entry in stack]
-    if token == "F.Cu":
-        index = len(metals) - 1
-    elif token == "B.Cu":
-        index = 0
-    else:
-        inner = _INNER.match(token or "")
-        if inner is None:
-            raise RoutedRefused(
-                "%r is not a KiCad copper layer name (F.Cu, B.Cu or In<n>.Cu)" % token)
-        index = len(metals) - 1 - int(inner.group(1))
-        if index == 0:
-            # The bottom metal is B.Cu's; an inner layer sits strictly above
-            # it. -1 is refused by the range check below.
-            index = -1
-    if not 0 <= index < len(metals) or not metals[index]:
-        raise RoutedRefused("the routed stack of %d metals has no %s"
-                            % (len(metals), token))
-    return metals[index]
 
 
 class RoutedSource(ExportSource):
@@ -213,22 +180,24 @@ class RoutedSource(ExportSource):
 
     def validate_pad_domains(self, methods, *, load_layer_map):
         """{ref: method} of every device, after its carrier layer check: the
-        document's metal at the archive's kicad_layer must map, through the
-        worker LYP, to the layer the archive names."""
+        archive's carrier.layer must be the document's top metal, the one
+        every carrier pad lands on, and resolve in the worker LYP."""
         from ..pad_domains import PadDomainError, check_carrier_layer
         from ..layer_map import LayerMapError
         prepared = self.prepared
-        stack = prepared.document["stack"]
+        top = prepared.document["stack"][-1]["metal"]
         layer_map = load_layer_map()
         for device in prepared.document["devices"]:
             ref = device["ref"]
             carrier = device["pad_domains"]["carrier"]
             try:
-                check_carrier_layer(
-                    carrier, stack_layer_name(stack, carrier["kicad_layer"]),
-                    layer_map)
-            except (LayerMapError, KeyError, TypeError, RoutedRefused,
-                    PadDomainError) as exc:
+                if carrier["layer"] != top:
+                    raise PadDomainError(
+                        "carrier.layer %r is not the routed stack's top metal %r; the "
+                        "routed path lands carrier pads on the top metal only"
+                        % (carrier["layer"], top))
+                check_carrier_layer(carrier, top, layer_map)
+            except (LayerMapError, KeyError, TypeError, PadDomainError) as exc:
                 raise PadDomainError("%s carrier layer: %s" % (ref, exc)) from exc
         return dict(prepared.die_connections)
 

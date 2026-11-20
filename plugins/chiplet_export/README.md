@@ -890,7 +890,12 @@ python3 -m unittest discover -s plugins/chiplet_export/tests \
 
 ## Carrier electrical pads and die pin artwork
 
-New routed footprints use `CHIPLET_PAD_DOMAINS` version 1. Their electrical
+Routed footprints carry `CHIPLET_PAD_DOMAINS` version 1 or 2. Version 2 names
+the two pad parameters `passivation_opening_um` and `pad_metal_enclosure_um`
+(version 1: `passiv_opening_um` and `tm2_enclosure_um`; a record never holds
+both), and has no `carrier.kicad_layer` when the technology package has no
+KiCad view. Such a record still gives a routed layout; the board path refuses
+it by name, since it has no KiCad layer to put the landing on. Their electrical
 KiCad pads represent **carrier landings**, sized by the selected interconnect
 manifest's passivation opening plus twice its metal enclosure. Die pin openings
 are separate, non-electrical F.Fab artwork. Equal layer names in different dies
@@ -931,8 +936,11 @@ is then passed to the worker. Check the board's copper layer names and selected
 LYP when this check fails; changing a KiCad layer's name does not change its
 internal layer identifier. Unmarked exports retain the existing layer policy.
 
-The supported fabrication profile is circular TopMetal2 landings, mapped to
-the canonical KiCad copper layer recorded by the producer. The record's anchor
+The supported fabrication profile is circular landings: on TopMetal2 for a
+version 1 record, on the metal the record names for version 2, mapped to the
+canonical KiCad copper layer recorded by the producer when it records one. On
+the routed path the record's metal must be the routed stack's top metal, the
+one every carrier pad lands on, and resolve in the selected LYP. The record's anchor
 must be the selected manifest method's `fab_anchor`, and the worker draws a
 landing only when the UBM openings that anchor declares in the manifest's
 `fab_anchors` table are the ones the interposer PDK's pad cell for that
