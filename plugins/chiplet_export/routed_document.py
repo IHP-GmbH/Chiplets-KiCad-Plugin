@@ -9,7 +9,10 @@ it imports only the vendored chiplet_format_io (for the version policy), the
 way hyp_to_gds imports its siblings.
 
 The document is interposer-pnr's: micrometres, Y up, origin at the outline's
-lower-left corner.
+lower-left corner. chiplet-spec reads it with ``load_routed_geometry``, which
+needs jsonschema; KiCad's Python has none, so this reader stands in for it and
+refuses everything that one refuses (tests/test_routed_reader_agrees_with_helper.py
+holds the two together). It may refuse more, never less.
 
 Nothing in a net is ignored: a net or a record carrying a key this reader does
 not read (an arc, say) is refused, naming the net and the key, as is one
@@ -23,6 +26,7 @@ import hashlib
 import json
 import math
 import os
+import re
 
 SCHEMA = "routed-geometry"
 SUPPORTED_VERSION = "1.0"
@@ -41,6 +45,11 @@ DRAWN_KEYS = frozenset({"via", "x", "y", "top_layer", "bottom_layer", "cut",
                         "enclosure", "pitch", "k", "pad"})
 #: What a drawn via repeats of its placed via.
 _PLACED = ("via", "x", "y", "top_layer", "bottom_layer")
+#: The inputs the document binds by path and sha256, and by sha256 alone.
+INPUT_FILES = ("traces", "chiplet", "bumps")
+INPUT_DIGESTS = ("routing_tech", "tech_package", "physical_stack")
+#: A sha256 as the schema states one: 64 lower-case hex digits and nothing after.
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class DocumentRefused(Exception):
@@ -101,6 +110,49 @@ def _point(value, label):
     return (_finite(value[0], label + "[0]"), _finite(value[1], label + "[1]"))
 
 
+def _digest(entry, what):
+    """``entry`` is an object whose ``sha256`` is a digest."""
+    if not isinstance(entry, dict):
+        raise DocumentRefused("%s is not an object" % what)
+    sha = entry.get("sha256")
+    if not isinstance(sha, str) or not _SHA256.fullmatch(sha):
+        raise DocumentRefused("%s.sha256 is not a sha256: %r" % (what, sha))
+
+
+def _file(entry, what):
+    """``entry`` names a file by a path and its sha256."""
+    _digest(entry, what)
+    _text(entry.get("path"), what + ".path")
+
+
+def _inputs(document):
+    """The files and digests the document says it was routed from."""
+    inputs = document.get("inputs")
+    if not isinstance(inputs, dict):
+        raise DocumentRefused("%s has no inputs object" % ARTIFACT)
+    for key in INPUT_FILES + INPUT_DIGESTS + ("pins",):
+        if key not in inputs:
+            raise DocumentRefused("%s inputs has no %r" % (ARTIFACT, key))
+    for key in INPUT_FILES:
+        _file(inputs[key], "inputs." + key)
+    if "form" in inputs:
+        _file(inputs["form"], "inputs.form")
+    for key in INPUT_DIGESTS:
+        _digest(inputs[key], "inputs." + key)
+    if not isinstance(inputs["pins"], dict):
+        raise DocumentRefused("%s inputs.pins is not an object" % ARTIFACT)
+    for ref, entry in inputs["pins"].items():
+        _file(entry, "inputs.pins.%s" % ref)
+
+
+def _producer(document):
+    producer = document.get("producer")
+    if not isinstance(producer, dict):
+        raise DocumentRefused("%s has no producer object" % ARTIFACT)
+    _text(producer.get("tool"), "producer.tool")
+    _text(producer.get("version"), "producer.version")
+
+
 def _device(device, index):
     where = "devices[%d]" % index
     if not isinstance(device, dict):
@@ -109,10 +161,7 @@ def _device(device, index):
     if not isinstance(ref, str) or not ref:
         raise DocumentRefused("%s has no ref" % where)
     where = "device %s" % ref
-    layout = device.get("layout")
-    if (not isinstance(layout, dict) or not isinstance(layout.get("path"), str)
-            or not layout["path"]):
-        raise DocumentRefused("%s has no layout.path" % where)
+    _file(device.get("layout"), where + " layout")
     _point(device.get("origin"), where + " origin")
     _finite(device.get("rotation_deg"), where + " rotation_deg")
     if type(device.get("mirrored")) is not bool:
@@ -121,6 +170,8 @@ def _device(device, index):
         raise DocumentRefused(
             "%s has no pad_domains; the die pin list and its dimensions come "
             "from that archive only" % where)
+    if not isinstance(device["pad_domains"], dict):
+        raise DocumentRefused("%s pad_domains is not an object" % where)
 
 
 def check_document(document, *, on_warn=None):
@@ -143,9 +194,10 @@ def check_document(document, *, on_warn=None):
     if document.get("frame") != FRAME:
         raise DocumentRefused("%s is in frame %r; this reader reads only %r"
                             % (ARTIFACT, document.get("frame"), FRAME))
+    _finite(document.get("dbu_um"), "dbu_um", positive=True)
     outline = document.get("outline")
-    if not isinstance(outline, list) or len(outline) < 3:
-        raise DocumentRefused("%s outline needs at least three points" % ARTIFACT)
+    if not isinstance(outline, list) or len(outline) < 4:
+        raise DocumentRefused("%s outline needs at least four points" % ARTIFACT)
     points = [_point(point, "outline[%d]" % i) for i, point in enumerate(outline)]
     # The io_pads manifest's gds_bbox_corner_um frame and this one share an
     # origin only because this frame puts it at the outline's lower-left.
@@ -169,6 +221,8 @@ def check_document(document, *, on_warn=None):
             raise DocumentRefused("device %s is listed twice" % device["ref"])
         seen.add(device["ref"])
     check_nets(document)
+    _inputs(document)
+    _producer(document)
     return document
 
 
@@ -275,10 +329,14 @@ def _drawn_values(drawn, what):
     k = drawn["k"]
     if isinstance(k, bool) or not isinstance(k, int) or k < 1:
         raise DocumentRefused("%s.k is not a count of at least 1: %r" % (what, k))
-    if drawn["pitch"] is not None:
-        _number(drawn["pitch"], what + ".pitch", positive=True)
-    elif k != 1:
+    if k == 1:
+        if drawn["pitch"] is not None:
+            raise DocumentRefused("%s draws one cut and states a pitch: %r"
+                                  % (what, drawn["pitch"]))
+    elif drawn["pitch"] is None:
         raise DocumentRefused("%s draws %d cuts and states no pitch" % (what, k))
+    else:
+        _number(drawn["pitch"], what + ".pitch", positive=True)
 
 
 def _layer(value, metals, what):

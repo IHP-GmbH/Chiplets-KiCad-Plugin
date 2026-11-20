@@ -87,12 +87,14 @@ def test_a_two_cut_array_off_the_table_is_refused(tmp_path, generator, edit, wha
     assert "TV2" in str(exc.value) and what in str(exc.value)
 
 
-def test_a_planted_pitch_mismatch_is_refused(tmp_path, generator):
+def test_a_pitch_on_one_cut_is_refused_before_the_table(tmp_path):
+    """The schema gives a single cut no pitch, so the reader refuses one
+    before the table is consulted."""
     def edit(document):
         _first_drawn(document)["pitch"] = 2.5
-    with pytest.raises(_h.ViaTableRefused) as exc:
-        _h.check_routed_via_table(generator, _drawn(tmp_path, edit))
-    assert "TV2" in str(exc.value) and "pitch" in str(exc.value)
+    with pytest.raises(_h.RoutedGeometryRefused) as exc:
+        _drawn(tmp_path, edit)
+    assert "draws one cut and states a pitch" in str(exc.value)
 
 
 @pytest.mark.parametrize("key, value", [("cut", 0.8), ("enclosure", 0.6)])
@@ -170,7 +172,7 @@ def test_the_worker_refuses_before_writing(tmp_path, capsys, case):
     if case == "version":
         document = stage(tmp_path, lambda d: d.update(version="2.0"))
     elif case == "via table":
-        document = stage(tmp_path, lambda d: _first_drawn(d).update(pitch=2.5))
+        document = stage(tmp_path, _two_cuts(pitch=TV2["size"] + TV2["sep"] + 0.01))
     else:
         document = stage(tmp_path)
         kwargs["tech_json_path"] = str(tmp_path / "absent.json")
