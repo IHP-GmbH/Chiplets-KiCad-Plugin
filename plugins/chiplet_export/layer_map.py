@@ -301,6 +301,25 @@ class CarrierPackage(NamedTuple):
                 % (where, value))
         return path
 
+    def top_metal(self) -> str:
+        """The name of the top metal of the package's stack: the last of
+        ``beol.metals`` in the file at ``stack.path``, which lists the routing
+        metals from the bottom up. CarrierPackageRefused if there is none."""
+        path = self.member("stack", "path")
+        try:
+            stack = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise CarrierPackageRefused(
+                "PACKAGE_STACK_KEY", "%s: %s" % (path, exc)) from None
+        beol = stack.get("beol") if isinstance(stack, dict) else None
+        metals = beol.get("metals") if isinstance(beol, dict) else None
+        top = metals[-1] if isinstance(metals, list) and metals else None
+        name = top.get("name") if isinstance(top, dict) else None
+        if not isinstance(name, str) or not name:
+            raise CarrierPackageRefused(
+                "PACKAGE_STACK_KEY", "%s has no metal name at beol.metals" % path)
+        return name
+
 
 def read_carrier_package(root) -> CarrierPackage:
     """The technology package at ``root``; CarrierPackageRefused if it is not

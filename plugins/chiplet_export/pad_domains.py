@@ -389,18 +389,24 @@ def check_carrier_layer(carrier, actual_name, layer_map):
             % (token, actual_name, actual, carrier["layer"], expected))
 
 
-def validate_board_pad_domains(board, method_specs, *, load_layer_map=None):
+def validate_board_pad_domains(board, method_specs, *, load_layer_map=None,
+                               load_top_metal=None):
     """Validate marked footprints and return their authoritative method map.
 
     An unmarked board remains legacy and is not declared carrier-qualified.
     Detecting wholesale metadata removal requires the upstream export receipt.
     Load the selected worker LYP lazily: unmarked exports do not acquire a new
     dependency, while marked exports cannot skip the physical layer check.
+    A version 2 record names no metal of its own, so its carrier.layer is
+    held to the top metal of the carrier package's stack (``load_top_metal``,
+    loaded at the first such record), compared through the LYP; version 1
+    holds TopMetal2 in decode_domains.
     """
     from .layer_map import LayerMapError
 
     methods = {}
     layer_map = None
+    top_metal = None
     for footprint in board.Footprints():
         import pcbnew
         if footprint_pin_list(footprint, pcbnew, method_specs) is not None:
@@ -419,6 +425,17 @@ def validate_board_pad_domains(board, method_specs, *, load_layer_map=None):
                 check_carrier_layer(
                     domains["carrier"], board.GetLayerName(_copper_layer(token, pcbnew)),
                     layer_map)
+                if domains["version"] == 2:
+                    if top_metal is None:
+                        if load_top_metal is None:
+                            raise PadDomainError(
+                                "Carrier validation requires the carrier technology package")
+                        top_metal = load_top_metal()
+                    layer = domains["carrier"]["layer"]
+                    if layer_map.get_layer(layer) != layer_map.get_layer(top_metal):
+                        raise PadDomainError(
+                            "carrier.layer is '%s', but the top metal of the board is '%s'. "
+                            "Carrier pads land on the top metal only." % (layer, top_metal))
             except (LayerMapError, KeyError, AttributeError, TypeError, OSError, RuntimeError,
                     PadDomainError) as exc:
                 raise PadDomainError("%s carrier layer: %s" % (reference, exc)) from exc
