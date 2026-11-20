@@ -52,11 +52,12 @@ READER_MIN_VERSION = (1, 2)
 
 def check_reader(reader):
     """Refuse interconnect_pdk's reader when it reads interconnect methods
-    below 1.2 (its ``SUPPORTED_SCHEMA_VERSION``), with FabParamsRefused."""
+    below 1.2 (its ``SUPPORTED_SCHEMA_VERSION``, ``major.minor`` with an
+    optional ``.patch``), with FabParamsRefused."""
     value = getattr(reader, "SUPPORTED_SCHEMA_VERSION", None)
     parts = value.split(".") if isinstance(value, str) else ()
     version = (tuple(int(part) for part in parts)
-               if len(parts) == 2 and all(part.isdigit() for part in parts) else None)
+               if len(parts) in (2, 3) and all(part.isdigit() for part in parts) else None)
     if version is None or version < READER_MIN_VERSION:
         where = getattr(reader, "__file__", None) or "an unknown path"
         if isinstance(value, str) and value:
@@ -79,8 +80,9 @@ def method_fab_params(method, method_specs, *, where=MANIFEST_WHERE, reader=None
     (check_reader), and its ``fab_params`` dict, or its own refusal with its
     text, is the answer. Without one (the board path reads the method from
     the board) chiplet-spec 1.25.0's rule (technology_package.method_fab_params)
-    is applied here, with its two texts. ``where`` names the manifest in
-    those. A method that is not an object, or has no fab_params object, reads
+    is applied here, with its two texts; so is it when the export finds no
+    reader at all (orchestrator._interconnect_reader returns None), while a
+    reader below 1.2 is refused. ``where`` names the manifest in those. A method that is not an object, or has no fab_params object, reads
     as one without pad parameters (MISSING). Raises KeyError for an unknown
     method, as the reader does, and FabParamsRefused.
     """
@@ -89,7 +91,7 @@ def method_fab_params(method, method_specs, *, where=MANIFEST_WHERE, reader=None
         check_reader(reader)
         try:
             return dict(reader.fab_params(method, {"methods": method_specs}, where=where))
-        except reader.FabParamsRefused as exc:
+        except getattr(reader, "FabParamsRefused", ()) as exc:
             raise FabParamsRefused(str(exc)) from exc
     fab_params = spec.get("fab_params") if isinstance(spec, dict) else None
     params = dict(fab_params) if isinstance(fab_params, dict) else {}

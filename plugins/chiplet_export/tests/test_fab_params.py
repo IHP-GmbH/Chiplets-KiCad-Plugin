@@ -15,7 +15,7 @@ import json
 
 import pytest
 
-from chiplet_export.carrier_profile import FabParamsRefused, check_reader, method_fab_params
+from chiplet_export.carrier_profile import FabParamsRefused, method_fab_params
 from chiplet_export.pad_domains import PadDomainError, footprint_pin_list
 from chiplet_export.pipeline import orchestrator
 
@@ -76,7 +76,7 @@ NEEDS_1_2 = (" This plugin needs version 1.2 or later, because 1.2 names the pad
              "interconnect_pdk.")
 
 
-@pytest.mark.parametrize("version", ["1.1", "1.0", "1.x"])
+@pytest.mark.parametrize("version", ["1.1", "1.0", "1.x", "1.1.9", "1.2.0.0"])
 def test_a_reader_below_1_2_is_refused_before_it_is_asked(version):
     reader = OldReader()
     reader.SUPPORTED_SCHEMA_VERSION = version
@@ -98,11 +98,10 @@ def test_a_reader_that_reports_no_version_is_refused_saying_so(version):
         "it reads." % READER_PATH + NEEDS_1_2)
 
 
-@pytest.mark.parametrize("version", ["1.2", "1.10", "2.0"])
+@pytest.mark.parametrize("version", ["1.2", "1.10", "2.0", "1.2.0"])
 def test_a_reader_from_1_2_on_is_taken(version):
     reader = Reader12()
     reader.SUPPORTED_SCHEMA_VERSION = version
-    check_reader(reader)
     assert method_fab_params("cupillar_opt2", specs(**OLD), reader=reader) == BOTH
 
 
@@ -120,6 +119,17 @@ def test_on_a_1_2_readers_output_it_changes_nothing():
                              reader=Reader12()) == given
 
 
+def test_a_reader_without_a_refusal_class_raises_its_own_error():
+    class Bare:
+        SUPPORTED_SCHEMA_VERSION = "1.2"
+
+        def fab_params(self, method_id, manifest, *, where=None):
+            raise LookupError("the reader's own")
+
+    with pytest.raises(LookupError, match="^the reader's own$"):
+        method_fab_params("cupillar_opt2", specs(**OLD), reader=Bare())
+
+
 def test_a_1_2_readers_refusal_is_the_plugins_with_its_text():
     with pytest.raises(FabParamsRefused, match="^PACKAGE_METHODS_FAB_PARAMS_DISAGREE: r.json$"):
         method_fab_params("cupillar_opt2", specs(**dict(OLD, passiv_opening_um=45.0),
@@ -132,11 +142,10 @@ def test_a_1_2_readers_refusal_is_the_plugins_with_its_text():
 
 @pytest.mark.parametrize("new,old", RENAMED)
 def test_two_spellings_with_two_values_are_refused(new, old):
-    reader = None
     fab = dict(OLD)
     fab[new] = fab[old] + 5.0
     with pytest.raises(FabParamsRefused) as caught:
-        method_fab_params("cupillar_opt2", specs(**fab), where="r.json", reader=reader)
+        method_fab_params("cupillar_opt2", specs(**fab), where="r.json")
     assert str(caught.value) == (
         "PACKAGE_METHODS_FAB_PARAMS_DISAGREE: r.json: method cupillar_opt2 gives "
         "%s %s and %s %s. Since interconnect methods 1.2 these are two names for one "
@@ -146,11 +155,10 @@ def test_two_spellings_with_two_values_are_refused(new, old):
 
 @pytest.mark.parametrize("new,old", RENAMED)
 def test_a_method_without_the_old_name_is_refused(new, old):
-    reader = None
     fab = dict(BOTH)
     del fab[old]
     with pytest.raises(FabParamsRefused) as caught:
-        method_fab_params("cupillar_opt2", specs(**fab), where="r.json", reader=reader)
+        method_fab_params("cupillar_opt2", specs(**fab), where="r.json")
     assert str(caught.value) == (
         "PACKAGE_METHODS_FAB_PARAMS_MISSING: r.json: method cupillar_opt2 has no "
         "fab_params.%s. Interconnect methods 1.x keeps the old name beside %s, so "
@@ -160,11 +168,10 @@ def test_a_method_without_the_old_name_is_refused(new, old):
 
 @pytest.mark.parametrize("new,old", RENAMED)
 def test_a_method_with_neither_name_is_refused(new, old):
-    reader = None
     fab = dict(OLD)
     del fab[old]
     with pytest.raises(FabParamsRefused) as caught:
-        method_fab_params("cupillar_opt2", specs(**fab), where="r.json", reader=reader)
+        method_fab_params("cupillar_opt2", specs(**fab), where="r.json")
     assert str(caught.value) == (
         "PACKAGE_METHODS_FAB_PARAMS_MISSING: r.json: method cupillar_opt2 has no "
         "%s: fab_params.%s and %s are both missing. Add both, with the same value."

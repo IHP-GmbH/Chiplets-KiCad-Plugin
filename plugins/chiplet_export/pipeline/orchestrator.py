@@ -1823,33 +1823,28 @@ def run_export(board, options, plugin_dir,
     # Carrier metadata is a physical contract, not an optional extraction hint.
     # Check it before output creation, including explicit pin/GDS overrides.
     from ..pad_domains import PadDomainError, validate_export_pad_sources
-    from ..layer_map import LayerMap, find_carrier_package, resolve_lyp_path
+    from ..layer_map import LayerMap, require_carrier_package, resolve_lyp_path
     import dataclasses
 
     effective_lyp = options.lyp_override
     worker_start = Path(plugin_dir) / "hyp_to_gds.py"
 
-    def worker_env():
+    def carrier_env():
         # The manifest root selected from the board is also pinned in the
         # worker environment. Path variables must see that same selection.
+        # (Not worker_env: that name is the environment dict further down.)
         return build_worker_env(dataclasses.replace(
             options, interconnect_pdk_root=interconnect_manifest.root))
 
     def load_carrier_layer_map():
         nonlocal effective_lyp
         effective_lyp = resolve_lyp_path(
-            options.lyp_override or None, env=worker_env(), start=worker_start)
+            options.lyp_override or None, env=carrier_env(), start=worker_start)
         return LayerMap(effective_lyp, strict=True)
 
     def load_carrier_top_metal():
-        # The package the worker discovers, as the worker reads its stack.
-        package = find_carrier_package(env=worker_env(), start=worker_start)
-        if package is None:
-            raise CarrierPackageRefused(
-                "PACKAGE_MANIFEST_MISSING",
-                "no carrier technology package was found; set INTERPOSER_PDK_ROOT "
-                "to its root")
-        return package.top_metal()
+        # The package the worker discovers, with the worker's environment.
+        return require_carrier_package(env=carrier_env(), start=worker_start).top_metal()
 
     try:
         domain_methods = source.validate_pad_domains(

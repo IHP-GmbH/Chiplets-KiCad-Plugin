@@ -110,6 +110,23 @@ def test_the_top_metal_is_the_packages_not_topmetal2(tmp_path, monkeypatch):
     assert str(caught.value) == top_metal_text("TopMetal2", "TopMetal1")
 
 
+def test_the_package_is_read_once_for_every_version_2_record(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "pcbnew", PCBNEW)
+    first, _ = footprint(version_2())
+    other = version_2()
+    other["component"] = "U2"
+    second, _ = footprint(other)
+    second.GetReference.return_value = "U2"
+    board = board_for(first)
+    board.Footprints = lambda: [first, second]
+    layer_map = LayerMap(write_lyp(tmp_path / "selected.lyp", ALIASED), strict=True)
+    load = Mock(return_value="TopMetal2")
+    assert validate_board_pad_domains(
+        board, methods_for(document()), load_layer_map=lambda: layer_map,
+        load_top_metal=load) == {"U1": "attachment", "U2": "attachment"}
+    load.assert_called_once_with()
+
+
 def test_version_1_does_not_read_the_package(tmp_path, monkeypatch):
     def forbid():
         raise AssertionError("version 1 read the carrier package")

@@ -264,7 +264,8 @@ def _contract_version(value) -> Optional[Tuple[int, int]]:
 
 class CarrierPackage(NamedTuple):
     """A carrier technology package the export draws: its root and its
-    manifest, read once by :func:`read_carrier_package`."""
+    manifest, read once by :func:`read_carrier_package`. Member files, such
+    as the stack :meth:`top_metal` reads, are read on each call."""
     root: str
     manifest: dict
 
@@ -430,6 +431,17 @@ def find_default_lyp(*, env=None, start=None) -> str:
     if package is None:
         return "${INTERPOSER_PDK_ROOT}/" + "/".join(PACKAGE_MANIFEST)
     return package.member("layer_properties", "lyp")
+
+
+def require_carrier_package(*, env=None, start=None) -> CarrierPackage:
+    """:func:`find_carrier_package`, with no package refused rather than None."""
+    package = find_carrier_package(env=env, start=start)
+    if package is None:
+        raise CarrierPackageRefused(
+            "PACKAGE_MANIFEST_MISSING",
+            "no carrier technology package was found; set INTERPOSER_PDK_ROOT "
+            "to its root")
+    return package
 
 
 def find_interposer_template(*, env=None, start=None) -> Optional[str]:
