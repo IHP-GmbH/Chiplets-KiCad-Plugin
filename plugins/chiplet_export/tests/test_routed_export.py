@@ -230,9 +230,12 @@ def _empty_devices(document):
 
 def _other_top_metal(document):
     """The archive puts the carrier on F.Cu = TopMetal2; a stack whose top
-    metal is TopMetal1 fails the carrier layer check."""
-    top, below = document["stack"][-1], document["stack"][-2]
-    top["metal"], below["metal"] = below["metal"], top["metal"]
+    metal has another name (the copper renamed with it) fails the carrier
+    layer check."""
+    renamed = json.loads(json.dumps({"stack": document["stack"],
+                                     "nets": document["nets"]})
+                         .replace('"TopMetal2"', '"TopMetal9"'))
+    document.update(renamed)
 
 
 REFUSALS = {

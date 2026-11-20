@@ -17,7 +17,7 @@ if str(PLUGINS) not in sys.path:
     sys.path.insert(0, str(PLUGINS))
 
 from chiplet_export.routed_document import (  # noqa: E402
-    DocumentRefused, check_nets, stack_metals,
+    DocumentRefused, bound_files, check_nets, stack_metals,
 )
 
 DOCUMENT = (Path(__file__).resolve().parent / "fixtures" / "routed_t03" / "inputs"
@@ -96,7 +96,64 @@ def _stack_key(d):
     d["stack"][0]["thickness"] = 0.5
 
 
+def _drawn(d):
+    return next(net for net in d["nets"] if net["drawn"])["drawn"][0]
+
+
+def _pad_single(d):
+    _drawn(d)["pad"] = [1.9]
+
+
+def _pad_zero(d):
+    _drawn(d)["pad"] = [1.9, 0]
+
+
+def _cut_zero(d):
+    _drawn(d)["cut"] = 0.0
+
+
+def _enclosure_negative(d):
+    _drawn(d)["enclosure"] = -0.1
+
+
+def _k_zero(d):
+    _drawn(d)["k"] = 0
+
+
+def _k_true(d):
+    _drawn(d)["k"] = True
+
+
+def _k_without_pitch(d):
+    _drawn(d)["k"] = 2
+
+
+def _pitch_zero(d):
+    _drawn(d)["pitch"] = 0.0
+
+
+def _size_negative(d):
+    net = next(net for net in d["nets"] if net["vias"])
+    net["vias"][0]["size"] = -1.0
+
+
+def _via_skips_a_metal(d):
+    net = next(net for net in d["nets"] if net["vias"])
+    for record in (net["vias"][0], net["drawn"][0]):
+        record["bottom_layer"] = "Metal5"
+
+
 CASES = {
+    "a pad that is not a pair": (_pad_single, "pad"),
+    "a zero pad": (_pad_zero, "pad[1]"),
+    "a zero cut": (_cut_zero, ".cut"),
+    "a negative enclosure": (_enclosure_negative, "enclosure"),
+    "no cut": (_k_zero, ".k"),
+    "a boolean count": (_k_true, ".k"),
+    "cuts without a pitch": (_k_without_pitch, "no pitch"),
+    "a zero pitch": (_pitch_zero, "pitch"),
+    "a negative via size": (_size_negative, "size"),
+    "a via across two cuts": (_via_skips_a_metal, "not adjacent"),
     "an arc list": (_arc_list, "'arcs'"),
     "a segment key": (_segment_key, "'xc'"),
     "a missing segment key": (_segment_missing, "'width'"),
@@ -121,3 +178,21 @@ def test_a_changed_document_is_refused(document, case):
     with pytest.raises(DocumentRefused) as exc:
         check_nets(changed)
     assert message in str(exc.value)
+
+
+def test_a_device_without_a_bound_pin_list_is_refused(document):
+    """Before any file is read: the pin list of the first device is unbound."""
+    changed = copy.deepcopy(document)
+    ref = changed["devices"][0]["ref"]
+    del changed["inputs"]["pins"][ref]
+    with pytest.raises(DocumentRefused) as exc:
+        bound_files(changed, str(DOCUMENT))
+    assert "binds no pin list for %s" % ref in str(exc.value)
+
+
+def test_a_device_without_a_layout_digest_is_refused(document):
+    changed = copy.deepcopy(document)
+    del changed["devices"][0]["layout"]["sha256"]
+    with pytest.raises(DocumentRefused) as exc:
+        bound_files(changed, str(DOCUMENT))
+    assert "no layout path and sha256" in str(exc.value)

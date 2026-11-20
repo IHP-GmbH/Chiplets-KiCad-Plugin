@@ -14,7 +14,9 @@ declares as optional labels: a net's ``net_class`` and ``owner`` and a via's
 net class). Coordinates and widths are micrometres in the interposer GDS frame.
 """
 
+import hashlib
 import math
+import os
 
 ARTIFACT = "routed-geometry.json"
 
@@ -90,7 +92,8 @@ def stack_metals(document):
 
 def check_nets(document):
     """The nets, each checked against the stack; DocumentRefused otherwise."""
-    metals = set(stack_metals(document))
+    order = stack_metals(document)
+    metals = set(order)
     nets = document.get("nets")
     if not isinstance(nets, list):
         raise DocumentRefused("%s has no nets list" % ARTIFACT)
@@ -131,7 +134,35 @@ def check_nets(document):
             _number(via["y"], what + ".y")
             _layer(via["top_layer"], metals, what + ".top_layer")
             _layer(via["bottom_layer"], metals, what + ".bottom_layer")
+            if order.index(via["top_layer"]) != order.index(via["bottom_layer"]) + 1:
+                raise DocumentRefused(
+                    "%s joins %s and %s, which are not adjacent in the stack"
+                    % (what, via["bottom_layer"], via["top_layer"]))
+            if via["size"] is not None:
+                _number(via["size"], what + ".size", positive=True)
+            _drawn_values(drawn, what + " (drawn)")
     return nets
+
+
+def _drawn_values(drawn, what):
+    """The cut array a drawn via states: pad, cut, enclosure, pitch, k."""
+    pad = drawn["pad"]
+    if not isinstance(pad, list) or len(pad) != 2:
+        raise DocumentRefused("%s.pad is not a [width, height] pair: %r"
+                              % (what, pad))
+    for i, value in enumerate(pad):
+        _number(value, "%s.pad[%d]" % (what, i), positive=True)
+    _number(drawn["cut"], what + ".cut", positive=True)
+    if _number(drawn["enclosure"], what + ".enclosure") < 0:
+        raise DocumentRefused("%s.enclosure is negative: %r"
+                              % (what, drawn["enclosure"]))
+    k = drawn["k"]
+    if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+        raise DocumentRefused("%s.k is not a count of at least 1: %r" % (what, k))
+    if drawn["pitch"] is not None:
+        _number(drawn["pitch"], what + ".pitch", positive=True)
+    elif k != 1:
+        raise DocumentRefused("%s draws %d cuts and states no pitch" % (what, k))
 
 
 def _layer(value, metals, what):
@@ -139,3 +170,52 @@ def _layer(value, metals, what):
     if value not in metals:
         raise DocumentRefused("%s is on %r, which the stack does not name"
                               % (what, value))
+
+
+def sha256_file(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def bound_files(document, document_path):
+    """{ref: {"layout": path, "pins": path}}: the die layout and pin list the
+    document binds for each device, each checked against the sha256 it binds.
+
+    A relative path is resolved against the document's folder (the flow
+    writes the document beside the board, so a layout path is the board's
+    GDS_FILE text); an absolute one is taken as it is. Refuses
+    (DocumentRefused) a file that cannot be read or whose bytes are not the
+    ones bound, and a device whose pin list the document does not bind.
+    """
+    folder = os.path.dirname(os.path.abspath(document_path))
+    pins = (document.get("inputs") or {}).get("pins") or {}
+    devices = document.get("devices")
+    if not isinstance(devices, list) or not devices:
+        raise DocumentRefused("%s lists no devices" % ARTIFACT)
+    files = {}
+    for device in devices:
+        ref = device.get("ref") if isinstance(device, dict) else None
+        _text(ref, "a device ref")
+        if not isinstance(pins.get(ref), dict):
+            raise DocumentRefused("%s binds no pin list for %s (inputs.pins)"
+                                  % (ARTIFACT, ref))
+        files[ref] = {}
+        for kind, entry, label in (("layout", device.get("layout"), "layout"),
+                                   ("pins", pins[ref], "pin list")):
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) \
+                    or not isinstance(entry.get("sha256"), str):
+                raise DocumentRefused("%s names no %s path and sha256 for %s"
+                                      % (ARTIFACT, label, ref))
+            path = os.path.join(folder, entry["path"])
+            try:
+                actual = sha256_file(path)
+            except OSError as exc:
+                raise DocumentRefused("cannot read the %s of %s, %s: %s"
+                                      % (label, ref, path, exc)) from exc
+            if actual != entry["sha256"]:
+                raise DocumentRefused(
+                    "the %s of %s, %s, is not the file the routed geometry "
+                    "binds (sha256 %s, the document binds %s)"
+                    % (label, ref, path, actual, entry["sha256"]))
+            files[ref][kind] = os.path.normpath(path)
+    return files

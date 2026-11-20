@@ -11,7 +11,6 @@ draws, so a document the worker would refuse is refused before any output.
 import hashlib
 import json
 import math
-import os
 
 from .. import routed_document as _copper
 from .. import vendored as _vendored
@@ -142,43 +141,13 @@ def sha256_file(path):
 
 
 def bound_files(document, document_path):
-    """{ref: {"layout": path, "pins": path}}: the die layout and pin list the
-    document binds for each device, each checked against the sha256 it binds.
-
-    A relative path is resolved against the document's folder (the flow
-    writes the document beside the board, so a layout path is the board's
-    GDS_FILE text); an absolute one is taken as it is. Refuses
-    (RoutedRefused) a file that cannot be read or whose bytes are not the
-    ones bound, and a device whose pin list the document does not bind.
-    """
-    folder = os.path.dirname(os.path.abspath(document_path))
-    pins = (document.get("inputs") or {}).get("pins") or {}
-    files = {}
-    for device in document["devices"]:
-        ref = device["ref"]
-        if not isinstance(pins.get(ref), dict):
-            raise RoutedRefused("%s binds no pin list for %s (inputs.pins)"
-                                % (ARTIFACT, ref))
-        files[ref] = {}
-        for kind, entry, label in (("layout", device.get("layout"), "layout"),
-                                   ("pins", pins[ref], "pin list")):
-            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) \
-                    or not isinstance(entry.get("sha256"), str):
-                raise RoutedRefused("%s names no %s path and sha256 for %s"
-                                    % (ARTIFACT, label, ref))
-            path = os.path.join(folder, entry["path"])
-            try:
-                actual = sha256_file(path)
-            except OSError as exc:
-                raise RoutedRefused("cannot read the %s of %s, %s: %s"
-                                    % (label, ref, path, exc)) from exc
-            if actual != entry["sha256"]:
-                raise RoutedRefused(
-                    "the %s of %s, %s, is not the file the routed geometry "
-                    "binds (sha256 %s, the document binds %s)"
-                    % (label, ref, path, actual, entry["sha256"]))
-            files[ref][kind] = os.path.normpath(path)
-    return files
+    """{ref: {"layout": path, "pins": path}}, checked against the sha256 the
+    document binds (routed_document.bound_files, which the worker reads
+    too); RoutedRefused otherwise."""
+    try:
+        return _copper.bound_files(document, document_path)
+    except _copper.DocumentRefused as exc:
+        raise RoutedRefused(str(exc)) from exc
 
 
 def check_chiplet_binding(document, chiplet_path):
