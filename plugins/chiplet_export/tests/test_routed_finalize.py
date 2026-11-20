@@ -35,7 +35,7 @@ if str(PLUGINS) not in sys.path:
 
 import hyp_to_gds as _h  # noqa: E402
 
-from .routed_t03_stage import CHIPLET, INPUTS, IO_PADS, stage  # noqa: E402
+from .routed_t03_stage import BOARD_HYP, CHIPLET, INPUTS, IO_PADS, stage  # noqa: E402
 
 LYP_PATH = Path(_h._find_default_lyp())
 BOARD_CHIPLET = INPUTS / "board-path.chiplet"
@@ -200,6 +200,48 @@ def test_a_pad_one_grid_step_inside_passes_the_guard_and_changes_the_canon(tmp_p
     assert ok_moved is True
     gds = "%s_interposer.gds" % NAME
     assert _canon(layout / gds) != _canon(layout_moved / gds)
+
+
+def test_a_pad_off_the_grid_is_snapped_and_the_snap_is_named(tmp_path, capsys):
+    """The routed path snaps an off-grid pad as the board path does (one
+    add_io_pads for both), and says so: one line per moved pad, its ref and
+    both positions in dbu. An on-grid run prints no such line."""
+    ok, _layout = _run(tmp_path / "as-written")
+    assert ok is True
+    assert "Snapped pad" not in capsys.readouterr().out
+
+    def nudge(data):
+        data["io_pads"][0]["x_um"] += 0.001
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    ok_moved, _layout = _run(moved, io_pads=_io_pads(moved, nudge))
+    assert ok_moved is True
+    snapped = [line.strip() for line in capsys.readouterr().out.splitlines()
+               if "Snapped pad" in line]
+    assert snapped == ["Snapped pad J_U1_ext[0] to the 5 dbu manufacturing grid: "
+                       "(140001, 625000) -> (140000, 625000) dbu"]
+
+
+def test_the_board_path_does_not_name_its_snaps(tmp_path, capsys):
+    """Board output is unchanged: the worker on the sealed board-path .hyp
+    snaps the same off-grid pad and prints no snap line."""
+    def board_frame(data):
+        data["frame"] = "board_absolute_ynegated_um"
+        for pad in data["io_pads"]:
+            pad["y_um"] = -pad["y_um"]
+        data["io_pads"][0]["x_um"] += 0.001
+    pads = _io_pads(tmp_path, board_frame)
+    hyp = stage(tmp_path).parent / "board-path.hyp"
+    hyp.write_bytes(BOARD_HYP.read_bytes())
+    out = tmp_path / "layout" / ("%s_interposer.gds" % NAME)
+    out.parent.mkdir()
+    ok = _h.convert_hyp_to_gds(str(hyp), str(out), str(LYP_PATH),
+                               io_pads_json=str(pads),
+                               die_outline_exempt=["U1", "U2"])
+    captured = capsys.readouterr()
+    assert ok is True, captured.err
+    assert "Placed 6 wire_bond pads" in captured.out
+    assert "Snapped pad" not in captured.out
 
 
 def _intermediate_chiplet(tmp_path):

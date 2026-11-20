@@ -3485,7 +3485,7 @@ class GDSGenerator:
               f"({size_x_um:g}x{size_y_um:g} um)")
         return cell
 
-    def add_io_pads(self, pads: List[Dict]) -> List[Dict]:
+    def add_io_pads(self, pads: List[Dict], report_snaps: bool = False) -> List[Dict]:
         """Place external I/O pads, the entries of an --io-pads manifest.
 
         ``pads`` is what io_pads_manifest.read returned: the manifest the
@@ -3495,6 +3495,11 @@ class GDSGenerator:
 
         Returns the list of pads actually placed (skipping reserved/unknown
         io_classes), suitable for injection into the .chiplet file.
+
+        Each position is snapped to the manufacturing grid. With
+        ``report_snaps`` (the routed path, which otherwise converts nothing)
+        every pad the snap moved gets one line naming its ref and both
+        positions in dbu.
         """
         if isinstance(pads, (str, os.PathLike)):
             # A path here would be iterated as characters, every one skipped.
@@ -3551,8 +3556,17 @@ class GDSGenerator:
             # Place on the manufacturing grid and record what was placed: the
             # sidecar position travels into the .chiplet, so it has to be the
             # drawn one, not the one the board happened to carry.
+            raw = (x, y)
             x = self._snap_um(x)
             y = self._snap_um(y)
+            if report_snaps:
+                dbu = self.layout.dbu
+                was = tuple(int(round(v / dbu)) for v in raw)
+                now = (int(round(x / dbu)), int(round(y / dbu)))
+                if was != now:
+                    print(f"  Snapped pad {p.get('ref', '?')} to the "
+                          f"{self.grid_dbu} dbu manufacturing grid: "
+                          f"({was[0]}, {was[1]}) -> ({now[0]}, {now[1]}) dbu")
             p['x_um'] = x
             p['y_um'] = y
             group_cells[io_class].insert(
@@ -7069,7 +7083,8 @@ def convert_hyp_to_gds(
     placed_io_pads: Optional[List[Dict]] = None
     if head_io_pads is not None:
         print(f"\nAdding I/O pads from {io_pads_json}...")
-        placed_io_pads = generator.add_io_pads(head_io_pads)
+        placed_io_pads = generator.add_io_pads(
+            head_io_pads, report_snaps=bool(routed_geometry_path))
         print(f"Total I/O pads placed: {len(placed_io_pads)}")
     else:
         # Loud guard: standalone components -- PIN refs whose designator is
