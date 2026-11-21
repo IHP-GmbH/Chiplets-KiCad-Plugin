@@ -2,7 +2,7 @@
 """A trace's GDS metal runs w/2 past each of its two ends (square ends).
 
 The board draws a track end as a round cap w/2 past the endpoint, and the
-reserved metal a PDN stage writes is the rectangle w/2 past it. The exporter
+reserved copper a PDN stage writes is the rectangle w/2 past it. The exporter
 used to stop the metal flush at the endpoint, so every free end came out w/2
 short of both, which the deck sees once an end lands on something small.
 
