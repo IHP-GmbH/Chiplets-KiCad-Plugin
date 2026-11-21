@@ -25,6 +25,8 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT.parent))
 
+from chiplet_export.carrier_profile import (  # noqa: E402
+    FabParamsRefused, method_fab_params)
 from chiplet_export.pipeline import orchestrator  # noqa: E402
 from chiplet_export.pipeline.orchestrator import (  # noqa: E402
     DEFAULT_INTERPOSER_ADAPTER,
@@ -622,6 +624,14 @@ class _StubManifestReader(object):
             raise ValueError("manifest declares no schema_version")
         return data
 
+    SUPPORTED_SCHEMA_VERSION = "1.2"
+    FabParamsRefused = FabParamsRefused
+
+    def fab_params(self, method_id, manifest, *, where=None):
+        # As interconnect_pdk's reader from 1.2 on, which the plugin requires:
+        # the rule chiplet-spec 1.25.0 states, here the plugin's own copy of it.
+        return method_fab_params(method_id, manifest["methods"], where=where)
+
 
 @pytest.fixture
 def stub_reader(monkeypatch):
@@ -644,11 +654,11 @@ def _write_fake_interconnect_root(tmp_path):
         "methods": {
             "method_x": {
                 "pitch_rules": {"IXN_spacing": 40.0, "IXN_pitch": 75.0},
-                "fab_params": {"passiv_opening_um": 35.0},
+                "fab_params": {"passiv_opening_um": 35.0, "tm2_enclosure_um": 7.5},
             },
             "method_y": {
                 "pitch_rules": {"IXN_spacing": 15.0, "IXN_pitch": 50.0},
-                "fab_params": {"passiv_opening_um": 35.0},
+                "fab_params": {"passiv_opening_um": 35.0, "tm2_enclosure_um": 7.5},
             },
         },
     }), encoding="utf-8")
@@ -1562,7 +1572,7 @@ def test_explicit_catalogue_a_cannot_mix_with_default_catalogue_b(
             "height": 11.0, "diameter": 22.0,
         }]},
         "pitch_rules": {"IXN_spacing": 31.0, "IXN_pitch": 71.0},
-        "fab_params": {"passiv_opening_um": 41.0},
+        "fab_params": {"passiv_opening_um": 41.0, "tm2_enclosure_um": 7.5},
     }
     method_b = {
         "description": "stack from B",
@@ -1572,7 +1582,7 @@ def test_explicit_catalogue_a_cannot_mix_with_default_catalogue_b(
             "height": 99.0, "diameter": 99.0,
         }]},
         "pitch_rules": {"IXN_spacing": 91.0, "IXN_pitch": 191.0},
-        "fab_params": {"passiv_opening_um": 81.0},
+        "fab_params": {"passiv_opening_um": 81.0, "tm2_enclosure_um": 7.5},
     }
     manifest_a = {
         "schema_version": "1.0",
@@ -1611,6 +1621,14 @@ def test_explicit_catalogue_a_cannot_mix_with_default_catalogue_b(
 
         def list_methods(self, manifest=None):
             return list(self._selected(manifest)["methods"])
+
+        SUPPORTED_SCHEMA_VERSION = "1.2"
+        FabParamsRefused = FabParamsRefused
+
+        def fab_params(self, method_id, manifest, *, where=None):
+            # The plugin hands the reader the selected methods, not a copy.
+            assert manifest["methods"] is manifest_a["methods"]
+            return method_fab_params(method_id, manifest["methods"], where=where)
 
         def adapter_for(self, method_id, manifest=None):
             return self._selected(manifest)["methods"][method_id]["adapter"]

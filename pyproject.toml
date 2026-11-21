@@ -62,6 +62,7 @@ declared-skips = [
     {reason = "needs pcbnew (KiCad Python)", nodeid = "plugins/chiplet_export/tests/test_board_save.py"},
     {reason = "needs pcbnew (KiCad Python)", nodeid = "plugins/chiplet_export/tests/test_io_pad_ids.py"},
     {reason = "needs pcbnew (KiCad Python)", nodeid = "plugins/chiplet_export/tests/test_plugin_registration.py::test_both_packages_import_beside_kicads_pcbnew", tiers = ["T0"]},
+    {reason = "needs pcbnew (KiCad Python)", nodeid = "plugins/chiplet_export/tests/test_routed_board_parity.py", tiers = ["T0"]},
     {reason = "native dialog smoke needs wxPython", nodeid = "plugins/chiplet_export/tests/test_dialog_catalogue_wx.py"},
     # The KiCad image has wxPython but no display. It runs on a KiCad desktop
     # host, or under xvfb-run.

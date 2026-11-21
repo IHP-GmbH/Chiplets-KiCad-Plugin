@@ -1,0 +1,70 @@
+{
+  "assembly": "cf_typical_03_from_schematic",
+  "frame": "gds_bbox_corner_um",
+  "generator": "interposer_pnr.io_pads.project_io_pads",
+  "io_pads": [
+    {
+      "io_class": "wire_bond",
+      "layer": "TopMetal2",
+      "net": "U1_ext[0]",
+      "ref": "J_U1_ext[0]",
+      "size_x_um": 80.0,
+      "size_y_um": 80.0,
+      "x_um": 140.0,
+      "y_um": 625.0
+    },
+    {
+      "io_class": "wire_bond",
+      "layer": "TopMetal2",
+      "net": "U1_ext[1]",
+      "ref": "J_U1_ext[1]",
+      "size_x_um": 80.0,
+      "size_y_um": 80.0,
+      "x_um": 140.0,
+      "y_um": 775.0
+    },
+    {
+      "io_class": "wire_bond",
+      "layer": "TopMetal2",
+      "net": "U2_ext[0]",
+      "ref": "J_U2_ext[0]",
+      "size_x_um": 80.0,
+      "size_y_um": 80.0,
+      "x_um": 2460.0,
+      "y_um": 625.0
+    },
+    {
+      "io_class": "wire_bond",
+      "layer": "TopMetal2",
+      "net": "U2_ext[1]",
+      "ref": "J_U2_ext[1]",
+      "size_x_um": 80.0,
+      "size_y_um": 80.0,
+      "x_um": 2460.0,
+      "y_um": 775.0
+    },
+    {
+      "io_class": "wire_bond",
+      "layer": "TopMetal2",
+      "net": "VDD",
+      "ref": "J_VDD",
+      "size_x_um": 80.0,
+      "size_y_um": 80.0,
+      "x_um": 1300.0,
+      "y_um": 1260.0
+    },
+    {
+      "io_class": "wire_bond",
+      "layer": "TopMetal2",
+      "net": "VSS",
+      "ref": "J_VSS",
+      "size_x_um": 80.0,
+      "size_y_um": 80.0,
+      "x_um": 1300.0,
+      "y_um": 140.0
+    }
+  ],
+  "rules_source": {},
+  "schema": "chiplet-io-pad-manifest",
+  "version": "1.0.0"
+}

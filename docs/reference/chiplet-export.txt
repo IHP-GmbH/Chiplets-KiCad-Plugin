@@ -1,5 +1,6 @@
-usage: chiplet-export [-h] --board BOARD --output-dir OUTPUT_DIR
-                      [--require-drc | --allow-drc-fail]
+usage: chiplet-export [-h] --board BOARD [--routed-geometry ROUTED_GEOMETRY]
+                      [--name NAME] [--io-pads IO_PADS] --output-dir
+                      OUTPUT_DIR [--require-drc | --allow-drc-fail]
                       [--interposer-adapter INTERPOSER_ADAPTER]
                       [--interconnect-adapter INTERCONNECT_ADAPTER]
                       [--connection CONNECTION] [--insert-metal-fill]
@@ -13,7 +14,16 @@ Export a chiplet assembly headless (board -> .chiplet + .hyp + GDS + assembly DR
 
 options:
   -h, --help            show this help message and exit
-  --board BOARD         Path to the assembly .kicad_pcb to export.
+  --board BOARD         Path to the assembly .kicad_pcb to export. With
+                        --routed-geometry it must exist, but is not opened.
+  --routed-geometry ROUTED_GEOMETRY
+                        Compose from this routed-geometry document instead of
+                        the board. Needs --name, --io-pads and --system-
+                        chiplet.
+  --name NAME           With --routed-geometry: the stem every output is named
+                        by (the board file's stem on the board path).
+  --io-pads IO_PADS     With --routed-geometry: the routed io_pads manifest,
+                        in the interposer GDS frame.
   --output-dir OUTPUT_DIR
                         Directory for the export outputs (created if absent).
                         GDS goes under layout/, the DRC report under reports/.
@@ -26,11 +36,13 @@ options:
   --interposer-adapter INTERPOSER_ADAPTER
                         Interposer adapter override. Empty = read
                         interposer.adapter from the .chiplet (final fallback
-                        intm4tm2).
+                        intm4tm2). Required, not empty, with --routed-
+                        geometry.
   --interconnect-adapter INTERCONNECT_ADAPTER
                         Interconnect adapter override. Empty = read
                         interconnect.adapter from the .chiplet (absent there =
-                        no interconnect axis).
+                        no interconnect axis). Required with --routed-
+                        geometry, empty for none.
   --connection CONNECTION
                         Connection stack (e.g. cupillar_opt1/2/3). A cupillar
                         stack or a solder bump auto-generates its landings

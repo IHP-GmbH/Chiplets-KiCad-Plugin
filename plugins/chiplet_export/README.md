@@ -155,20 +155,20 @@ The Hyperlynx `.hyp` that drives the pipeline is always written to the
 output directory (next to the `.chiplet`), so other tools can consume the
 exact netlist the layout was generated from.
 
-Each free track end is square in the GDS. The copper runs w/2 past the
+Each free track end is square in the GDS. The wire runs w/2 past the
 end along the track, which is the rectangle a PDN stripe reserves. An end
 that another track of its net runs through, as wide or wider, is drawn
 flush instead: the board's round cap there lies inside that track. The
 board draws a free end as a round cap, so at a free end with nothing under
-it the GDS holds a little more copper than KiCad shows: at most
+it the GDS holds a little more metal than KiCad shows: at most
 (sqrt(2) - 1) * w/2 at the cap's corners, 0.34 um on a 1.64 um track and
 4.1 um on a 20 um stripe. A clearance KiCad passes can still fail the
 KLayout deck by that margin, never the other way round, and the deck on
 the GDS is the judge. Where two nets' tracks touch on one layer, which on
 a board that passes its own clearance check means a square end, the export
-refuses and names each place, since merged copper is a short no spacing
+refuses and names each place, since merged metal is a short no spacing
 rule reports; widen that clearance. An end that reaches another net's pad,
-via or die copper is not checked here: the export runs no LVS, so that is
+via or die metal is not checked here: the export runs no LVS, so that is
 left to an LVS on the GDS. A bend keeps its mitred corner.
 
 Machine-readable sidecars land next to each generated GDS:
@@ -694,6 +694,17 @@ Re-check the dialog status line. Exit codes other than 0 indicate
 `hyp_to_gds.py` failed; the live log preserves stderr under a `[stderr]`
 prefix.
 
+**`[interposer-bbox-off-origin]` on a `--routed-geometry` run**
+
+The routed geometry and its io pad manifest (`gds_bbox_corner_um`) put the
+origin at the outline's lower-left, and the worker writes their pads and die
+origins into the `.chiplet` without a shift. That holds only while nothing
+composed lies left of or below the outline, so the worker checks that the
+interposer's bbox lower-left is exactly (0, 0) in database units, before the
+GDS is written and again after the metal fill. The message names both
+lower-left corners and the layer and cell of the shape lying farthest out;
+move that shape inside the outline. The run leaves no GDS or sidecar.
+
 **Plugin not visible under External Plugins**
 
 KiCad scans `~/.config/kicad/9.0/scripting/plugins/` at startup. Verify
@@ -752,6 +763,12 @@ plugins/chiplet_export/
 │                              (worker side, --die-layouts)
 ├── technology_overlay.py      Technology ids from the System .chiplet
 │                              (worker side, --system-chiplet)
+├── hyp_model.py               The board model both worker parsers fill
+│                              (worker side)
+├── routed_geometry_parser.py  The routed geometry read into that model
+│                              (worker side, --routed-geometry)
+├── routed_inputs.py           The routed path's three inputs, read under
+│                              the worker interpreter (--routed-geometry)
 ├── tests/                     pytest suite (see tests/README.md)
 └── requirements.txt           Worker venv deps
 
@@ -873,7 +890,13 @@ python3 -m unittest discover -s plugins/chiplet_export/tests \
 
 ## Carrier electrical pads and die pin artwork
 
-New routed footprints use `CHIPLET_PAD_DOMAINS` version 1. Their electrical
+Routed footprints carry `CHIPLET_PAD_DOMAINS` version 1 or 2. Version 2 names
+the two pad parameters `passivation_opening_um` and `pad_metal_enclosure_um`
+(version 1: `passiv_opening_um` and `tm2_enclosure_um`; a record never holds
+both), and has no `carrier.kicad_layer` when the technology package has no
+KiCad view; the board path refuses such a record by name, since it has no
+KiCad layer to put the landing on. The plugin draws a layout for IntM4TM2
+only, with circular landings on TopMetal2, whatever the version. Their electrical
 KiCad pads represent **carrier landings**, sized by the selected interconnect
 manifest's passivation opening plus twice its metal enclosure. Die pin openings
 are separate, non-electrical F.Fab artwork. Equal layer names in different dies
@@ -914,8 +937,11 @@ is then passed to the worker. Check the board's copper layer names and selected
 LYP when this check fails; changing a KiCad layer's name does not change its
 internal layer identifier. Unmarked exports retain the existing layer policy.
 
-The supported fabrication profile is circular TopMetal2 landings, mapped to
-the canonical KiCad copper layer recorded by the producer. The record's anchor
+The supported fabrication profile is circular TopMetal2 landings on the
+IntM4TM2 interposer, mapped to the canonical KiCad copper layer recorded by
+the producer. A version 2 record names its metal rather than assuming
+TopMetal2; on the routed path that metal must be the routed stack's top metal,
+the one every carrier pad lands on, and resolve in the selected LYP. The record's anchor
 must be the selected manifest method's `fab_anchor`, and the worker draws a
 landing only when the UBM openings that anchor declares in the manifest's
 `fab_anchors` table are the ones the interposer PDK's pad cell for that
@@ -930,8 +956,10 @@ from pin locations. `connection_methods.py` runs that check for every method
 and prints the result as JSON; the dialog and chiplet-export use it to refuse
 such a die before the export stages anything. A pre-generated `--cupillar-gds` is merged as given; for
 marked boards the preflight refuses that override. For every method the
-landing diameter is `passiv_opening_um + 2 * tm2_enclosure_um` from the
-manifest. A solder bump's `body_diameter_um` is the ball, a 3D body only, and
+landing diameter is `passivation_opening_um + 2 * pad_metal_enclosure_um`
+from the manifest (each the 1.x name's value: a method whose two names of one
+parameter disagree, or that lacks the 1.x name, is refused by name before any
+output). A solder bump's `body_diameter_um` is the ball, a 3D body only, and
 neither number is derived from the other. The HYP
 writer deliberately exports the **carrier** padstack geometry; the die pin-list
 writer instead retains original die dimensions and physical indices. Its known

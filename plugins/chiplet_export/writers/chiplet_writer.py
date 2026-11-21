@@ -11,7 +11,6 @@ Frame and anchor semantics follow
 chiplet-system-spec/docs/coord_frame_contract.md sections 1 and 2 and the writer contract (section 4).
 """
 
-import math
 import os
 import sys
 from collections import namedtuple
@@ -20,12 +19,16 @@ import pcbnew
 
 from .connection_stacks import (
     emit_connection_stacks_block,
-    emit_interconnect_block,
     validate_adapter_id,
     validate_interconnect_ids,
 )
-from ._yaml import escape_yaml_dq, yaml_scalar
 from ._technology import technology_id
+from ._units import _size_um, parse_thickness_um
+# IO_CLASSES and IO_PAD_LAYER stay importable from here for existing callers.
+from .intermediate_chiplet import (  # noqa: F401
+    DEFAULT_INTERPOSER_ADAPTER, INTERPOSER_TECH_ID, IO_CLASSES, IO_PAD_LAYER,
+    CarrierFacts, ChipletFacts, DieFacts, FrameFacts, emit_intermediate_chiplet,
+)
 
 # is_cmim, CMIM_MODEL and die_role live next to the DIE_OUTLINE_LAYER rule so
 # the export preflight classifies footprints without importing this
@@ -112,22 +115,6 @@ def carrier_identities(carriers, report):
             net = planner_net(label, net, names)
         named.append((ident, net))
     return named
-
-
-#: The io_pad usage classes, the closed vocabulary of both the .chiplet and
-#: io_pads.json. The .chiplet reader throws on any other (IOPad.cpp
-#: string_to_io_class) and the finalizer does not normalize them on the
-#: no-sidecar path, so a typo is refused at export, as the C++ exporter does.
-IO_CLASSES = ("wire_bond", "flipped_bump", "tsv_bump")
-
-#: The PDK layer the worker draws every io_pad on, as both files name it.
-IO_PAD_LAYER = "TopMetal2"
-
-
-def _size_um(x, y):
-    """(x, y) to the nanometer, or None unless both are finite and above zero."""
-    size = (round(x, 3), round(y, 3))
-    return size if all(math.isfinite(v) and v > 0.0 for v in size) else None
 
 
 def io_pad_size_um(fp):
@@ -738,22 +725,6 @@ def write_die_connections(board, mapping):
 DIE_THICKNESS_FIELD = "DIE_THICKNESS_UM"
 
 
-def parse_thickness_um(raw):
-    """Parse a DIE_THICKNESS_UM field value. Returns a positive float in
-    micrometers, or None when the text is empty or not a positive finite
-    number (callers decide whether that warrants a warning)."""
-    text = (raw or "").strip()
-    if not text:
-        return None
-    try:
-        value = float(text)
-    except ValueError:
-        return None
-    if not math.isfinite(value) or value <= 0.0:
-        return None
-    return value
-
-
 def read_die_thicknesses(board):
     """Per-die physical thickness (um) from the board's footprint fields.
 
@@ -838,25 +809,14 @@ def write_die_outline_layers(board, mapping):
     return changed
 
 
-def write_chiplet(board, output_path, interconnect_manifest=None, export_report=None):
-    """Write `board` to `output_path` as an intermediate .chiplet file.
+def read_board_facts(board, interconnect_manifest=None, export_report=None):
+    """Everything write_chiplet takes from `board`, as plain ChipletFacts.
 
-    Args:
-        board:        pcbnew.BOARD instance.
-        output_path:  Filesystem path for the YAML output.
-        interconnect_manifest: Optional authoritative manifest snapshot from
-            the export preflight.  ``None`` preserves the standalone writer's
-            historical discovery behavior.
-        export_report: The export report's net names
-            (draft_net_names.read_export_report), or None; see
-            carrier_identities.
-
-    Returns:
-        True on success.
-
-    Raises:
-        OSError if the output path is not writable; ValueError for a board
-        it refuses (a carrier read_io_pads refuses, before the output opens).
+    Every pcbnew call of the intermediate .chiplet is here; the emitter
+    (intermediate_chiplet.emit_intermediate_chiplet) makes none. Refuses, as
+    write_chiplet always did, before any output exists: a malformed adapter
+    id (ValueError), an interconnect id the manifest does not know, and a
+    carrier read_io_pads refuses.
     """
     # --- Data gathering ---
     if "." in __package__:
@@ -865,7 +825,7 @@ def write_chiplet(board, output_path, interconnect_manifest=None, export_report=
         from pad_domains import archived_die_dimensions
 
     interposer_lyp = _lookup_property(board, "INTERPOSER_LYP")
-    interposer_tech_id = "intm4tm2"
+    interposer_tech_id = INTERPOSER_TECH_ID
     tech_map = {}
     if interposer_lyp:
         tech_map[interposer_tech_id] = interposer_lyp
@@ -891,14 +851,14 @@ def write_chiplet(board, output_path, interconnect_manifest=None, export_report=
     validate_interconnect_ids(
         adapter=interconnect_adapter, manifest=interconnect_manifest)
 
-    # Interposer adapter, emitted in the interposer: block further down. Read
-    # and validated HERE, during data gathering, and not at the emit site: the
+    # Interposer adapter, emitted in the interposer: block. Read and
+    # validated HERE, during data gathering, and not at the emit site: the
     # emit site runs inside the open output file, so failing there would leave
     # a partial .chiplet on disk.
     # Text-vars only, mirroring export_chiplet.cpp (GetTextVars()).
     interposer_adapter = (
         _lookup_text_var(board, "INTERPOSER_ADAPTER")
-        or "intm4tm2"
+        or DEFAULT_INTERPOSER_ADAPTER
     )
     validate_adapter_id(interposer_adapter, "INTERPOSER_ADAPTER text variable")
 
@@ -978,220 +938,101 @@ def write_chiplet(board, output_path, interconnect_manifest=None, export_report=
     # neither list from fresh board lookups, or id() stops matching.
     read_by_fp = {id(pad.fp): pad for pad in read_io_pads(footprints, export_report)}
 
-    # --- YAML emission ---
-
     board_filename = board.GetFileName()
     board_name = os.path.splitext(os.path.basename(board_filename))[0]
-    if not board_name:
-        # Unsaved / in-memory board: fall back to the output basename, then a
-        # literal, so the reader's non-empty assembly.name rule is satisfied.
-        board_name = os.path.splitext(os.path.basename(output_path))[0]
-    if not board_name:
-        board_name = "assembly"
 
-    with open(output_path, "w", encoding="utf-8") as f:
-        # Header
-        f.write('format_version: "1.0"\n\n')
+    # The intermediate frame: the board's bounding box, x from its left edge
+    # and y up from its bottom edge.
+    board_bbox = board.GetBoardEdgesBoundingBox()
+    if (not board_bbox.IsValid()
+            or board_bbox.GetWidth() == 0
+            or board_bbox.GetHeight() == 0):
+        # Fallback for designs without Edge.Cuts shapes (e.g. nm-scale
+        # GDS-derived interposers): derive bbox from the union of
+        # footprints / tracks / zones.
+        board_bbox = board.ComputeBoundingBox(False)
+    thickness_iu = board.GetDesignSettings().GetBoardThickness()
+    interposer_x_min = board_bbox.GetX()
+    interposer_y_max = board_bbox.GetBottom()  # Y grows down in KiCad
 
-        # Intermediate-frame marker. Readers MUST refuse files where
-        # finalize_required is true (see ChipletFormat::load).
-        f.write("_metadata:\n")
-        f.write("  frame: pcb-bbox-corner\n")
-        f.write("  finalize_required: true\n")
-        f.write('  finalizer: "hyp_to_gds.py --update-chiplet-file"\n')
-        f.write("\n")
+    carriers = []
+    for fp in io_pads:
+        pad = read_by_fp[id(fp)]
+        pos = fp.GetPosition()
+        carriers.append(CarrierFacts(
+            ident=pad.ident, io_class=pad.io_class, net=pad.net,
+            size_um=pad.size,
+            x_iu=pos.x - interposer_x_min, y_iu=interposer_y_max - pos.y))
 
-        # Assembly
-        f.write("assembly:\n")
-        f.write('  name: "%s"\n' % escape_yaml_dq(board_name))
-        f.write('  units: "um"\n')
-        f.write("\n")
-
-        # Interposer adapter. Declares which ADK PDK adapter the assembly
-        # DRC should resolve when this design is checked. Override via
-        # Board Setup > Text Variables > INTERPOSER_ADAPTER. Read and
-        # validated during data gathering above, so a malformed id fails the
-        # export before this file was ever opened.
-        f.write("interposer:\n")
-        f.write('  adapter: "%s"\n' % escape_yaml_dq(interposer_adapter))
-        f.write("\n")
-
-        # Interconnect adapter (optional second axis); emitted only when
-        # set, mirroring interposer. Validated during data gathering.
-        f.write(emit_interconnect_block(interconnect_adapter))
-
-        # Technologies. Sorted by id to match the C++ exporter, whose techMap
-        # is a std::map (sorted iteration); a plain dict here would emit in
-        # insertion order and break byte-exact parity for multi-PDK assemblies.
-        f.write("technologies:\n")
-        for tech_id, lyp_path in sorted(tech_map.items()):
-            f.write("  %s:\n" % yaml_scalar(tech_id))
-            f.write('    description: "Imported from KiCad"\n')
-            f.write('    layer_properties: "%s"\n' % escape_yaml_dq(lyp_path))
-            f.write("    dbu: 0.001\n")
-            f.write("\n")
-
-        # Connection stacks (default bump library). Sourced from the
-        # interconnect PDK manifest (single source of truth); byte-identical to
-        # the prior hardcoded literal so the C++ byte-exact parity gate (47.7b)
-        # stays green. export_chiplet.cpp still emits the same literal.
-        f.write(emit_connection_stacks_block(interconnect_manifest))
-        f.write("\n")
-
-        # Components
-        f.write("components:\n")
-
-        # 1) Interposer (always first; placeholder position in intermediate frame).
-        board_bbox = board.GetBoardEdgesBoundingBox()
-        if (not board_bbox.IsValid()
-                or board_bbox.GetWidth() == 0
-                or board_bbox.GetHeight() == 0):
-            # Fallback for designs without Edge.Cuts shapes (e.g. nm-scale
-            # GDS-derived interposers): derive bbox from the union of
-            # footprints / tracks / zones.
-            board_bbox = board.ComputeBoundingBox(False)
-
-        width_um = _iu_to_um(board_bbox.GetWidth())
-        height_um = _iu_to_um(board_bbox.GetHeight())
-        thickness_um = _iu_to_um(board.GetDesignSettings().GetBoardThickness())
-
-        interposer_x_min = board_bbox.GetX()
-        interposer_y_max = board_bbox.GetBottom()  # Y grows down in KiCad
-
-        f.write("  - id: interposer\n")
-        f.write("    type: interposer\n")
-        # See coord_frame_contract.md section 2.
-        f.write("    anchor: bbox_center\n")
-        if interposer_tech_id in tech_map:
-            f.write("    technology: %s\n" % yaml_scalar(interposer_tech_id))
-
-        gds_name = "%s.gds" % board_name
-        f.write('    layout: "%s"\n' % escape_yaml_dq(gds_name))
-        f.write('    top_cell: "INTERPOSER"\n')
-        f.write("    dimensions:\n")
-        f.write("      width: %.6f\n" % width_um)
-        f.write("      height: %.6f\n" % height_um)
-        f.write("      thickness: %.6f\n" % thickness_um)
-        # Position placeholder; hyp_to_gds.py --update-chiplet-file fills
-        # the canonical GDS-bbox-corner value. See coord_frame_contract.md
-        # section 4, item 1.
-        f.write("    position:\n")
-        f.write("      x: 0.0\n")
-        f.write("      y: 0.0\n")
-        f.write("      z: 0.0\n")
-
-        # 1b) IO_CLASS footprints nested under interposer.io_pads.
-        if io_pads:
-            f.write("    io_pads:\n")
-            for fp in io_pads:
-                pad = read_by_fp[id(fp)]
-                size_x_um, size_y_um = pad.size
-
-                pos = fp.GetPosition()
-                x_um = _iu_to_um(pos.x - interposer_x_min)
-                y_um = _iu_to_um(interposer_y_max - pos.y)
-
-                f.write("      - id: %s\n" % yaml_scalar(pad.ident))
-                f.write("        io_class: %s\n" % yaml_scalar(pad.io_class))
-                f.write('        net: "%s"\n' % escape_yaml_dq(pad.net))
-                f.write(
-                    "        position: { x: %.6f, y: %.6f }\n"
-                    % (x_um, y_um)
-                )
-                f.write(
-                    "        size: { x: %.3f, y: %.3f }\n"
-                    % (size_x_um, size_y_um)
-                )
-                f.write("        layer: %s\n" % IO_PAD_LAYER)
-        f.write("\n")
-
-        # 2) Die components.
-        for footprint in components:
-            ref = footprint.GetReference()
-            gds = _field_text(footprint, "GDS_FILE")
-            orient = _field_text(footprint, "ORIENTATION")
-            # ORIENTATION is a free-text footprint field. The frame contract
-            # defines only face_up (the default) and flip_chip; an empty field
-            # means face_up. Any other token (a typo, or the non-canonical
-            # "face_down") would otherwise fall through to a non-flip die that
-            # is silently emitted un-mirrored and without its connection stack.
-            # Fail loudly at export, as an IO_CLASS is (read_io_pads).
-            if orient not in ("", "face_up", "flip_chip"):
-                raise ValueError(
-                    "Footprint %s has an unrecognized ORIENTATION '%s'; expected "
-                    "face_up or flip_chip (use flip_chip, not face_down)."
-                    % (ref, orient)
-                )
-            is_flip_chip = (orient == "flip_chip")
-
-            f.write("  - id: %s\n" % yaml_scalar(ref))
-            f.write("    type: die\n")
-            # See coord_frame_contract.md section 2: dies use
-            # gds_origin as the mesh anchor.
-            f.write("    anchor: gds_origin\n")
-
-            if id(footprint) in component_techs:
-                f.write("    technology: %s\n" % yaml_scalar(component_techs[id(footprint)]))
-
-            if is_flip_chip:
-                f.write("    connection: cupillar_opt2\n")
-
-            if gds:
-                f.write('    layout: "%s"\n' % escape_yaml_dq(gds))
-
-            if is_flip_chip:
-                f.write("    orientation: flip_chip\n")
-
-            if id(footprint) in component_dimensions:
-                comp_width, comp_height = component_dimensions[id(footprint)]
-            else:
-                fp_bbox = footprint.GetBoundingBox()
-                courtyard_layer = (
-                    pcbnew.B_CrtYd if footprint.GetLayer() == pcbnew.B_Cu
-                    else pcbnew.F_CrtYd
-                )
-                # Preserve the historical path for unmarked footprints. Build
-                # the lazy cache so GUI/headless legacy exports agree.
-                try:
-                    footprint.BuildCourtyardCaches()
-                except Exception as exc:
-                    print("WARNING: %s: BuildCourtyardCaches failed (%s); die "
-                          "width/height fall back to the footprint bounding box"
-                          % (ref, exc), file=sys.stderr)
-                courtyard = footprint.GetCourtyard(courtyard_layer)
-                if not courtyard.IsEmpty():
-                    fp_bbox = courtyard.BBox()
-
-                comp_width = _iu_to_um(fp_bbox.GetWidth())
-                comp_height = _iu_to_um(fp_bbox.GetHeight())
-
-            f.write("    dimensions:\n")
-            f.write("      width: %.6f\n" % comp_width)
-            f.write("      height: %.6f\n" % comp_height)
-            f.write("      thickness: 0.0\n")
-
-            pos = footprint.GetPosition()
-            x_out = _iu_to_um(pos.x - interposer_x_min)
-            y_out = _iu_to_um(interposer_y_max - pos.y)
-
-            f.write("    position:\n")
-            f.write("      x: %.6f\n" % x_out)
-            f.write("      y: %.6f\n" % y_out)
-
-            if is_flip_chip:
-                # Z auto-calculated by Chiplet Studio from the connection
-                # stack height.
-                f.write("      z: 0.0\n")
-            elif footprint.GetLayer() == pcbnew.F_Cu:
-                f.write("      z: %.6f\n" % thickness_um)
-            else:
-                f.write("      z: 0.0\n")
-
-            f.write("    rotation:\n")
-            f.write(
-                "      z: %.4f\n"
-                % footprint.GetOrientation().AsDegrees()
+    dies = []
+    for footprint in components:
+        ref = footprint.GetReference()
+        if id(footprint) in component_dimensions:
+            comp_width, comp_height = component_dimensions[id(footprint)]
+        else:
+            fp_bbox = footprint.GetBoundingBox()
+            courtyard_layer = (
+                pcbnew.B_CrtYd if footprint.GetLayer() == pcbnew.B_Cu
+                else pcbnew.F_CrtYd
             )
-            f.write("\n")
+            # Preserve the historical path for unmarked footprints. Build
+            # the lazy cache so GUI/headless legacy exports agree.
+            try:
+                footprint.BuildCourtyardCaches()
+            except Exception as exc:
+                print("WARNING: %s: BuildCourtyardCaches failed (%s); die "
+                      "width/height fall back to the footprint bounding box"
+                      % (ref, exc), file=sys.stderr)
+            courtyard = footprint.GetCourtyard(courtyard_layer)
+            if not courtyard.IsEmpty():
+                fp_bbox = courtyard.BBox()
 
-    return True
+            comp_width = _iu_to_um(fp_bbox.GetWidth())
+            comp_height = _iu_to_um(fp_bbox.GetHeight())
+
+        pos = footprint.GetPosition()
+        dies.append(DieFacts(
+            ref=ref,
+            technology=component_techs.get(id(footprint)),
+            layout=_field_text(footprint, "GDS_FILE"),
+            orientation=_field_text(footprint, "ORIENTATION"),
+            width_um=comp_width, height_um=comp_height,
+            x_iu=pos.x - interposer_x_min, y_iu=interposer_y_max - pos.y,
+            front=footprint.GetLayer() == pcbnew.F_Cu,
+            rotation_deg=footprint.GetOrientation().AsDegrees()))
+
+    return ChipletFacts(
+        board_name=board_name,
+        interposer_adapter=interposer_adapter,
+        interconnect_adapter=interconnect_adapter,
+        tech_map=tech_map,
+        frame=FrameFacts(width_iu=board_bbox.GetWidth(),
+                         height_iu=board_bbox.GetHeight()),
+        thickness_iu=thickness_iu,
+        carriers=tuple(carriers),
+        dies=tuple(dies))
+
+
+def write_chiplet(board, output_path, interconnect_manifest=None, export_report=None):
+    """Write `board` to `output_path` as an intermediate .chiplet file.
+
+    Args:
+        board:        pcbnew.BOARD instance.
+        output_path:  Filesystem path for the YAML output.
+        interconnect_manifest: Optional authoritative manifest snapshot from
+            the export preflight.  ``None`` preserves the standalone writer's
+            historical discovery behavior.
+        export_report: The export report's net names
+            (draft_net_names.read_export_report), or None; see
+            carrier_identities.
+
+    Returns:
+        True on success.
+
+    Raises:
+        OSError if the output path is not writable; ValueError for a board
+        it refuses (a carrier read_io_pads refuses, before the output opens).
+    """
+    facts = read_board_facts(board, interconnect_manifest, export_report)
+    return emit_intermediate_chiplet(
+        facts, output_path, emit_connection_stacks_block(interconnect_manifest))

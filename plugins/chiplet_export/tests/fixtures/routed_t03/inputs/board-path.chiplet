@@ -1,0 +1,177 @@
+format_version: '1.0'
+assembly:
+  name: cf_typical_03_from_schematic.draft
+  units: um
+interposer:
+  adapter: intm4tm2
+technologies:
+  intm4tm2:
+    description: IHP 130nm IntM4TM2 aluminium BEOL interposer
+    layer_properties: ${INTERPOSER_PDK_ROOT}/libs.tech/klayout/tech/intm4tm2.lyp
+    stackup: ${CHIPLET_STUDIO_ROOT}/configs/stackups/intm4tm2.yaml
+    dbu: 0.001
+  sg13g2:
+    description: IHP SG13G2 130nm BiCMOS die
+    layer_properties: ${PDK_ROOT}/ihp-sg13g2/libs.tech/klayout/tech/sg13g2.lyp
+    stackup: ${CHIPLET_STUDIO_ROOT}/configs/stackups/ihp-sg13g2.yaml
+    dbu: 0.001
+connection_stacks:
+  cupillar_opt1:
+    description: PacTech Cu Pillar, Table 6.1 Option 1 (35um opening)
+    layers:
+    - name: CuPillar
+      material: Cu
+      height: 28.0
+      diameter: 44.0
+    - name: SnAgCap
+      material: SnAg
+      height: 16.0
+      diameter: 44.0
+  cupillar_opt2:
+    description: PacTech Cu Pillar, Table 6.1 Option 2 (40um opening)
+    layers:
+    - name: CuPillar
+      material: Cu
+      height: 32.0
+      diameter: 49.0
+    - name: SnAgCap
+      material: SnAg
+      height: 16.0
+      diameter: 49.0
+  cupillar_opt3:
+    description: PacTech Cu Pillar, Table 6.1 Option 3 (45um opening)
+    layers:
+    - name: CuPillar
+      material: Cu
+      height: 42.0
+      diameter: 54.0
+    - name: SnAgCap
+      material: SnAg
+      height: 19.0
+      diameter: 54.0
+  sbump_sac305:
+    description: PacTech SAC305 solder bump (80um ball)
+    layers:
+    - name: SolderBall
+      material: SAC305
+      height: 80.0
+      diameter: 80.0
+components:
+- id: interposer
+  type: interposer
+  anchor: bbox_center
+  technology: intm4tm2
+  layout: layout/cf_typical_03_from_schematic.draft_interposer.gds
+  top_cell: INTERPOSER
+  dimensions:
+    width: 2600.0
+    height: 1400.0
+    thickness: 260.81
+  position:
+    x: 1300.0
+    y: 700.0
+    z: 0.0
+  io_pads:
+  - id: J_U1_ext[0]
+    io_class: wire_bond
+    net: U1_ext[0]
+    position:
+      x: 140.0
+      y: 625.0
+    size:
+      x: 80.0
+      y: 80.0
+    layer: TopMetal2
+  - id: J_U1_ext[1]
+    io_class: wire_bond
+    net: U1_ext[1]
+    position:
+      x: 140.0
+      y: 775.0
+    size:
+      x: 80.0
+      y: 80.0
+    layer: TopMetal2
+  - id: J_U2_ext[0]
+    io_class: wire_bond
+    net: U2_ext[0]
+    position:
+      x: 2460.0
+      y: 625.0
+    size:
+      x: 80.0
+      y: 80.0
+    layer: TopMetal2
+  - id: J_U2_ext[1]
+    io_class: wire_bond
+    net: U2_ext[1]
+    position:
+      x: 2460.0
+      y: 775.0
+    size:
+      x: 80.0
+      y: 80.0
+    layer: TopMetal2
+  - id: J_VDD
+    io_class: wire_bond
+    net: VDD
+    position:
+      x: 1300.0
+      y: 1260.0
+    size:
+      x: 80.0
+      y: 80.0
+    layer: TopMetal2
+  - id: J_VSS
+    io_class: wire_bond
+    net: VSS
+    position:
+      x: 1300.0
+      y: 140.0
+    size:
+      x: 80.0
+      y: 80.0
+    layer: TopMetal2
+  attachment_surface_z: 10.8103
+- id: U1
+  type: die
+  anchor: gds_origin
+  technology: sg13g2
+  connection: cupillar_opt1
+  layout: chiplets/U1/layout.gds
+  orientation: flip_chip
+  dimensions:
+    width: 800.0
+    height: 600.0
+    thickness: 750.0
+  position:
+    x: 1180.0
+    y: 380.0
+    z: 54.8103
+  rotation:
+    z: 0.0
+  top_cell: PAD_FRAME_L
+- id: U2
+  type: die
+  anchor: gds_origin
+  technology: sg13g2
+  connection: cupillar_opt1
+  layout: chiplets/U2/layout.gds
+  orientation: flip_chip
+  dimensions:
+    width: 800.0
+    height: 600.0
+    thickness: 750.0
+  position:
+    x: 2182.0
+    y: 380.0
+    z: 54.8103
+  rotation:
+    z: 0.0
+  top_cell: PAD_FRAME_R
+interconnect:
+  adapter: ihp_cupillar
+  technology:
+    description: Chiplet attachment (PacTech (IHP))
+    layer_properties: ${INTERCONNECT_PDK_ROOT}/libs.tech/klayout/tech/interconnect.lyp
+    dbu: 0.001

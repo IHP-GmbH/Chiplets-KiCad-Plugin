@@ -264,7 +264,8 @@ def _contract_version(value) -> Optional[Tuple[int, int]]:
 
 class CarrierPackage(NamedTuple):
     """A carrier technology package the export draws: its root and its
-    manifest, read once by :func:`read_carrier_package`."""
+    manifest, read once by :func:`read_carrier_package`. Member files, such
+    as the stack :meth:`top_metal` reads, are read on each call."""
     root: str
     manifest: dict
 
@@ -300,6 +301,27 @@ class CarrierPackage(NamedTuple):
                 "PACKAGE_MEMBER_MISSING", "%s is %r, which names no file"
                 % (where, value))
         return path
+
+    def top_metal(self) -> str:
+        """The name of the top metal of the package's stack: the last of
+        ``beol.metals`` in the file at ``stack.path``, which lists the routing
+        metals from the bottom up. CarrierPackageRefused if there is none."""
+        path = self.member("stack", "path")
+        try:
+            stack = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise CarrierPackageRefused(
+                "PACKAGE_STACK_KEY", "the stack file %s of the carrier technology "
+                "package cannot be read: %s" % (path, exc)) from None
+        beol = stack.get("beol") if isinstance(stack, dict) else None
+        metals = beol.get("metals") if isinstance(beol, dict) else None
+        top = metals[-1] if isinstance(metals, list) and metals else None
+        name = top.get("name") if isinstance(top, dict) else None
+        if not isinstance(name, str) or not name:
+            raise CarrierPackageRefused(
+                "PACKAGE_STACK_KEY", "the stack file %s names no top metal; the last "
+                "entry of beol.metals needs a name" % path)
+        return name
 
 
 def read_carrier_package(root) -> CarrierPackage:
@@ -409,6 +431,17 @@ def find_default_lyp(*, env=None, start=None) -> str:
     if package is None:
         return "${INTERPOSER_PDK_ROOT}/" + "/".join(PACKAGE_MANIFEST)
     return package.member("layer_properties", "lyp")
+
+
+def require_carrier_package(*, env=None, start=None) -> CarrierPackage:
+    """:func:`find_carrier_package`, with no package refused rather than None."""
+    package = find_carrier_package(env=env, start=start)
+    if package is None:
+        raise CarrierPackageRefused(
+            "PACKAGE_MANIFEST_MISSING",
+            "no carrier technology package was found; set INTERPOSER_PDK_ROOT "
+            "to its root")
+    return package
 
 
 def find_interposer_template(*, env=None, start=None) -> Optional[str]:

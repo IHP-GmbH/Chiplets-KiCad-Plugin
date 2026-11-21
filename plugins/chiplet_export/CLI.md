@@ -21,6 +21,8 @@ chiplet-export --board BOARD --output-dir DIR
                [--insert-metal-fill] [--fill-mode {single-pass,closure}]
                [--seal-ring] [--system-chiplet CHIPLET]
                [--nofill-regions JSON] [--die-layouts JSON]
+chiplet-export --board BOARD --output-dir DIR --system-chiplet CHIPLET
+               --routed-geometry JSON --name NAME --io-pads JSON [...]
 ```
 
 `chiplet-export` is `chiplet_export_cli.py` (next to this file) run under a
@@ -33,18 +35,30 @@ its Nix tail shell provides the same command. From a checkout:
 python3 plugins/chiplet_export/chiplet_export_cli.py --board ... --output-dir ...
 ```
 
+The second form composes from the routed-geometry document the packaging
+flow's place-and-route row writes, instead of from the board. It never imports
+pcbnew, so any Python 3 runs it. It imports no PyYAML either: the three input
+documents are read by `routed_inputs.py` under the worker interpreter
+(`KICAD_CHIPLET_PYTHON`), and the CLI computes the rest from what that read
+returns. The board must still exist but is not opened, and no `.hyp` is
+written: the worker reads the document.
+
 ## Flags
 
-`<board>` below is the board file's stem; it names every output.
+`<board>` below is the board file's stem, or `--name` with
+`--routed-geometry`; it names every output.
 
 | Flag | Value | Default | Effect |
 |------|-------|---------|--------|
 | `--board` | path | required | The assembly `.kicad_pcb`. A missing file, or one pcbnew cannot read, exits 2 with nothing created. Relative paths resolve against the current directory. |
+| `--routed-geometry` | path | none | Compose from this routed-geometry document instead of the board: the board is checked to exist, never opened. Needs `--name`, `--io-pads`, `--system-chiplet` (the `.chiplet` the document binds by digest; another one is refused with exit 1 and nothing created) and both adapter flags. The die layouts and pin lists the document names, relative to its folder, must have the bytes it binds. Every die keeps its archived PinList size, and the routed path extracts no no-fill region and no MIM capacitor. |
+| `--name` | text | none | With `--routed-geometry`: the stem every output is named by. A usage error without it. |
+| `--io-pads` | path | none | With `--routed-geometry`: the routed io_pads manifest, in the interposer GDS frame; any other frame is refused with exit 1. A usage error without it. |
 | `--output-dir` | path | required | Where the outputs go (see *Outputs*). Created only once the board's preflights pass, so a refused board leaves nothing. |
 | `--require-drc` | flag | off | Accepted for older callers and changes nothing: the assembly DRC is required by default. Cannot be combined with `--allow-drc-fail`. |
 | `--allow-drc-fail` | flag | off | Exit 0 instead of 3 when the files were written but the assembly DRC did not pass; the last line says which outcome it let through. |
-| `--interposer-adapter` | adapter id | the `.chiplet`'s `interposer.adapter`, else `intm4tm2` | The interposer adapter the assembly DRC runs with. An id, never a path. It does not change the `.chiplet`, whose adapter comes from the board's `INTERPOSER_ADAPTER` text variable. |
-| `--interconnect-adapter` | adapter id | the `.chiplet`'s `interconnect.adapter`; absent there, no interconnect axis | The interconnect adapter the assembly DRC runs with. An id, never a path. |
+| `--interposer-adapter` | adapter id | the `.chiplet`'s `interposer.adapter`, else `intm4tm2` | The interposer adapter the assembly DRC runs with. An id, never a path. It does not change the `.chiplet`, whose adapter comes from the board's `INTERPOSER_ADAPTER` text variable. With `--routed-geometry` it is required, must not be empty, and is also the `.chiplet`'s adapter; without it the export is refused with exit 1 and nothing created. |
+| `--interconnect-adapter` | adapter id | the `.chiplet`'s `interconnect.adapter`; absent there, no interconnect axis | The interconnect adapter the assembly DRC runs with. An id, never a path. With `--routed-geometry` it is required (empty for none); without it the export is refused with exit 1 and nothing created. It is not written into the `.chiplet` on either path: the worker adds the `interconnect` block from the die connections. |
 | `--connection` | method id | none | The assembly-wide default connection stack, a method the interconnect PDK manifest declares (for example `cupillar_opt1`). A die's own `CONNECTION` field wins over it. A Cu-pillar stack or a solder bump generates its landings from the die pads. A die whose method's landing the worker cannot draw, as `connection_methods.py` reports, is refused before the export stages anything. Empty: each die keeps its own `CONNECTION`. |
 | `--insert-metal-fill` | flag | off | Stamp metal density fill on the interposer GDS with the interposer PDK's fill engine (`fill_closure.fill_stack`). Without the `klayout` binary on `PATH` the fill is skipped with a message; a PDK without the engine fails the export (exit 1). |
 | `--fill-mode` | `single-pass` or `closure` | `single-pass` | `single-pass` stamps every metal once; `closure` iterates Metal4/Metal5 against the density deck until in band. Ignored without `--insert-metal-fill`. |
@@ -87,7 +101,7 @@ one of them.
 
 | Variable | Used for | Fallback |
 |----------|----------|----------|
-| `KICAD_CHIPLET_PYTHON` | The worker interpreter that runs `hyp_to_gds.py` and the assembly DRC; it needs `klayout.db` and PyYAML. | `<plugin>/.venv/bin/python3`, the project text variable, then a `python3` on `PATH` that imports both |
+| `KICAD_CHIPLET_PYTHON` | The worker interpreter that runs `hyp_to_gds.py`, the assembly DRC and, with `--routed-geometry`, `routed_inputs.py`; it needs `klayout.db` and PyYAML. | `<plugin>/.venv/bin/python3`, the project text variable, then a `python3` on `PATH` that imports both |
 | `INTERPOSER_PDK_ROOT` | The interposer PDK, needed by every export (OpenIntM4TM2 v2026.11 or later): its technology package manifest, `libs.tech/adk/technology.json`, names the stack file whose `beol.attachment_surface_z_um` is the mount plane (an export that cannot read it is refused) and the layer properties. Also its PCells, seal ring and fill engine. The manifest is how a carrier root is told: a set root without it (another KLayout PDK, the SG13G2 die PDK included) exits 1 with `PACKAGE_MANIFEST_MISSING`, never falling back to the sibling checkout; a manifest the export cannot read, or a member path that leaves the package or names no file, is refused with the chiplet-spec package validator's id for it. A package whose `id` is not `intm4tm2` exits 1 with `CARRIER_UNSUPPORTED_TECHNOLOGY` before anything is drawn, with or without `--system-chiplet`: pads and connections still land on IntM4TM2's TopMetal2. | sibling `interposer` or `OpenIntM4TM2` |
 | `INTERPOSER_LYP` | The interposer layer-properties file, when not the `layer_properties.lyp` the PDK's technology package names. | the project text variable, then the PDK's file |
 | `INTERCONNECT_PDK_ROOT` | The interconnect PDK manifest: connection stacks and method ids. A selected root that is unusable refuses the export. | the project text variable, then sibling `interconnect_pdk` or `IHP-Interconnect-IntM4TM2` |
@@ -106,7 +120,7 @@ Under `--output-dir`:
 ```
 <board>.chiplet                          finalized assembly description
 <board>.chiplet.exportcontent.sha256     digest for the previous-export guard
-<board>.hyp                              the HyperLynx netlist the layout came from
+<board>.hyp                              the HyperLynx netlist the layout came from (not with --routed-geometry)
 MANIFEST.md                              every product, present or absent
 layout/<board>_interposer.gds            interposer layout (the .chiplet references it)
 layout/<board>_interposer.boundaries.json
@@ -160,7 +174,7 @@ Refusals and errors go to stderr.
 |-----:|---------|
 | 0 | The files were written and the assembly DRC PASSED (or did not pass, under `--allow-drc-fail`). |
 | 1 | Nothing trustworthy was written: a refused board, a failed worker, a `.chiplet` that could not be replaced, or a crash before the DRC. |
-| 2 | The board (or the `--system-chiplet`, `--export-report` or `--die-layouts` file) is missing, or KiCad cannot read the board; also a usage error. |
+| 2 | The board (or the `--system-chiplet`, `--export-report`, `--die-layouts`, `--routed-geometry` or `--io-pads` file) is missing, or KiCad cannot read the board; also a usage error. |
 | 3 | The files were written and the assembly DRC did not pass: FAILED, REFUSED or NOT RUN, a DRC stage that raised included. |
 
 A nonzero `run_drc.py` exit reads "failed or refused", because that exit
