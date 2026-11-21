@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""A trace's GDS copper runs w/2 past each of its two ends (square ends).
+"""A trace's GDS metal runs w/2 past each of its two ends (square ends).
 
 The board draws a track end as a round cap w/2 past the endpoint, and the
-reserved copper a PDN stage writes is the rectangle w/2 past it. The exporter
-used to stop the copper flush at the endpoint, so every free end came out w/2
+reserved metal a PDN stage writes is the rectangle w/2 past it. The exporter
+used to stop the metal flush at the endpoint, so every free end came out w/2
 short of both, which the deck sees once an end lands on something small.
 
 Square, not round: a round cap is a polygonised arc and fails the angle rule
@@ -66,7 +66,7 @@ def _seg(net, x1, y1, x2, y2, w, layer="TopMetal1"):
 
 def test_a_stripe_reaches_its_drawn_rectangle(gen):
     # The board's 20 um strap from 2585 to 3515 is the reserved rectangle
-    # 2575 to 3525: the copper must be exactly that box.
+    # 2575 to 3525: the metal must be exactly that box.
     copper = _merged(gen, [(2585.0, 685.0), (3515.0, 685.0)], 20.0)
     assert copper.count() == 1
     assert copper.bbox() == db.Box(_um(gen, 2575.0), _um(gen, 675.0),
@@ -108,7 +108,7 @@ def test_an_end_stays_on_grid_and_on_the_angle_grid(gen, d):
 
 def test_an_interior_vertex_is_unchanged(gen):
     # The same bends with the end runs ten times longer: around the bends,
-    # far from either end, the copper is the same.
+    # far from either end, the metal is the same.
     short = [(0.0, 0.0), (40.0, 0.0), (60.0, 20.0), (60.0, 60.0)]
     long = [(-360.0, 0.0), (40.0, 0.0), (60.0, 20.0), (60.0, 420.0)]
     window = db.Region(db.Box(_um(gen, 10.0), _um(gen, -10.0),

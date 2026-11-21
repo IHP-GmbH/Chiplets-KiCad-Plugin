@@ -907,7 +907,7 @@ ARGV_BEFORE = [
 # sha256 of the GDS the ablation board converts to, with the BGNLIB and
 # BGNSTR timestamps zeroed, as the export produced it before the ring.
 # Re-pinned for square track ends: against the flush-end GDS (25e22d3f)
-# the merged copper only gains the six w/2 end caps of its three traces.
+# the merged metal only gains the six w/2 end caps of its three traces.
 GDS_BEFORE = "650e062d7f125f354e031654f845ab68df5c21b570c4a1626c1903d1be3b993d"
 
 

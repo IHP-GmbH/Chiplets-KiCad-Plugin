@@ -1,25 +1,25 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""A trace bend stops where the trace does: no copper past the flank.
+"""A trace bend stops where the trace does: no metal past the flank.
 
 The exporter draws a trace as one quad per segment plus one patch per interior
 vertex, because a single snapped outline cannot be both on the 5 nm grid and
 exactly 45 degrees. The patch used to be the square of side 2*half centred on
 the vertex: it closes the corner, but at a 45 degree bend it reaches the corner
 of its own bounding box while the two flanks meet earlier, leaving
-(2 - sqrt(2)) * width / 2 of copper past the flank. 1.17 um on a 4 um trace,
+(2 - sqrt(2)) * width / 2 of metal past the flank. 1.17 um on a 4 um trace,
 with the tip 2.83 um from the vertex where the flanks meet at 2.17 and the
 round join KiCad renders is at 2.00.
 
 That overshoot trips no rule, which is how it survived: it is a convex 90
 degree tip, so neither the angle rule nor the notch rule sees it. It is still
-real copper pointing at whatever the trace passes.
+real metal pointing at whatever the trace passes.
 
 The patch is now the square cut back to the flanks. The shape matters as much
 as the size, and the two ways of getting it wrong are both pinned below:
 
 - the bare wedge between the flanks has a corner equal to the turn angle, 45
   degrees at a 45 degree bend, and 3_2_angle.drc checks RAW polygons, so a
-  wedge drawn on its own is a violation even though the copper around it is a
+  wedge drawn on its own is a violation even though the metal around it is a
   straight trace (measured: 88 such polygons on TopMetal2, 8 on Metal4, 3 on
   Metal5 for this board);
 - a 45 degree chamfer cuts ACROSS the flanks instead of stopping on them, which
@@ -128,7 +128,7 @@ def test_45_bend_loses_exactly_the_overshoot(gen):
     predicted = (2 - math.sqrt(2)) ** 2 * WIDTH_UM ** 2 / 8
     assert removed == pytest.approx(predicted, abs=0.01)
     assert (mitred - square).is_empty(), \
-        "a 45 degree bend must only lose copper, never gain it"
+        "a 45 degree bend must only lose metal, never gain it"
 
 
 def test_the_outer_corner_lands_where_the_flanks_meet(gen):
@@ -150,13 +150,13 @@ def test_the_outer_corner_lands_where_the_flanks_meet(gen):
             _um(gen, bend[1] - half)) in corners, \
         "the outer corner is not where the flanks meet"
     assert (_um(gen, bend[0] + half), _um(gen, bend[1] - half)) \
-        not in corners, "the square patch's corner is still copper"
+        not in corners, "the square patch's corner is still metal"
 
 
 def test_no_drawn_polygon_has_an_acute_corner(gen):
     """The rule that broke the first attempt. 3_2_angle.drc runs its acute
     check on the RAW polygons, so a patch shaped like the open wedge is a
-    violation at every 45 degree bend even though the merged copper is a
+    violation at every 45 degree bend even though the merged metal is a
     straight trace. Every drawn polygon has to be legal by itself."""
     for i, first in enumerate(DIRECTIONS):
         for step in (1, -1, 2, -2, 3, -3, 4):
@@ -216,7 +216,7 @@ def test_corner_is_never_opened(gen):
 
 def test_every_45_degree_turn_only_removes_copper(gen):
     """All sixteen 45 degree bends. A sign error in the outer-flank choice
-    would cut into the inside of one of them, which shows up as added copper
+    would cut into the inside of one of them, which shows up as added metal
     or as a severed trace."""
     for i, first in enumerate(DIRECTIONS):
         for step in (1, -1):
@@ -226,7 +226,7 @@ def test_every_45_degree_turn_only_removes_copper(gen):
                        first[1] * 60.0 + second[1] * 60.0)]
             mitred, square = _merged(gen, points), _square_only(gen, points)
             assert (mitred - square).is_empty(), \
-                f"mitre added copper on the turn {first} -> {second}"
+                f"mitre added metal on the turn {first} -> {second}"
             assert mitred.count() == 1, \
                 f"trace came apart on the turn {first} -> {second}"
             assert mitred.notch_check(_um(gen, 2.0), False,

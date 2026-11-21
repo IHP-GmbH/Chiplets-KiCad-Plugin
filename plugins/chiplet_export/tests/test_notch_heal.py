@@ -6,14 +6,14 @@ still inside it, so the trace leaves the pad almost tangentially and the wedge
 between the trace edge and the pad arc measures under the layer's minimum
 space. The carrier deck reports that as TM2.b/M{n}.b, and it is a real
 manufacturability finding, not a rule artefact: it is a notch in one piece of
-copper, narrower than the process can resolve.
+metal, narrower than the process can resolve.
 
 The heal fills those notches. The two properties that matter are that it
 closes them and that it never brings two separate nets closer than the
 minimum space, let alone joins them. notch_check (gaps inside one polygon)
 keeps it from closing the legal gap between two nets, which an oversize/
 undersize closing would weld; the clearance cut keeps its over-filled boxes
-off copper they do not belong to. The patches also have to be legal on their
+off metal they do not belong to. The patches also have to be legal on their
 own, because 3_1_offgrid.drc and 3_2_angle.drc read raw polygons.
 """
 import os
@@ -71,7 +71,7 @@ def _notch_count(gen, spec=TM2, space_um=TM2_SPACE_UM):
 
 
 def _gap_between_pieces(gen, spec=TM2):
-    """Smallest gap between separate pieces of copper, in dbu, or None."""
+    """Smallest gap between separate pieces of metal, in dbu, or None."""
     gaps = _merged(gen, spec).isolated_check(
         _um(gen, 10), False, db.Metrics.Euclidian)
     return min((e.distance() for e in gaps.each()), default=None)
@@ -127,7 +127,7 @@ def test_notch_wider_than_the_rule_is_left_alone(gen):
 def test_two_nets_at_exactly_the_minimum_space_are_not_bridged(gen):
     """The property an oversize/undersize closing would violate.
 
-    Two pieces of copper at exactly the minimum space are legal and belong to
+    Two pieces of metal at exactly the minimum space are legal and belong to
     different nets. A closing by half the rule on each side welds them into
     one; notch_check never sees between them. The slotted pad shares the
     layer so the heal is genuinely running on this geometry.
@@ -194,14 +194,14 @@ def _assert_rectilinear_on_grid(gen, patches):
 
 def test_patches_stay_axis_aligned(gen):
     """Not a style rule. A 45 degree chamfer on a patch is legal in isolation
-    and closes the same notches with less copper, but it puts vertices off the
-    5 nm grid in the MERGED copper where it meets the diagonal traces, and the
+    and closes the same notches with less metal, but it puts vertices off the
+    5 nm grid in the MERGED metal where it meets the diagonal traces, and the
     deck reports those: 4 offgrid and 4 Angle45 markers on the reference
     board, none at a drawn vertex, in flat, deep and tiling alike. Axis-
     aligned edges do not do that. If this test is ever relaxed, the offgrid
     and angle decks have to be re-run on a real board, not just this fixture.
 
-    A patch cut back from other copper is an L or a similar rectilinear
+    A patch cut back from other metal is an L or a similar rectilinear
     shape rather than a rectangle; what it may never have is an edge off
     the axes or a vertex off the grid.
     """
@@ -214,7 +214,7 @@ def test_patches_stay_axis_aligned(gen):
 
 def test_patch_keeps_the_space_from_another_nets_via_cover(gen):
     """The uncut box over-fills the landing mouth and stops 0.8 um short of a
-    via cover that is itself 2.15 um from the landing, legal copper. Cut back
+    via cover that is itself 2.15 um from the landing, legal metal. Cut back
     by the cover's box grown by the space, the patch becomes an L that still
     closes the wedge."""
     u = lambda v: _um(gen, v)  # noqa: E731
@@ -353,8 +353,8 @@ def test_the_cut_uses_the_space_rule_not_the_heal_margin(gen):
 def test_patches_of_one_pass_keep_the_space_between_them(gen):
     """Two pads 2.5 um apart, each with a slot near the facing edge. Each
     patch spills 0.5 um past its own pad and keeps the space from the other
-    pad, but cut only against the drawn copper the two would end 1.5 um
-    apart. Each patch placed joins the copper the next one is cut against."""
+    pad, but cut only against the drawn metal the two would end 1.5 um
+    apart. Each patch placed joins the metal the next one is cut against."""
     u = lambda v: _um(gen, v)  # noqa: E731
     def slotted(x0, slot_x):
         body = db.Region(db.Box(u(x0), 0, u(x0 + 20), u(20)))
@@ -374,7 +374,7 @@ def test_patches_of_one_pass_keep_the_space_between_them(gen):
 def test_a_patch_that_would_join_two_nets_is_dropped(gen, capsys):
     """Two pads at the minimum space, each with a slot opening toward the
     other. Their patch boxes fuse into one that carries notch edges of both
-    pads, so neither counts as other copper and the cut removes nothing.
+    pads, so neither counts as other metal and the cut removes nothing.
     Placed, that box would weld the two nets; it is dropped instead, and the
     notches it would have closed are reported."""
     u = lambda v: _um(gen, v)  # noqa: E731
@@ -394,7 +394,7 @@ def test_a_patch_that_would_join_two_nets_is_dropped(gen, capsys):
 def test_a_patch_owns_what_it_covers_not_what_its_bbox_covers(gen):
     """A's L-shaped slot and its straight slot give two patch boxes that
     overlap into one patch, and the bbox of that patch spans B's slot
-    without reaching it. B is still other copper: counted as owned, it would
+    without reaching it. B is still other metal: counted as owned, it would
     give the patch a second owner and get it rejected, or, without that
     rule, not cut it, leaving it 1 um short of B. One pass, because in a
     second one B's slot is already closed and the patch has one owner

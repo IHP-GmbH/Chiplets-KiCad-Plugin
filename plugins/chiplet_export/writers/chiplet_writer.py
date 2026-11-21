@@ -502,7 +502,7 @@ def write_nofill_regions_json(board, output_path):
     drawn on the NOFILL_LAYER_ROLES layers into a sidecar JSON consumed by
     hyp_to_gds.py --nofill-regions. Coordinates are micrometres with Y negated,
     matching write_io_pads_json. The sidecar (not the .hyp) is the transport:
-    the .hyp carries only net-attached copper, so a keep-out could not ride it.
+    the .hyp carries only net-attached metal, so a keep-out could not ride it.
 
     Returns the number of regions written (0 -> nothing written, no file).
     """

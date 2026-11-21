@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """A trace that bends off the 45 degree grid, or runs into a curve, keeps its
-outline: no copper past the edge, none missing inside it.
+outline: no metal past the edge, none missing inside it.
 
 Two ways a routed trace came out of the GDS with ragged corners, each pinned
-by a geometric check on the drawn copper, not by a picture:
+by a geometric check on the drawn metal, not by a picture:
 
 - A bend whose runs are neither orthogonal nor exactly diagonal (any-angle
   routing, and every vertex of a discretized arc) was closed with the square
@@ -77,7 +77,7 @@ def _past_ends(points):
 
 
 def _farthest_copper(gen, points):
-    """How far from the centreline the drawn copper reaches, in um. The
+    """How far from the centreline the drawn metal reaches, in um. The
     square ends reach w/2 along the run past each endpoint, so the distance
     is taken to the centreline run on by that much."""
     dbu = gen.layout.dbu
@@ -121,7 +121,7 @@ ANY_ANGLE_BENDS = [
 def test_an_any_angle_bend_stays_inside_its_mitre(gen, points):
     reach = _farthest_copper(gen, points)
     assert reach <= _mitre(_turn(*points)) + GRID_SLACK, (
-        "copper %.3f um from the centreline at a bend whose flanks meet at "
+        "metal %.3f um from the centreline at a bend whose flanks meet at "
         "%.3f um" % (reach, _mitre(_turn(*points))))
 
 
@@ -142,7 +142,7 @@ def test_a_curve_has_no_sawtooth(gen, start_deg):
 def test_an_any_angle_bend_is_closed_on_the_outside(gen, points):
     """The negative control for the mitre: removing the square must not open
     the corner. The point just inside the nominal edge, on the outer side of
-    the bisector, is copper."""
+    the bisector, is metal."""
     a, p, b = points
     d1 = math.atan2(p[1] - a[1], p[0] - a[0])
     d2 = math.atan2(b[1] - p[1], b[0] - p[0])
@@ -218,7 +218,7 @@ def test_a_curve_and_its_leads_are_one_trace(gen, name):
 
 @pytest.mark.parametrize("name", sorted(ROUTES))
 def test_a_curve_meets_its_leads_without_a_notch(gen, name):
-    """Copper 1.9 um off the centreline, within the nominal 2 um, on both
+    """Metal 1.9 um off the centreline, within the nominal 2 um, on both
     sides of each joint and 0.2 um along the lead either way of it."""
     route = ROUTES[name]
     region = _copper(gen, gen._connect_traces_to_paths(_route(**route)))
@@ -234,5 +234,5 @@ def test_a_curve_meets_its_leads_without_a_notch(gen, name):
                 y = jy + side * 1.9 * ux + k * 0.01 * uy
                 if not _covers(gen, region, x, y):
                     missing.append((round(x, 3), round(y, 3)))
-    assert not missing, "no copper at %d points inside the nominal width, e.g. %s" % (
+    assert not missing, "no metal at %d points inside the nominal width, e.g. %s" % (
         len(missing), missing[:3])
