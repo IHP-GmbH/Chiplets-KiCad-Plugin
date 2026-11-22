@@ -30,9 +30,9 @@ that is kept and never rebased, squashed or deleted; never the head of a branch 
 because a pin has to name a commit that survives whatever the merge does.
 
 **`vendor/chiplet_format_io/__init__.py`**
-from `reference/python/chiplet_format_io/__init__.py` at commit `c1a5597`,
-sha256 `146400623c1b0aeedf956778d37a40a86a6fc7de3d1773dff7f4b0cd2506c14e`,
-reader release 1.26.0.
+from `reference/python/chiplet_format_io/__init__.py` at commit `c2f1f3a`,
+sha256 `aa23f163c5687762e2d9aabc8b6113447c610c179d55b657421724de8563abc8`,
+reader release 1.27.0.
 Gated by `tests/test_vendored_copies.py`. `vendor/chiplet_format_io.SOURCE` states the
 same pin in the format gds_to_kicad's copy uses, and the gate checks it too.
 Its license is the repository's `LICENSES/Apache-2.0.txt`, the bytes of upstream's
@@ -41,7 +41,7 @@ it. Not gated: re-copy it only if upstream changes it. It sits outside the packa
 because adk-tools' `ci/check_vendored_reader.py` holds every file under a copy to a file of
 the reference, and the reference directory carries no license.
 
-What this copy holds the plugin to, at 1.26.0:
+What this copy holds the plugin to, at 1.27.0:
 
 - A document of format `1.5` or below reads without the newer-minor warning
   (`ACCEPTED_FORMAT_VERSIONS`). The assembly stamp `SUPPORTED_FORMAT_VERSION` is `1.0`.
@@ -67,6 +67,7 @@ line-break and grammar oracle, so that is the frontier it covers.
 
 | date | move | what changed for this plugin |
 |---|---|---|
+| 2026-11-22 | 1.26.0 to 1.27.0, the version 2 content form of a die's build record and contract (`die_content`) | Release number only. The change is in `die_content`, which this plugin does not vendor. Oracle bytes unchanged. |
 | 2026-11-20 | 1.24.0 to 1.26.0, a method's pad parameters under their interconnect methods 1.2 names (`technology_package.method_fab_params`), and `die_content`, the content form of a die's build record and contract | Release number only. Both changes are in modules this plugin does not vendor; the plugin applies the pad parameter rule in `carrier_profile.method_fab_params`. Oracle bytes unchanged. |
 | 2026-11-20 | 1.23.0 to 1.24.0, the pin list's derived `type` (role and direction) | Release number only. The change is in `pins` and `technology_package`, which this plugin does not vendor. Oracle bytes unchanged. |
 | 2026-11-20 | 1.22.0 to 1.23.0, the merge of the routed-geometry schema and reader helper into dev | Release number only. Adds `routed_geometry` (the routed-geometry reader helper, which needs `die_contract`, the schema file and `jsonschema`); this plugin does not vendor it, and reads the routed geometry with its own reader through the shared version policy. Oracle bytes unchanged. |
@@ -94,7 +95,7 @@ line-break and grammar oracle, so that is the frontier it covers.
 | 2026-09-05 | 1.4.0 to 1.5.0 | Additive: `split_top_level_keys` and `TopLevelKeys`. |
 
 **`tests/fixtures/top_level_blocks_cases.json`**
-from `conformance/fixtures/top_level_blocks_cases.json` at commit `c1a5597`,
+from `conformance/fixtures/top_level_blocks_cases.json` at commit `c2f1f3a`,
 sha256 `45c37f47f142d88c63dfd3056a3dceba07afe6f2035d25243b7f87f2c37bccd0`,
 oracle version 5. Its commit is the reader's pin.
 Gated by `tests/test_top_level_block_grammar.py`
