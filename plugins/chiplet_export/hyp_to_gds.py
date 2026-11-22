@@ -227,7 +227,7 @@ def chiplet_top_level_key_parity_error(chiplet_path: str) -> Optional[str]:
 # for any round width), which is why traces are emitted fractured, one
 # on-grid quad per segment, instead of as one path polygon. Both angle and
 # offgrid rules read the raw, as-drawn polygons, so each quad is judged on
-# its own and the merged copper is unaffected.
+# its own and the merged metal is unaffected.
 MANUFACTURING_GRID_NM = 5
 
 #: The routed path's line for an io pad the grid snap moved. The wording is
@@ -408,11 +408,11 @@ def free_ends(traces: List[ChainedTrace],
     An end is not free when another of these traces runs through it: one
     wider, or one as wide that passes the end point rather than ending on
     it. That trace's centreline runs through the point at least as wide, so
-    the board's round cap there is already its copper, and the end is drawn
+    the board's round cap there is already its metal, and the end is drawn
     as it is, without the w/2 square end. Extending it would only push square
-    copper out of the corner it lands in, and since two traces snapped from
+    metal out of the corner it lands in, and since two traces snapped from
     different starts can reach the same board point a grid step apart, the
-    edges of that copper would cross the other trace's flank off the grid.
+    edges of that metal would cross the other trace's flank off the grid.
 
     Two ends of the same width meeting each other stay free, as do the two
     ends of a closed loop: nothing passes through those points, so the
@@ -1129,7 +1129,7 @@ class GDSGenerator:
         # everything they instantiate. A third-party die is delivered as-is,
         # so the grid pass leaves both its shapes and its placement alone.
         self._foreign_cells: set = set()
-        # Trace copper per (layer, net), filled by add_segments_as_paths.
+        # Trace metal per (layer, net), filled by add_segments_as_paths.
         self.trace_copper: Dict[Tuple[str, str], List[db.Polygon]] = {}
         # Trace segments that are neither orthogonal nor 45 degrees; they
         # cannot be drawn legally on this process and the count drives a
@@ -1363,7 +1363,7 @@ class GDSGenerator:
         Net is part of the key so path-stitching (_connect_traces_to_paths)
         only chains elements of the same net. Without it, two distinct nets
         that happen to share an endpoint -- or merely touch at a T-junction --
-        would be welded into one path, corrupting the drawn copper topology.
+        would be welded into one path, corrupting the drawn metal topology.
         """
         groups: Dict[Tuple[str, str, float], List] = {}
 
@@ -1645,17 +1645,17 @@ class GDSGenerator:
 
     def _corner_patch(self, a: db.Point, p: db.Point, b: db.Point,
                       half: int, diag: int) -> db.Polygon:
-        """The copper that closes the corner at an interior vertex p.
+        """The metal that closes the corner at an interior vertex p.
 
         The two segment quads leave exactly one wedge open there, on the
         outside of the turn. The square of side 2*half centred on p closes it,
         which is why it was the first thing drawn, but at a 45 degree bend the
         square reaches the corner of its own bounding box while the two flanks
-        meet earlier, so it leaves (2 - sqrt(2)) * width / 2 of copper sticking
+        meet earlier, so it leaves (2 - sqrt(2)) * width / 2 of metal sticking
         out past the flank: 1.17 um on a 4 um trace, a tip 2.83 um from the
         vertex where the flanks meet at 2.17 and KiCad's round join is at 2.00.
         That overshoot trips no rule, which is how it survived, but it is real
-        copper pointing at whatever the trace passes, and it is not what the
+        metal pointing at whatever the trace passes, and it is not what the
         designer drew.
 
         So the patch is the square with the overshoot cut off along the flanks,
@@ -1666,7 +1666,7 @@ class GDSGenerator:
         - it has no acute corner. The wedge's own corner at p is the turn
           angle, 45 degrees at a 45 degree bend, and 3_2_angle.drc checks the
           RAW polygons, so a wedge drawn on its own is a violation even though
-          the copper around it is a straight trace. Cutting the square keeps
+          the metal around it is a straight trace. Cutting the square keeps
           every corner at 90 or 135 degrees;
         - the cut lands ON the flanks instead of crossing them, so it adds no
           intersection vertex to the merged outline. That is the difference
@@ -1744,7 +1744,7 @@ class GDSGenerator:
 
         One quad per segment plus one patch per interior corner, with each
         free end extended by w/2 (square ends; see free_ends for the ends
-        that are not free). The union is the copper a mitered
+        that are not free). The union is the metal a mitered
         path with square ends would have drawn; the difference is that
         every drawn vertex is on the manufacturing grid and every drawn edge is
         0, 45 or 90 degrees. Snapping the vertices of a single path outline
@@ -1752,7 +1752,7 @@ class GDSGenerator:
         width/(2*sqrt(2)), so either the vertex leaves the grid or the edge
         leaves 45 degrees. The offgrid and angle rules read the raw, as-drawn
         polygons, so fracturing satisfies them without changing the merged
-        copper that the width, space and enclosure rules see.
+        metal that the width, space and enclosure rules see.
         """
         dbu = self.layout.dbu
         raw = [(int(round(x / dbu)), int(round(y / dbu))) for x, y in points]
@@ -1795,7 +1795,7 @@ class GDSGenerator:
         diag = int(math.ceil(half / math.sqrt(2.0) / g)) * g
 
         # Square ends: each free terminal vertex moves out by half along its
-        # run, so each end carries w/2 of copper past its endpoint, as the
+        # run, so each end carries w/2 of metal past its endpoint, as the
         # board (KiCad's round cap) and a reserved rectangle put it. Only the
         # first and last quad grow; the corner patches are drawn from the
         # interior vertices as before. Both moves read the original points,
@@ -1815,7 +1815,7 @@ class GDSGenerator:
                 # Neither orthogonal nor 45: a discretized arc, or a board
                 # drawn off the 45 grid. The angle rule will report it; draw
                 # the nearest on-grid quad rather than silently reshaping the
-                # copper to make a violation disappear.
+                # metal to make a violation disappear.
                 self._odd_angle_segments += 1
             polys.append(db.Polygon([
                 db.Point(a.x + ox, a.y + oy),
@@ -1825,7 +1825,7 @@ class GDSGenerator:
 
         # Corner patches: each closes the wedge the two neighbouring quads
         # leave open at an interior vertex, cut back to the flanks so the
-        # copper stops where the trace does. See _corner_patch.
+        # metal stops where the trace does. See _corner_patch.
         for a, p, b in zip(pts, pts[1:], pts[2:]):
             polys.append(self._corner_patch(a, p, b, half, diag))
         return polys
@@ -1835,7 +1835,7 @@ class GDSGenerator:
                  ) -> List[db.Polygon]:
         """
         Add a trace. Points are in micrometers, width is in micrometers.
-        Returns the copper drawn, as polygons in database units; empty when
+        Returns the metal drawn, as polygons in database units; empty when
         nothing was drawn.
 
         With the manufacturing grid active (the default) the trace is drawn as
@@ -1869,7 +1869,7 @@ class GDSGenerator:
     def add_segments_as_paths(self, segments: List[TraceSegment], arcs: List[TraceArc] = None) -> int:
         """
         Convert segments and arcs to continuous paths and add to layout.
-        Returns number of paths created. The copper drawn is kept per
+        Returns number of paths created. The metal drawn is kept per
         (layer, net) in ``trace_copper``, for refuse_touching_nets.
         """
         if arcs is None:
@@ -2646,7 +2646,7 @@ class GDSGenerator:
     # Board outline layer: prBoundary.drawing in the interposer PDK layer
     # table (same convention as SG13G2). Drawn from the .hyp BOARD perimeter
     # (= KiCad Edge.Cuts); read back by update_chiplet_file to size the
-    # interposer component from the fab outline instead of the drawn-copper
+    # interposer component from the fab outline instead of the drawn-metal
     # extent. A future assembly containment rule (chiplet inside interposer)
     # reads the same layer.
     # 235/0 since the 2026-07-16 IntM4TM2 layer-map parity migration
@@ -3718,7 +3718,7 @@ class GDSGenerator:
     # Patch edges are axis-parallel, and that is a constraint, not a
     # default. A 45 degree chamfer on them is legal in isolation (on grid,
     # 0/45/90, no acute corner) and was measured to close the same notches
-    # with less copper, but it makes the MERGED copper acquire vertices off
+    # with less metal, but it makes the MERGED metal acquire vertices off
     # the 5 nm grid where a chamfer meets the diagonal traces, and the deck
     # reports those: 4 offgrid and 4 Angle45 markers on the reference board,
     # in flat, deep and tiling alike, none of them at a drawn vertex. An
@@ -3728,18 +3728,18 @@ class GDSGenerator:
     def _heal_notches(self) -> int:
         """Fill sub-minimum-space notches in the drawn metals.
 
-        A notch is a gap inside a single piece of copper; the gap between two
+        A notch is a gap inside a single piece of metal; the gap between two
         separate pieces is a space violation and is deliberately left alone.
         That distinction is why this uses notch_check rather than the more
         obvious oversize/undersize closing, which would bridge any two nets
-        sitting at exactly the minimum space, legal copper, into a short.
+        sitting at exactly the minimum space, legal metal, into a short.
 
         Finding the gap inside one polygon does not make the fill safe,
-        though. A patch over-fills its wedge (below), so it can reach copper
+        though. A patch over-fills its wedge (below), so it can reach metal
         the notch does not belong to: on a mixed-die board one box ran 4.19 um
         past a landing and stopped 0.8 um from another net's via cover, and a
         cover 2.04 um away would have been welded into a short no deck sees.
-        So every patch is cut back to keep the layer's space from copper it
+        So every patch is cut back to keep the layer's space from metal it
         does not own (_clear_other_copper), and a notch the cut leaves open
         stays open and is reported.
 
@@ -3785,7 +3785,7 @@ class GDSGenerator:
                 if (boxes - merged).is_empty():
                     # Either nothing is left to close, or what is left is
                     # inside the keepout, or no patch can close it without
-                    # crowding other copper. All three mean: stop, do not spin.
+                    # crowding other metal. All three mean: stop, do not spin.
                     break
                 if heal_cell is None:
                     heal_cell = self.layout.create_cell(
@@ -3826,25 +3826,25 @@ class GDSGenerator:
 
     def _clear_other_copper(self, patches, copper, notches,
                             space: int) -> 'db.Region':
-        """Cut each patch back so it keeps `space` from copper it does not own.
+        """Cut each patch back so it keeps `space` from metal it does not own.
 
         A patch owns the merged polygons carrying the notch edges it was made
         from, which are the pairs whose bbox touches the patch itself; its
         bbox is not enough, since a patch merged from several boxes can span
         another net's notch without reaching it. Every other polygon is
         someone else's, even one the uncut box already touches. Each piece of
-        that copper within `space` of the patch cuts it by the piece's bbox
+        that metal within `space` of the patch cuts it by the piece's bbox
         grown by `space`, snapped outward, so the patch stays rectilinear and
         on grid and only ever shrinks. Whole-polygon bboxes would cut far more
         than needed and leave notches open that a piece-wise cut closes.
 
-        Owned copper is never cut against, so a patch with two owners is
+        Owned metal is never cut against, so a patch with two owners is
         rejected before the cut: a cut against a third polygon could leave it
         touching one owner while nothing checks its space to the other. A
         patch still touching two polygons after the cut is dropped as well.
         Either way the notch stays open and the recount reports it.
 
-        Patches are taken one at a time, and each one kept joins the copper
+        Patches are taken one at a time, and each one kept joins the metal
         the next is cut against, so patches placed in the same pass keep the
         space between each other as well.
         """
@@ -3872,7 +3872,7 @@ class GDSGenerator:
             # narrower than the width rule; opening the patch by half the
             # space removes it, since every healed layer's width rule is at
             # or under its space rule. That reduces width violations, it
-            # does not rule them out: the merged copper is not checked.
+            # does not rule them out: the merged metal is not checked.
             kept = (db.Region(patch) - cut).sized(-(space // 2)).sized(space // 2)
             if near.interacting(kept).count() <= 1:
                 placed += kept
@@ -4406,7 +4406,7 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                         dim_w, dim_h = width, height
                         dim_src = "drawn-geometry bbox"
                         # Loud degradation signal. Without the fab outline the
-                        # interposer is sized from whatever copper happens to be
+                        # interposer is sized from whatever metal happens to be
                         # drawn, and every die/pad downstream is anchored on that
                         # size and center -- so a missing outline silently shifts
                         # the whole assembly. Warn (stderr), and if the outline is
@@ -4454,7 +4454,7 @@ def update_chiplet_file(chiplet_path: str, interposer_gds_path: str,
                     # bbox_center the studio places the MESH bbox center
                     # (all GDS layers, outline included) at `position`.
                     # When the outline contains all drawn geometry -- the
-                    # normal case -- both centers coincide; when copper
+                    # normal case -- both centers coincide; when metal
                     # leaks off-board they don't, and keeping the mesh
                     # contract preserves die/pillar registry (the loud
                     # off-board warning fires in convert_hyp_to_gds).
@@ -6250,12 +6250,12 @@ def refuse_touching_nets(copper: Dict[Tuple[str, str], List[db.Polygon]],
                          dbu: float) -> None:
     """Refuse two nets' traces that touch on one layer.
 
-    ``copper`` is the trace copper per (layer, net), in database units of
-    ``dbu`` um. Touching copper merges into one polygon, a short no space rule
+    ``copper`` is the trace metal per (layer, net), in database units of
+    ``dbu`` um. Touching metal merges into one polygon, a short no space rule
     reports. On a board that passes its own clearance check the touch comes
     from a square end: KiCad checks clearance to its round cap, and the square
     reaches up to (sqrt(2) - 1) * w/2 further at its corners. Pads, vias and
-    die copper are not part of this check; an LVS on the GDS sees those.
+    die metal are not part of this check; an LVS on the GDS sees those.
 
     Cost: one region test per pair of nets on a layer, so the work grows as
     nets squared per layer; nothing at tens of nets.
@@ -6685,7 +6685,7 @@ def convert_hyp_to_gds(
 
     # Board outline (KiCad Edge.Cuts -> .hyp BOARD perimeter) on prBoundary.
     # Downstream, update_chiplet_file sizes the interposer from this layer
-    # so viewers show the fab outline rather than the drawn-copper extent.
+    # so viewers show the fab outline rather than the drawn-metal extent.
     if parser.perimeter_segments:
         n_loops = generator.add_board_outline(parser.perimeter_segments)
         if n_loops:

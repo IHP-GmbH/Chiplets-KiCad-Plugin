@@ -1122,7 +1122,7 @@ def test_an_unusable_method_list_is_a_typed_refusal(monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# Board outline -> prBoundary 235/0 (interposer extent = Edge.Cuts, not copper)
+# Board outline -> prBoundary 235/0 (interposer extent = Edge.Cuts, not metal)
 # ---------------------------------------------------------------------------
 
 def _outline_dbbox(gds_path):
@@ -1184,7 +1184,7 @@ def test_open_outline_warns_and_draws_nothing(tmp_path, monkeypatch, capsys):
 
 
 def test_offboard_geometry_warns(tmp_path, monkeypatch, capsys):
-    """Copper sticking out of the board outline is reported loudly (the
+    """Metal sticking out of the board outline is reported loudly (the
     interposer keeps the outline size; the leak is a design error)."""
     use_sibling_checkouts("INTERPOSER_PDK_ROOT")
     leaky = MIXED_HYP.replace("X2=0.001900", "X2=0.002500")
@@ -1219,7 +1219,7 @@ def test_update_chiplet_prefers_outline_dims_keeps_full_bbox_position(
         tmp_path):
     """Dimensions come from the outline (the fab extent); position stays the
     full-bbox center (anchor: bbox_center mesh contract). Distinguishable
-    only when copper leaks outside the outline."""
+    only when metal leaks outside the outline."""
     import yaml
     from klayout import db
     gds = tmp_path / "i.gds"
@@ -1235,7 +1235,7 @@ def test_update_chiplet_prefers_outline_dims_keeps_full_bbox_position(
     assert h.update_chiplet_file(str(p), str(gds)) is True  # bbox from file
     data = yaml.safe_load(p.read_text())
     ip = next(c for c in data["components"] if c["id"] == "interposer")
-    assert ip["dimensions"]["width"] == 2000.0   # outline, not copper
+    assert ip["dimensions"]["width"] == 2000.0   # outline, not metal
     assert ip["dimensions"]["height"] == 1000.0
     assert ip["position"]["x"] == 1500.0         # full-bbox center
     assert ip["position"]["y"] == 500.0
@@ -1265,7 +1265,7 @@ def test_update_chiplet_falls_back_to_full_bbox_without_outline(tmp_path):
 
 def test_update_chiplet_missing_outline_warns_loudly(tmp_path, capsys):
     """A GDS without any prBoundary must not degrade silently: the consumer
-    warns (stderr) that dimensions came from copper, not the fab outline, and
+    warns (stderr) that dimensions came from metal, not the fab outline, and
     that placement can shift. With no legacy outline either, it points at
     Edge.Cuts."""
     from klayout import db

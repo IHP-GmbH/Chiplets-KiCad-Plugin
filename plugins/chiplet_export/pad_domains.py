@@ -36,7 +36,7 @@ POSITION_TOL_UM = 0.002  # 1 nm export/API quantization; not a design tolerance.
 
 
 class PadDomainError(ValueError):
-    """A marked footprint cannot be faithfully exported as carrier copper."""
+    """A marked footprint cannot be faithfully exported as carrier metal."""
 
 
 def _object(value, label):
